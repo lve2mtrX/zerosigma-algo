@@ -18,6 +18,7 @@ from src.providers.quotes.types import (
     OptionQuote,
     OptionType,
     QuoteProviderStatus,
+    QuoteRequest,
     SpotQuote,
     SpreadQuote,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "OptionType",
     "QuoteProvider",
     "QuoteProviderStatus",
+    "QuoteRequest",
     "Right",
     "SpotQuote",
     "SpreadQuote",
@@ -56,11 +58,18 @@ class QuoteProvider(Protocol):
         self,
         symbol: str,
         expiry: str | None = None,
+        request: QuoteRequest | None = None,
     ) -> OptionChainSnapshot | None:
         """Return the full chain for `expiry`. None if not available.
 
         Implementations should treat `expiry=None` as "use the nearest expiry
         the provider knows about" — typically today's 0DTE for SPX.
+
+        `request` is an optional alignment hint. Real broker providers can
+        ignore it (they have real chain data); synthesis providers (mock)
+        use `spot_hint` and `required_strikes` to align with whatever
+        StructureProvider context drove the scan. See
+        `src.providers.quotes.types.QuoteRequest`.
         """
         ...
 

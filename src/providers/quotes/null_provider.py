@@ -12,6 +12,7 @@ from src.providers.quotes.types import (
     OptionChainSnapshot,
     OptionQuote,
     QuoteProviderStatus,
+    QuoteRequest,
     SpotQuote,
 )
 
@@ -38,6 +39,7 @@ class NullQuoteProvider:
         self,
         symbol: str,
         expiry: str | None = None,
+        request: QuoteRequest | None = None,
     ) -> OptionChainSnapshot | None:
         return None
 

@@ -52,6 +52,52 @@ FAKE_LOGIN_RESPONSE = {
 }
 
 
+# Phase 2.6: the AUTHORITATIVE ZS response shape (per Dashboard worker_watchlist
+# + zerosigma-api app/api/v1/market.py). spot is FLAT (key = "spot"), exposures
+# use `total_*_1pct` names + nested wings/gamma sub-dicts.
+REAL_ZS_SNAPSHOT = {
+    "symbol": "SPX",
+    "timestamp": "2026-06-01T14:30:00",
+    "spot": {
+        "symbol": "SPX",
+        "spot": 7574.55,           # ← the actual price field
+        "open": 7570.0, "high": 7580.5, "low": 7560.0,
+        "close": 7572.0, "prev_close": 7565.0,
+        "chg": 9.55, "chg_pct": 0.126,
+        "bid": 7574.0, "ask": 7575.0,
+    },
+    "exposures": {
+        "symbol": "SPX",
+        "expiry": "2026-06-01", "dte": 0, "spot": 7574.55,
+        "strike_count": 120, "atm_strike": 7575,
+        "max_call_oi_strike": 7600,
+        "max_put_oi_strike":  7550,
+        "max_call_vol_strike": 7580,
+        "max_put_vol_strike":  7560,
+        "total_gex_1pct":     1234.56,
+        "total_raw_gex_1pct": 1200.0,
+        "total_da_gex_1pct":  1150.0,
+        "total_dex_1pct":     234.5,
+        "total_vex_1vol":     -45.6,
+        "total_cex":          78.9,
+        "wings": {
+            "call_floor":   7560.0,
+            "put_ceiling":  7600.0,
+            "midline":      7580.0,
+            "spot_vs_wings": "Inside",
+        },
+        "gamma": {
+            "regime":            "Positive",   # capitalized in ZS
+            "flip":              7570.0,
+            "cluster_primary":   7575,
+        },
+        "flow": {"call_pct": 55.2, "put_pct": 44.8,
+                 "dominance": "CALL", "strength": "Moderate"},
+    },
+    "chain": {"calls": {}, "puts": {}, "rows": []},
+}
+
+
 def _mock_transport(handler) -> httpx.MockTransport:  # type: ignore[no-untyped-def]
     return httpx.MockTransport(handler)
 
@@ -259,30 +305,132 @@ def test_status_never_contains_secrets():
 # factory + scanner integration: default = stub; explicit = zerosigma_api
 # ──────────────────────────────────────────────────────────────────────
 
-def test_factory_default_is_stub():
+def _clear_zs_env(monkeypatch):
+    """Strip every ZS_API_* / ZS_STRUCTURE_PROVIDER env var AND neutralize
+    `.env` reloading so factory tests don't depend on the developer's
+    local .env file."""
+    for v in (
+        "ZS_STRUCTURE_PROVIDER",
+        "ZS_API_BASE_URL", "ZS_API_AUTH_MODE",
+        "ZS_API_TOKEN", "ZS_API_USERNAME", "ZS_API_PASSWORD", "ZS_API_SERVICE_KEY",
+        "ZS_API_TIMEOUT_SECONDS", "ZS_API_VERIFY_SSL", "ZS_API_MAX_RETRIES",
+        "ZS_API_ENABLE_EXPOSURE_SERIES", "ZS_API_ENABLE_DDOI",
+    ):
+        monkeypatch.delenv(v, raising=False)
+    # `load_config` calls `load_dotenv(.env)` which would re-populate from
+    # the developer's local file. No-op it for these unit tests.
+    monkeypatch.setattr("src.utils.config.load_dotenv", lambda *a, **k: False)
+
+
+def test_factory_default_is_stub(monkeypatch):
+    _clear_zs_env(monkeypatch)
     cfg = load_config(REPO_ROOT_PATH)
     provider, name = build_structure_provider(cfg)
     assert name == "stub"
-    # actual class name from the resolved instance
     assert provider.__class__.__name__ == "StubStructureProvider"
 
 
-def test_factory_can_select_zerosigma_api_explicitly():
+def test_factory_can_select_zerosigma_api_explicitly(monkeypatch):
+    _clear_zs_env(monkeypatch)
     cfg = load_config(REPO_ROOT_PATH)
     provider, name = build_structure_provider(cfg, override="zerosigma_api")
-    # We don't have creds in CI/.env, but the factory still returns the
-    # instance (status() will report unconfigured). The key invariant: the
-    # factory doesn't fall back to stub on instantiation alone.
+    # Without creds the factory still returns the instance (status() will
+    # report unconfigured). The key invariant: the factory doesn't fall
+    # back to stub on instantiation alone.
     assert name == "zerosigma_api"
     assert provider.__class__.__name__ == "ZeroSigmaApiStructureProvider"
     assert provider.status()["configured"] is False
 
 
-def test_factory_unknown_falls_back_to_stub():
+def test_factory_unknown_falls_back_to_stub(monkeypatch):
+    _clear_zs_env(monkeypatch)
     cfg = load_config(REPO_ROOT_PATH)
     provider, name = build_structure_provider(cfg, override="this_does_not_exist")
     assert name == "stub"
     assert provider.__class__.__name__ == "StubStructureProvider"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Phase 2.6: real ZS payload shape mapping (spot.spot, total_*_1pct, wings.*)
+# ──────────────────────────────────────────────────────────────────────
+
+def test_real_zs_shape_maps_spot_and_exposures_correctly():
+    """The smoke output had spot=0.0 and exposure totals = None because the
+    mapper read snapshot['spot']['price'] / ['total_gex_bn']. The real shape
+    is snapshot['spot']['spot'] / ['total_gex_1pct']. After Phase 2.6 the
+    mapper must read both shapes."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/v1/market/snapshot":
+            return httpx.Response(200, json=REAL_ZS_SNAPSHOT)
+        return httpx.Response(404)
+
+    p = ZeroSigmaApiStructureProvider(
+        base_url="https://api.test.example",
+        auth_mode="public_only",
+        symbol="SPX",
+        client_factory=_client_factory(_mock_transport(handler)),
+    )
+    snap = p.get_snapshot("SPX")
+    assert snap.spot == 7574.55                       # was 0.0 before fix
+    assert snap.expiry == "2026-06-01"
+    assert snap.dte == 0
+    e = snap.exposures
+    assert e.total_gex_bn == 1234.56                   # was None before fix
+    assert e.total_vex_bn == -45.6                     # was None
+    assert e.da_gex_signed == 1150.0                   # was None
+    assert e.gamma_regime == "positive"                # case-normalized from "Positive"
+    assert e.gamma_flip == 7570.0                      # new — populated from public payload
+    assert e.call_wall == 7600.0                       # new — max_call_oi_strike
+    assert e.put_wall == 7550.0                        # new — max_put_oi_strike
+    # Single-level wings populate the 2K-tier strikes (5K tier stays None
+    # without /exposure/series).
+    assert e.put_ceiling_2k == 7600.0
+    assert e.call_floor_2k  == 7560.0
+    assert e.put_ceiling_5k is None
+    assert e.call_floor_5k  is None
+    # MaxVol falls back to max_call_vol_strike when no series available.
+    assert e.maxvol == 7580.0
+    # Missing fields should list only what's actually still None.
+    missing = (snap.raw or {}).get("missing_fields") or []
+    assert "put_ceiling_5k" in missing
+    assert "call_floor_5k"  in missing
+    assert "ddoi_pin"       in missing
+    # These three SHOULD NOT be in missing anymore (they were before the fix):
+    assert "spot.spot"  not in missing
+    assert "gamma_flip" not in missing
+    assert "call_wall"  not in missing
+
+
+def test_real_zs_shape_with_volume_series_populates_5k_tier_too():
+    """When /exposure/series IS available, 5K-tier values come from the
+    per-strike volume series — same code path as Phase 2."""
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/api/v1/market/snapshot":
+            return httpx.Response(200, json=REAL_ZS_SNAPSHOT)
+        if req.url.path == "/api/v1/exposure/series":
+            return httpx.Response(200, json=FAKE_VOLUME_SERIES_SPLIT)
+        return httpx.Response(404)
+
+    p = ZeroSigmaApiStructureProvider(
+        base_url="https://api.test.example",
+        auth_mode="bearer", token="fake",
+        enable_exposure_series=True,
+        symbol="SPX",
+        client_factory=_client_factory(_mock_transport(handler)),
+    )
+    snap = p.get_snapshot("SPX")
+    e = snap.exposures
+    # 5K-tier from /exposure/series (uses the OLD-shape fake series volumes
+    # so we can re-use the existing fixture); 2K-tier ALSO from series — the
+    # series wins over wings when both are present, because per-strike is
+    # more authoritative.
+    assert e.put_ceiling_5k == 5810
+    assert e.call_floor_5k  == 5790
+    assert e.put_ceiling_2k == 5815
+    assert e.call_floor_2k  == 5785
+    # Spot + exposures still come from the (real-shape) snapshot.
+    assert snap.spot == 7574.55
+    assert e.total_gex_bn == 1234.56
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -428,10 +576,7 @@ def test_bearer_mode_still_attaches_authorization_on_exposure_series():
 def test_smoke_script_unconfigured_returns_zero_and_warns(capsys, monkeypatch):
     """When ZS_API_AUTH_MODE is none (default), the smoke script must NOT
     raise, must NOT exit nonzero, and must NOT print any traceback."""
-    # Force unconfigured: empty all ZS_API_* env vars.
-    for v in ("ZS_API_BASE_URL", "ZS_API_AUTH_MODE", "ZS_API_TOKEN",
-              "ZS_API_USERNAME", "ZS_API_PASSWORD", "ZS_API_SERVICE_KEY"):
-        monkeypatch.delenv(v, raising=False)
+    _clear_zs_env(monkeypatch)
     monkeypatch.setenv("ZS_API_AUTH_MODE", "none")
 
     monkeypatch.setattr(sys, "argv", ["scripts.smoke_zs_api"])

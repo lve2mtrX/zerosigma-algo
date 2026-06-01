@@ -44,6 +44,36 @@ class VerticalWingV1:
             "chain.quotes",   # bid/ask/mid + volume at the relevant strikes
         ]
 
+    def required_quote_strikes(
+        self,
+        structure,                              # type: ignore[no-untyped-def]
+        params: dict[str, Any],
+    ) -> list[float]:
+        """Anchor strikes + long-leg partners VW will look up in the chain."""
+        merged = {**self.default_parameters, **(params or {})}
+        threshold = float(merged.get("volume_threshold", 2000))
+        width = float(merged.get("spread_width", 5))
+        e = structure.exposures
+        # Pick 2K or 5K tier per the strategy's threshold (mirrors
+        # `_ceiling_for_threshold` / `_floor_for_threshold` in candidates.py).
+        if threshold >= 5000 and e.put_ceiling_5k is not None:
+            put_ceiling = e.put_ceiling_5k
+        else:
+            put_ceiling = e.put_ceiling_2k
+        if threshold >= 5000 and e.call_floor_5k is not None:
+            call_floor = e.call_floor_5k
+        else:
+            call_floor = e.call_floor_2k
+
+        strikes: list[float] = []
+        if put_ceiling is not None:
+            strikes.append(float(put_ceiling))
+            strikes.append(float(put_ceiling) + width)   # CALL_CREDIT long leg
+        if call_floor is not None:
+            strikes.append(float(call_floor))
+            strikes.append(float(call_floor) - width)    # PUT_CREDIT long leg
+        return strikes
+
     def generate_candidates(
         self,
         structure: StructureSnapshot,

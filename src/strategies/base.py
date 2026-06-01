@@ -70,6 +70,24 @@ class Strategy(Protocol):
 
     def required_data_fields(self) -> list[str]: ...
 
+    def required_quote_strikes(
+        self,
+        structure: StructureSnapshot,
+        params: dict[str, Any],
+    ) -> list[float]:
+        """Strikes the strategy needs quoted in the chain given this structure.
+
+        Used by the scanner to build a `QuoteRequest` so synthesis-based
+        QuoteProviders (the Phase 1.5 mock) can align their generated chain
+        with the structure's anchor levels. Real broker providers ignore
+        this hint — they have authoritative chain data.
+
+        Default contract: return an empty list (the scanner will skip the
+        hint). VW v1 returns the ceiling/floor anchors plus their long-leg
+        partners per spread_width.
+        """
+        ...
+
     def generate_candidates(
         self,
         structure: StructureSnapshot,

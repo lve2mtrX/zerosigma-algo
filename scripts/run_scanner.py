@@ -42,6 +42,7 @@ def main() -> int:
 
     from src.app.session_state import SessionConfig
     from src.providers.quotes.mock_provider import MockQuoteProvider
+    from src.providers.quotes.types import QuoteRequest
     from src.providers.structure.factory import build_structure_provider
     from src.reporting.decision_log import log_decision, log_decision_to_file
     from src.risk.filters import apply_filters
@@ -88,19 +89,39 @@ def main() -> int:
         structure_provider = StubStructureProvider()
         resolved_structure_name = "stub"
         structure = structure_provider.get_snapshot(symbol)
-    chain = quote_provider.get_option_chain(symbol, expiry=structure.expiry)
+    # Build a QuoteRequest from the structure so synthesis providers
+    # (the mock) center their chain on real ZS levels rather than the
+    # hardcoded 5800 default.
+    required_strikes = _collect_required_strikes(strategies, structure)
+    spot_hint, spot_hint_source = _pick_spot_hint(structure, required_strikes)
+    quote_request = QuoteRequest(
+        symbol=symbol,
+        expiry=structure.expiry,
+        spot_hint=spot_hint,
+        required_strikes=tuple(required_strikes),
+        spot_hint_source=spot_hint_source,
+    )
+    chain = quote_provider.get_option_chain(symbol, expiry=structure.expiry, request=quote_request)
     if chain is None:
         log.error("QuoteProvider returned no chain for %s — aborting tick.", symbol)
         return 3
     quote_provider.get_spot(symbol)  # heartbeat
     quote_status = quote_provider.status()
 
+    # Diagnostics: which required strikes did the chain actually contain?
+    chain_strikes = {q.strike for q in chain.quotes}
+    missing_required_quote_strikes = sorted(s for s in required_strikes if s not in chain_strikes)
+    chain_min = min(chain_strikes) if chain_strikes else None
+    chain_max = max(chain_strikes) if chain_strikes else None
+
     structure_missing = (structure.raw or {}).get("missing_fields") or []
     log.info(
         "scan tick: symbol=%s profile=%s strategies=%s structure=%s quotes=%s "
-        "missing_structure_fields=%d",
+        "missing_structure_fields=%d spot_hint=%.2f source=%s required=%d missing_quote_strikes=%d",
         symbol, profile.name, list(strategies.keys()),
         structure.source, chain.provider_name, len(structure_missing),
+        spot_hint or 0.0, spot_hint_source, len(required_strikes),
+        len(missing_required_quote_strikes),
     )
 
     output_root = cfg.output_dir
@@ -115,6 +136,15 @@ def main() -> int:
         for c in candidates:
             strat.score(c, structure, chain, params)
         decision = strat.select(candidates, params)
+
+        # Phase 2.6 — refine the NO_TRADE explanation when the generic
+        # `select()` couldn't see why zero candidates were generated.
+        decision = _refine_decision_explanation(
+            decision,
+            required_strikes=required_strikes,
+            missing_required_quote_strikes=missing_required_quote_strikes,
+            structure=structure,
+        )
 
         for c in candidates:
             ranked_rows.append(_candidate_row(sid, c, session, ts, decision.decision))
@@ -134,6 +164,13 @@ def main() -> int:
             "gamma_regime":       structure.exposures.gamma_regime,
             "structure_missing_fields": list(structure_missing),
             "structure_subscription_active": (structure.raw or {}).get("subscription_active"),
+            # Phase 2.6 — quote alignment audit fields
+            "required_strikes":      list(required_strikes),
+            "quote_chain_min_strike": chain_min,
+            "quote_chain_max_strike": chain_max,
+            "missing_required_quote_strikes": list(missing_required_quote_strikes),
+            "quote_spot_source":     spot_hint_source,
+            "quote_spot_hint":       spot_hint,
         }
 
         if not args.dry_run:
@@ -201,6 +238,86 @@ def _candidate_row(strategy_id: str, c, session, ts: datetime, decision_str: str
         "long_bid":  long_.get("bid"), "long_ask":  long_.get("ask"), "long_mid":  long_.get("mid"),
         "bid_ask_quality": round(c.meta.get("bid_ask_quality", 0.0), 3),
     }
+
+
+def _collect_required_strikes(strategies: dict, structure) -> list[float]:  # type: ignore[no-untyped-def]
+    """Union of every enabled strategy's `required_quote_strikes`."""
+    union: set[float] = set()
+    for strat in strategies.values():
+        if not hasattr(strat, "required_quote_strikes"):
+            continue
+        try:
+            strikes = strat.required_quote_strikes(structure, strat.default_parameters or {})
+        except Exception:                     # never fail the tick on a strategy bug
+            continue
+        for s in strikes or ():
+            if s is not None:
+                union.add(float(s))
+    return sorted(union)
+
+
+def _pick_spot_hint(structure, required_strikes: list[float]) -> tuple[float | None, str]:  # type: ignore[no-untyped-def]
+    """Choose spot_hint per the documented precedence:
+        structure.spot if > 0  →  structure.maxvol  →  midpoint(required)
+        →  None (= mock_default).
+    Returns (value, source_label).
+    """
+    s = getattr(structure, "spot", None)
+    if isinstance(s, (int, float)) and s > 0:
+        return (float(s), "structure_spot")
+    mv = structure.exposures.maxvol if structure.exposures else None
+    if mv is not None:
+        return (float(mv), "maxvol")
+    if required_strikes:
+        xs = sorted(required_strikes)
+        return (xs[len(xs) // 2], "structure_midpoint")
+    return (None, "mock_default")
+
+
+def _refine_decision_explanation(
+    decision,                                  # type: ignore[no-untyped-def]
+    *,
+    required_strikes: list[float],
+    missing_required_quote_strikes: list[float],
+    structure,                                 # type: ignore[no-untyped-def]
+):                                             # type: ignore[no-untyped-def]
+    """When `select()` says all-rejected but actually NOTHING was generated,
+    the cockpit / log should distinguish three causes:
+
+        no_structure_anchors         — ceiling/floor both None upstream
+        quote_chain_missing_legs     — anchors present but chain didn't quote them
+        all_candidates_rejected      — filters dropped real candidates
+    """
+    if decision.decision != "NO_TRADE":
+        return decision
+    if decision.all_candidates:
+        return decision  # something WAS generated; explanation is correct
+    # No candidates generated at all — refine.
+    e = structure.exposures
+    has_any_anchor = any([
+        e.put_ceiling_2k, e.put_ceiling_5k,
+        e.call_floor_2k, e.call_floor_5k,
+    ])
+    if not has_any_anchor:
+        decision.explanation = (
+            "NO_TRADE — no structure anchors. StructureProvider returned no "
+            "PUT_CEILING / CALL_FLOOR (likely an unauthenticated public-only "
+            "read with the single wings.* field missing, or a stale snapshot)."
+        )
+    elif missing_required_quote_strikes:
+        decision.explanation = (
+            f"NO_TRADE — quote chain missing required structure strikes "
+            f"{missing_required_quote_strikes}. "
+            f"Required={required_strikes}. The mock quote chain may need a "
+            f"spot_hint that aligns with live structure (see scanner logs)."
+        )
+    else:
+        decision.explanation = (
+            "NO_TRADE — anchors present and chain covers them, but the "
+            "strategy still produced zero candidates (likely missing leg "
+            "bid/ask; check QuoteProvider output)."
+        )
+    return decision
 
 
 if __name__ == "__main__":

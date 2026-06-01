@@ -132,3 +132,31 @@ class QuoteProviderStatus:
     last_chain_ts:   datetime | None = None
     last_error:      str | None = None
     notes:           str | None = None
+
+
+@dataclass(frozen=True)
+class QuoteRequest:
+    """Optional hint passed to `QuoteProvider.get_option_chain(...)`.
+
+    Real broker providers can ignore this — they have authoritative chain
+    data already. Synthesis providers (the Phase 1.5 mock) USE it to align
+    their generated chain with the structure provider's anchor strikes —
+    otherwise the mock chain would always center on 5800 while live SPX
+    structure levels could sit at 7580, leaving no overlapping strikes
+    for the strategy to build candidates from.
+
+    All fields are optional. Sensible behavior:
+      - `spot_hint`: re-center synthesized prices around this value.
+      - `required_strikes`: ensure each of these strikes appears in the
+        returned chain with both call and put quotes.
+      - `strike_min` / `strike_max`: bound the chain.
+    """
+    symbol:           str
+    expiry:           str | None = None
+    spot_hint:        float | None = None
+    required_strikes: tuple[float, ...] = ()
+    strike_min:       float | None = None
+    strike_max:       float | None = None
+    # Where `spot_hint` came from — for decision-log audit only.
+    # Values: "structure_spot" | "maxvol" | "structure_midpoint" | "mock_default"
+    spot_hint_source: str | None = None

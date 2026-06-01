@@ -229,3 +229,152 @@ Phase 3: VW v1 end-to-end runs against either stub (default) or
 match the contract in `docs/reference_notes.md §8a`, we can enable
 authenticated `/exposure/series` to populate VW levels. Phase 4 broker
 probe remains parallelizable.
+
+---
+
+## 2026-06-01 (Phase 2.6) — structure↔quote alignment + ZS shape fix
+
+**Root cause of the smoke-test gap (auth_mode=login working, but
+`spot=0.0`, `total_*_bn=None`, scanner emitting NO_TRADE):** the
+`ZeroSigmaApiStructureProvider` mapper was written against an
+*assumed* response shape (`snapshot.spot.price`, `total_gex_bn`,
+`da_gex_bn`, `vex`, `dex`, `cex`). The actual ZS API serves whatever
+`worker_watchlist.py` writes into Redis, where the canonical names are:
+
+  - `spot.spot`           (scalar — the price)
+  - `total_gex_1pct`, `total_raw_gex_1pct`, `total_da_gex_1pct`,
+    `total_dex_1pct`, `total_vex_1vol`, `total_cex`
+  - `wings.{call_floor, put_ceiling, midline}`
+  - `gamma.{regime, flip, cluster_primary, ...}` (regime is `"Positive"`
+    / `"Negative"` — capitalized)
+  - `max_call_oi_strike`, `max_put_oi_strike`,
+    `max_call_vol_strike`, `max_put_vol_strike`, `atm_strike`
+
+**Mapper rewrite (`src/providers/structure/zerosigma_api.py`):**
+
+- Spot now walks an alias chain: `spot.spot` → `spot.price` →
+  `spot.last` → `spot.close` → `spot_price` → `exposures.spot`.
+- Exposure field names accept the real ZS names FIRST, fall through to
+  the older test-fixture names so Phase 2 / 2.5 fixtures still pass.
+- New: surface `wings.put_ceiling` / `wings.call_floor` as the 2K-tier
+  values when the subscription-gated `/exposure/series` isn't available.
+  Means `public_only` mode now populates anchors automatically.
+- New: derive `gamma_flip`, `call_wall` (`max_call_oi_strike`), and
+  `put_wall` (`max_put_oi_strike`) from the public payload. The
+  `missing_fields` list shrinks from 9 to 3 (only `put_ceiling_5k`,
+  `call_floor_5k`, `ddoi_pin` stay None without the subscription).
+- `gamma_regime` is now lowercased on intake (ZS sends `"Positive"`).
+- Locals for `total_dex_1pct` and `total_cex` read but not yet stored —
+  `ExposureContext` doesn't expose them. Reserved for a follow-up.
+
+**Second root cause of zero candidates (even after the mapper fix):**
+live SPX structure puts ceilings/floors around 7580 while the
+`MockQuoteProvider` had a hardcoded 5800-centered chain. The strategy
+asked the chain for strikes at 7600 / 7605 / 7560 / 7555 and got
+`None` for every leg — no candidates generated, but the explanation
+falsely said "all rejected by filters."
+
+**Structure-aware quote alignment:**
+
+- New `QuoteRequest` dataclass in `src/providers/quotes/types.py` with
+  `symbol`, `expiry`, `spot_hint`, `required_strikes`, `strike_min/max`,
+  `spot_hint_source`. Carried in `QuoteProvider.get_option_chain(...,
+  request=...)`. Real broker providers ignore it; synthesis providers
+  use it.
+- `MockQuoteProvider.get_option_chain` now has two modes:
+  - **default** (no request): returns the static `MOCK_CHAIN`
+    centered on 5800 — Phase 1.5 / 2 / 2.5 behavior is unchanged.
+  - **aligned** (request with `spot_hint` or `required_strikes`):
+    synthesizes a chain centered on the hint, builds a 5-pt grid
+    spanning ±25pt, and UNIONs in every required strike (even if
+    off-grid). Each synthesized strike that happens to match a row in
+    `MOCK_CHAIN` inherits its static `c_mid/p_mid/c_volume/p_volume`
+    — preserves Phase 1.5 default behavior to the byte when the hint
+    is near 5800.
+- New `Strategy.required_quote_strikes(structure, params) -> list[float]`
+  contract. `VerticalWingV1` implements it: collects the active
+  ceiling/floor (per `volume_threshold`) and the long-leg partners (per
+  `spread_width`). No VW-specific code leaks into the scanner.
+- Scanner runner now derives a `QuoteRequest` from
+  `_pick_spot_hint(structure, required_strikes)` — precedence:
+  `structure.spot if > 0` → `structure.exposures.maxvol` → median of
+  required strikes → mock_default — and passes it through.
+
+**Sharpened zero-candidate explanation:**
+
+`_refine_decision_explanation` (scanner) replaces the generic
+"all rejected by filters" message when `decision.all_candidates` is
+empty, distinguishing three cases:
+
+  1. `no_structure_anchors` — `put_ceiling_*` and `call_floor_*` all None
+  2. `quote_chain_missing_legs` — anchors present but chain missed the
+     required strikes
+  3. `all_candidates_rejected` — fall-through (original message kept)
+
+The decision log's `snapshot_summary` gains:
+
+  - `required_strikes` (list)
+  - `quote_chain_min_strike`, `quote_chain_max_strike`
+  - `missing_required_quote_strikes`
+  - `quote_spot_source`  ∈ `structure_spot | maxvol | structure_midpoint | mock_default`
+  - `quote_spot_hint`
+
+**Smoke script:**
+
+- `--endpoint {spot|exposures|snapshot}` probes a single ZS endpoint
+  directly via the provider's HTTP client.
+- `--debug-shape` renders the response as a sanitized SHAPE: scalar
+  fields pass through (so spot=0.0 is visible), string values are
+  reduced to `<str len=N>` (so a token-shaped field can never leak),
+  list values become `<list len=N, first_item_shape=...>`, and any key
+  matching `token`/`password`/`service_key`/`secret`/`authorization`/
+  `bearer`/`api_key`/`apikey`/`private`/`jwt` is replaced with
+  `<REDACTED>`.
+- Combined: `--endpoint exposures --debug-shape` is the right tool to
+  validate that ZS's `/market/exposures` payload still matches the
+  contract in `docs/reference_notes.md §8a`.
+
+**Test additions (17 new):**
+
+- `test_real_zs_shape_maps_spot_and_exposures_correctly` — locks the
+  real-shape mapper.
+- `test_real_zs_shape_with_volume_series_populates_5k_tier_too` —
+  series wins over wings when both are present.
+- `test_mock_quote_provider_recenters_around_spot_hint` (and 3 more) —
+  alignment + default-mode back-compat + required-strikes inclusion.
+- `test_vertical_wing_required_quote_strikes_uses_{2k,5k}_tier_*` —
+  threshold-driven anchor selection.
+- `test_vw_produces_both_sides_against_real_like_structure_plus_mock_chain`
+  — end-to-end: structure at 7580 → aligned mock chain → both
+  CALL_CREDIT and PUT_CREDIT candidates with `credit > 0`.
+- `test_scanner_decision_log_includes_phase2p6_diagnostics` — locks
+  the new audit fields.
+- `test_zero_candidate_explanation_{no_structure_anchors, quote_chain_missing_legs, preserves_real_rejection_text}`
+  — locks the three branches.
+- `test_debug_shape_redacts_secret_keys_and_string_values` — sanitizer
+  contract.
+- `test_endpoint_probe_via_mocked_provider` — smoke `--endpoint
+  exposures --debug-shape` end-to-end without live network.
+
+Total: **77/77 passing** (was 60, +17). Ruff clean.
+
+**Still missing from `ExposureContext` after Phase 2.6:**
+
+- `put_ceiling_5k` / `call_floor_5k` — require subscription-gated
+  `/exposure/series` (Phase 2 path; works when `auth_mode != public_only`
+  and `enable_exposure_series=true` + subscribed account).
+- `ddoi_pin` — `/exposure/ddoi` is also subscription-gated AND requires
+  `DO_SPACES_*` to be configured server-side. None on launch.
+- (None of the above blocks VW v1 — `put_ceiling_2k` and `call_floor_2k`
+  are populated from `wings.*` under `public_only`.)
+
+### Next step
+
+Phase 3: VW v1 end-to-end against live ZS structure + mock quotes.
+With Phase 2.6 the smoke output should show `spot ≈ 7580`,
+`total_gex_bn ≈ 1234` (real ZS `total_gex_1pct`), and the scanner
+should produce candidates at the structure-derived strikes. If
+candidate generation still fails, the refined explanation tells the
+operator whether to blame structure (anchors missing), the chain
+alignment (required strikes outside chain bounds), or the risk filters
+(legitimate gating).

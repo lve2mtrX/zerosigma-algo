@@ -278,18 +278,35 @@ class ZeroSigmaApiStructureProvider:
 
         exposures = self._build_exposures(snap_payload, vol_series, missing)
         spot_payload = snap_payload.get("spot") or {}
-        spot = _safe_float(spot_payload.get("price"))
+        # ZS worker_watchlist writes spot_json as a FLAT dict whose price
+        # field is named "spot" (the scalar). Walk a sensible alias chain
+        # so alternate payload shapes still resolve.
+        spot = (
+            _safe_float(spot_payload.get("spot"))      # ZS canonical
+            or _safe_float(spot_payload.get("price"))  # older example shape
+            or _safe_float(spot_payload.get("last"))
+            or _safe_float(spot_payload.get("close"))
+            or _safe_float(snap_payload.get("spot_price"))
+            or _safe_float((snap_payload.get("exposures") or {}).get("spot"))
+        )
         if spot is None:
-            spot = _safe_float(snap_payload.get("spot_price"))
-            if spot is None:
-                missing.append("spot.price")
-                spot = 0.0
+            missing.append("spot.spot")
+            spot = 0.0
 
         quote_ts = _parse_ts(snap_payload.get("timestamp") or spot_payload.get("timestamp"))
+        # `chain` and `exposures` (metrics_json) both carry expiry/dte —
+        # check both. `or` short-circuits on 0 (a valid DTE), so check
+        # None explicitly.
         chain_meta = snap_payload.get("chain") or {}
-        expiry = chain_meta.get("expiry") or snap_payload.get("expiry")
-        # `or` short-circuits on 0 (a valid DTE), so check None explicitly.
+        exp_meta   = snap_payload.get("exposures") or {}
+        expiry = (
+            chain_meta.get("expiry")
+            or exp_meta.get("expiry")
+            or snap_payload.get("expiry")
+        )
         dte_raw = chain_meta.get("dte")
+        if dte_raw is None:
+            dte_raw = exp_meta.get("dte")
         if dte_raw is None:
             dte_raw = snap_payload.get("dte")
         dte = _safe_int(dte_raw)
@@ -352,20 +369,64 @@ class ZeroSigmaApiStructureProvider:
         vol_series: dict[str, Any] | None,
         missing: list[str],
     ) -> ExposureContext:
-        exp = snap_payload.get("exposures") or {}
+        """Map the ZS metrics_json payload into our ExposureContext.
 
-        total_gex_bn  = _safe_float(exp.get("total_gex_bn"))
-        # ZS uses unsuffixed names (vex/dex/cex) — algo uses *_bn for clarity.
-        total_vex_bn  = _safe_float(exp.get("vex") or exp.get("total_vex_bn"))
-        total_cex_bn  = _safe_float(exp.get("cex") or exp.get("total_cex_bn"))  # noqa: F841 — reserved for future ExposureContext field
-        da_gex_signed = _safe_float(exp.get("da_gex_bn") or exp.get("da_gex_signed"))
+        ZS field names confirmed against `Dashboard/app/ingest/worker_watchlist.py`
+        (the writer of metrics_json) and `zerosigma-api/app/api/v1/market.py`
+        (which passes the Redis blob through unchanged):
 
-        # Gamma regime: derive from sign of DA-GEX if not directly provided.
-        gamma_regime: str | None = exp.get("gamma_regime")
+            total_gex_1pct, total_raw_gex_1pct, total_da_gex_1pct,
+            total_dex_1pct, total_vex_1vol, total_cex,
+            max_call_oi_strike, max_put_oi_strike,
+            max_call_vol_strike, max_put_vol_strike,
+            atm_strike, spot,
+            wings: { call_floor, put_ceiling, midline, spot_vs_wings },
+            gamma: { regime, flip, cluster_primary, ... },
+            flow:  { call_pct, put_pct, dominance, strength },
+            straddle_iv_meta: { atm_strike, implied_move, ... }
+
+        Older / fallback names (kept for tests + future contract drift):
+            total_gex_bn, da_gex_bn, vex, dex, cex, gamma_regime.
+        """
+        exp    = snap_payload.get("exposures") or {}
+        wings  = exp.get("wings")  or {}
+        gamma  = exp.get("gamma")  or {}
+
+        # ── aggregate exposures ──
+        total_gex_bn  = _safe_float(exp.get("total_gex_1pct") or exp.get("total_gex_bn"))
+        total_vex_bn  = _safe_float(exp.get("total_vex_1vol") or exp.get("vex")
+                                    or exp.get("total_vex_bn"))
+        da_gex_signed = _safe_float(exp.get("total_da_gex_1pct") or exp.get("da_gex_bn")
+                                    or exp.get("da_gex_signed"))
+        # (total_dex_1pct / total_cex are read in case a future field lands;
+        #  ExposureContext doesn't expose them today — kept as locals.)
+        _ = _safe_float(exp.get("total_dex_1pct") or exp.get("dex"))
+        _ = _safe_float(exp.get("total_cex")      or exp.get("cex"))
+
+        # ── gamma regime / flip ──
+        regime_raw: str | None = gamma.get("regime") or exp.get("gamma_regime")
+        gamma_regime: str | None = regime_raw.lower() if isinstance(regime_raw, str) else None
         if gamma_regime is None and da_gex_signed is not None:
-            gamma_regime = "positive" if da_gex_signed > 0 else "negative" if da_gex_signed < 0 else None
+            gamma_regime = (
+                "positive" if da_gex_signed > 0
+                else "negative" if da_gex_signed < 0
+                else None
+            )
+        gamma_flip = _safe_float(gamma.get("flip") or exp.get("gamma_flip"))
 
-        # Vertical-Wing levels — require /exposure/series volume payload.
+        # ── walls (public metrics_json carries these as max OI strikes) ──
+        call_wall = _safe_float(exp.get("max_call_oi_strike") or exp.get("call_wall"))
+        put_wall  = _safe_float(exp.get("max_put_oi_strike")  or exp.get("put_wall"))
+
+        # ── single-level ceiling/floor from public payload ──
+        # ZS exposes a single `wings.call_floor` / `wings.put_ceiling`. Use
+        # these as the 2K-tier values whenever we don't have a per-strike
+        # volume series. The 5K-tier values stay None unless the
+        # subscription-gated volume series is available below.
+        wings_put_ceiling  = _safe_float(wings.get("put_ceiling"))
+        wings_call_floor   = _safe_float(wings.get("call_floor"))
+
+        # ── per-strike volume series (subscription-gated) ──
         put_ceiling_2k = put_ceiling_5k = call_floor_2k = call_floor_5k = None
         maxvol = None
         if vol_series:
@@ -380,18 +441,43 @@ class ZeroSigmaApiStructureProvider:
                 combined = [(c or 0) + (p or 0) for c, p in zip(calls, puts, strict=False)]
                 if combined:
                     maxvol = strikes[combined.index(max(combined))]
-        else:
-            missing.extend([
-                "put_ceiling_2k", "put_ceiling_5k",
-                "call_floor_2k", "call_floor_5k", "maxvol",
-            ])
 
-        # Fields the ZS API does not currently expose to the cockpit:
-        gamma_flip = None
-        call_wall = None
-        put_wall = None
+        # Fall back to the public single-level wings when the subscription
+        # series isn't available. 5K-tier strikes remain None (we can't
+        # synthesize a stricter threshold from a single value).
+        if put_ceiling_2k is None and wings_put_ceiling is not None:
+            put_ceiling_2k = wings_put_ceiling
+        if call_floor_2k is None and wings_call_floor is not None:
+            call_floor_2k = wings_call_floor
+
+        # MaxVol fallback: the public payload exposes max_*_vol_strike —
+        # use the one with the larger reported volume by preferring the
+        # call-side strike when both are present (call walls usually have
+        # heavier flow at SPX). Either way: better than None.
+        if maxvol is None:
+            maxvol = (
+                _safe_float(exp.get("max_call_vol_strike"))
+                or _safe_float(exp.get("max_put_vol_strike"))
+                or _safe_float(exp.get("atm_strike"))
+            )
+
+        # ── DDOI pin: still not in the public payload ──
         ddoi_pin = None
-        missing.extend(["gamma_flip", "call_wall", "put_wall", "ddoi_pin"])
+
+        # Track which fields stayed None so the cockpit can show diagnostics.
+        for name, value in (
+            ("put_ceiling_2k", put_ceiling_2k),
+            ("put_ceiling_5k", put_ceiling_5k),
+            ("call_floor_2k",  call_floor_2k),
+            ("call_floor_5k",  call_floor_5k),
+            ("maxvol",         maxvol),
+            ("gamma_flip",     gamma_flip),
+            ("call_wall",      call_wall),
+            ("put_wall",       put_wall),
+            ("ddoi_pin",       ddoi_pin),
+        ):
+            if value is None:
+                missing.append(name)
 
         return ExposureContext(
             total_gex_bn=total_gex_bn,

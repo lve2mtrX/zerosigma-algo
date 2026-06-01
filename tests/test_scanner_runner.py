@@ -21,8 +21,18 @@ def _run_scanner(extra_env: dict[str, str]) -> int:
 
 
 def _clean_env() -> dict[str, str]:
+    """Inherit the user's environ but strip ZS_* vars so the subprocess
+    runs against stub/mock providers regardless of the developer's local
+    .env contents."""
     import os
-    return dict(os.environ)
+    env = dict(os.environ)
+    for k in list(env.keys()):
+        if k.startswith("ZS_API_") or k == "ZS_STRUCTURE_PROVIDER":
+            env.pop(k, None)
+    # Force the subprocess into the safe defaults.
+    env["ZS_STRUCTURE_PROVIDER"] = "stub"
+    env["ZS_API_AUTH_MODE"]      = "none"
+    return env
 
 
 def test_scanner_writes_outputs_with_leg_quotes(tmp_path: Path):

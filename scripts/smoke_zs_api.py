@@ -1,16 +1,25 @@
 """Smoke test for the read-only ZerσSigma API StructureProvider.
 
 Usage:
-    python -m scripts.smoke_zs_api                  # SPX, .env-driven config
+    python -m scripts.smoke_zs_api                          # SPX snapshot
     python -m scripts.smoke_zs_api --symbol SPY
-    python -m scripts.smoke_zs_api --json           # machine-readable output
+    python -m scripts.smoke_zs_api --json                   # machine-readable
 
-What it does:
+    # Per-endpoint probe (Phase 2.6)
+    python -m scripts.smoke_zs_api --endpoint spot
+    python -m scripts.smoke_zs_api --endpoint exposures
+    python -m scripts.smoke_zs_api --endpoint snapshot
+
+    # Sanitized payload-shape dump (Phase 2.6) — top-level + nested keys,
+    # safe scalar previews; no auth headers / tokens / full payloads.
+    python -m scripts.smoke_zs_api --debug-shape
+    python -m scripts.smoke_zs_api --debug-shape --endpoint exposures
+
+What it does (default):
     1. Loads `.env` + config/providers.yaml (via the existing AppConfig).
     2. Builds `ZeroSigmaApiStructureProvider` from those settings.
-    3. Calls `get_snapshot(symbol)` exactly once and prints a SANITIZED
-       summary — never tokens, passwords, service keys, headers, or any
-       raw env values.
+    3. Calls `get_snapshot(symbol)` once and prints a SANITIZED summary —
+       never tokens, passwords, service keys, headers, or raw env values.
 
 Exit codes:
     0 — snapshot returned (even with missing fields under public_only)
@@ -99,8 +108,79 @@ def _render_text(payload: dict) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# debug-shape sanitizer (Phase 2.6)
+# ──────────────────────────────────────────────────────────────────────
+
+# Substrings that, if present in a key OR a string value, must be redacted.
+_SECRET_TOKENS = (
+    "token", "password", "service_key", "secret", "authorization",
+    "bearer", "api_key", "apikey", "private", "jwt",
+)
+
+
+def _looks_secret(key: str) -> bool:
+    k = key.lower()
+    return any(t in k for t in _SECRET_TOKENS)
+
+
+def _sanitize_value(v):  # type: ignore[no-untyped-def]
+    """Render a single value safely for a debug-shape dump."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v
+    if isinstance(v, str):
+        # Strings are NOT echoed back wholesale (a token could end up in a
+        # response field by accident). Show length only.
+        return f"<str len={len(v)}>"
+    if isinstance(v, list):
+        return f"<list len={len(v)}>"
+    if isinstance(v, dict):
+        return f"<dict keys={len(v)}>"
+    return f"<{type(v).__name__}>"
+
+
+def _shape_of(payload, max_depth: int = 3, depth: int = 0):  # type: ignore[no-untyped-def]
+    """Recursively describe the SHAPE of a JSON payload. Strings + lists
+    are rendered as type+length so secrets can never leak. Numeric scalars
+    pass through (they're safe and useful for diagnosing spot=0.0 etc.).
+    """
+    if depth >= max_depth or not isinstance(payload, dict):
+        return _sanitize_value(payload)
+    out = {}
+    for k, v in payload.items():
+        if _looks_secret(k):
+            out[k] = "<REDACTED>"
+            continue
+        if isinstance(v, dict):
+            out[k] = _shape_of(v, max_depth=max_depth, depth=depth + 1)
+        elif isinstance(v, list):
+            preview = v[0] if v else None
+            out[k] = {
+                "_type": "list",
+                "_len":  len(v),
+                "_first_item_shape": (
+                    _shape_of(preview, max_depth=max_depth, depth=depth + 1)
+                    if isinstance(preview, dict) else _sanitize_value(preview)
+                ),
+            }
+        else:
+            out[k] = _sanitize_value(v)
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────────
 # main
 # ──────────────────────────────────────────────────────────────────────
+
+ENDPOINT_PATHS = {
+    "spot":      "/api/v1/market/spot",
+    "exposures": "/api/v1/market/exposures",
+    "snapshot":  "/api/v1/market/snapshot",
+}
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -110,6 +190,11 @@ def main() -> int:
                         help="symbol to fetch (default: ZS_PRIMARY_SYMBOL or SPX)")
     parser.add_argument("--json", action="store_true",
                         help="emit JSON instead of text")
+    parser.add_argument("--endpoint", default="snapshot",
+                        choices=("spot", "exposures", "snapshot"),
+                        help="hit a single endpoint (default: snapshot full flow)")
+    parser.add_argument("--debug-shape", action="store_true", dest="debug_shape",
+                        help="print sanitized response-shape (keys + types) instead of mapped values")
     args = parser.parse_args()
 
     from src.providers.structure.factory import build_structure_provider
@@ -154,6 +239,13 @@ def main() -> int:
             print(_render_text({**safe_status, "symbol": symbol, "exposures": {}}))
         return 0
 
+    # ── --debug-shape / --endpoint paths ──────────────────────────────
+    # Both bypass the high-level get_snapshot() so the user can see the
+    # raw response shape (or scope to a single endpoint).
+    if args.debug_shape or args.endpoint != "snapshot":
+        return _run_endpoint_probe(provider, symbol, args.endpoint,
+                                   args.debug_shape, args.json)
+
     # configured — try the snapshot once.
     try:
         snap = provider.get_snapshot(symbol)
@@ -185,6 +277,85 @@ def main() -> int:
                   "PUT_CEILING / CALL_FLOOR / MaxVol are intentionally None.")
             print("      Switch ZS_API_AUTH_MODE to bearer/login/service_token "
                   "and set ZS_API_ENABLE_EXPOSURE_SERIES=true to populate them.")
+    return 0
+
+
+def _run_endpoint_probe(
+    provider,                                  # type: ignore[no-untyped-def]
+    symbol: str,
+    endpoint: str,
+    debug_shape: bool,
+    as_json: bool,
+) -> int:
+    """Hit ONE endpoint directly and dump either its mapped value OR its
+    sanitized shape. Used to diagnose why /market/snapshot's spot is 0.0
+    or its exposures map to None.
+
+    Never prints raw payloads — only top-level + nested keys, types, and
+    scalar values. Strings are reduced to length to avoid leaking any
+    field that happens to carry a token-shaped value.
+    """
+    path = ENDPOINT_PATHS[endpoint]
+    safe_status = _sanitize_status(provider.status())
+    try:
+        with provider._build_client() as client:
+            payload = provider._get_json(client, path, params={"symbol": symbol})
+    except Exception as exc:
+        msg = (
+            f"ZS API {endpoint} probe failed: {type(exc).__name__}. "
+            f"base_url={safe_status.get('base_url')!r}, "
+            f"auth_mode={safe_status.get('auth_mode')!r}."
+        )
+        if as_json:
+            print(json.dumps({"error": msg, "status": safe_status}, indent=2),
+                  file=sys.stderr)
+        else:
+            print(f"ERROR: {msg}", file=sys.stderr)
+        return 1
+
+    if payload is None:
+        msg = (
+            f"ZS API {endpoint} returned no data "
+            f"(http_status={safe_status.get('last_status_code')})."
+        )
+        if as_json:
+            print(json.dumps({"warning": msg, "status": safe_status,
+                              "endpoint": endpoint, "path": path}, indent=2))
+        else:
+            print(f"WARNING: {msg}")
+        return 0
+
+    if debug_shape:
+        out = {
+            "endpoint": endpoint,
+            "path": path,
+            "symbol": symbol,
+            "http_status": safe_status.get("last_status_code"),
+            "auth_mode": safe_status.get("auth_mode"),
+            "shape": _shape_of(payload),
+        }
+    else:
+        # Print only safe scalars from the top level (no strings).
+        scalars = {
+            k: v for k, v in payload.items()
+            if isinstance(v, (int, float, bool)) and not _looks_secret(k)
+        }
+        nested_keys = {
+            k: sorted(list(v.keys()))[:20]
+            for k, v in payload.items() if isinstance(v, dict)
+        }
+        out = {
+            "endpoint": endpoint,
+            "path": path,
+            "symbol": symbol,
+            "http_status": safe_status.get("last_status_code"),
+            "scalar_fields": scalars,
+            "nested_keys": nested_keys,
+        }
+    if as_json:
+        print(json.dumps(out, indent=2, default=str))
+    else:
+        print(json.dumps(out, indent=2, default=str))  # JSON is friendliest for a key dump
     return 0
 
 

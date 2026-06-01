@@ -217,10 +217,66 @@ values.
 python -m scripts.run_scanner --structure-provider zerosigma_api
 ```
 
-Under `public_only`, VW will emit `NO_TRADE` because the volume-derived
-levels are missing — that's the expected behavior, not a bug. Enable
-`/exposure/series` (`bearer` / `login` / `service_token` +
-`ZS_API_ENABLE_EXPOSURE_SERIES=true`) to populate them.
+Phase 2.6 changed this in two ways:
+
+1. **The mock quote provider now re-centers on live ZS structure**. If
+   ZS says `put_ceiling=7600` and your default `MockQuoteProvider`
+   centered on 5800, VW used to find no chain quotes at 7600 and emit
+   "all candidates rejected by filters" (misleadingly). The scanner now
+   derives a `QuoteRequest` with `spot_hint` (precedence:
+   `structure.spot if > 0` → `maxvol` → median of required strikes →
+   mock default) and `required_strikes` (the active ceiling/floor +
+   long-leg partners), and the mock provider builds an aligned chain
+   that includes every required strike.
+
+2. **Public_only mode populates anchors via the public payload**.
+   `wings.put_ceiling` / `wings.call_floor` ride along on
+   `/market/exposures` (subscription-FREE), so VW gets one ceiling and
+   one floor under `public_only`. The 5K-tier variants still require
+   `/exposure/series` (subscription-gated) — those stay None.
+
+The decision log's `snapshot_summary` now carries:
+
+- `required_strikes` — strikes VW asked the chain for
+- `quote_chain_min_strike` / `quote_chain_max_strike`
+- `missing_required_quote_strikes` — empty when everything aligned
+- `quote_spot_source` — one of `structure_spot | maxvol | structure_midpoint | mock_default`
+- `quote_spot_hint` — the numeric value passed to the provider
+
+If `NO_TRADE` shows up, the refined `explanation` distinguishes:
+
+- *"no structure anchors"* — `put_ceiling_*` and `call_floor_*` all None upstream
+- *"quote chain missing required structure strikes [...]"* — chain didn't cover the anchors
+- *"Best score X below no_trade_score_threshold Y"* — legit gating; check filters
+
+##### Diagnose snapshot/exposures shape
+
+If your smoke output shows `spot=0.0` or `total_*_bn=None`, the response
+shape doesn't match the cockpit's mapper. Run:
+
+```powershell
+python -m scripts.smoke_zs_api --endpoint snapshot  --debug-shape
+python -m scripts.smoke_zs_api --endpoint spot      --debug-shape
+python -m scripts.smoke_zs_api --endpoint exposures --debug-shape
+```
+
+`--debug-shape` prints the SHAPE (keys + types) of the response —
+scalar numbers pass through, every string is reduced to `<str len=N>`,
+every list to `<list len=N, first_item_shape=...>`, and any
+secret-looking key (`token`, `password`, `service_key`, `authorization`,
+`bearer`, `api_key`, `apikey`, `private`, `jwt`) is replaced with
+`<REDACTED>`. Safe to share in a bug report.
+
+##### What's still missing under `public_only`
+
+| Field | Still None under public_only? | How to populate |
+|---|---|---|
+| `put_ceiling_2k` / `call_floor_2k` | populated from `wings.*` | already works |
+| `put_ceiling_5k` / `call_floor_5k` | yes | switch to `bearer`/`login`/`service_token` + `ZS_API_ENABLE_EXPOSURE_SERIES=true` + active subscription |
+| `maxvol` | populated from `max_*_vol_strike` fallback | already works |
+| `gamma_flip` | populated from `gamma.flip` | already works |
+| `call_wall` / `put_wall` | populated from `max_*_oi_strike` | already works |
+| `ddoi_pin` | yes | requires `/exposure/ddoi` (subscription + `DO_SPACES_*` on the server) |
 
 Optional:
 
