@@ -378,3 +378,130 @@ candidate generation still fails, the refined explanation tells the
 operator whether to blame structure (anchors missing), the chain
 alignment (required strikes outside chain bounds), or the risk filters
 (legitimate gating).
+
+---
+
+## 2026-06-01 (Phase 2.7) — score-breakdown observability
+
+**Observed pain (live structure, mock quotes):** both
+CALL_CREDIT (7600/7605 @ 0.50, score 0.4412) and PUT_CREDIT
+(7550/7545 @ 0.50, score 0.4639) cleared the hard filters but scored
+below the 0.60 no-trade threshold. The scanner emitted `NO_TRADE` but
+the operator couldn't tell WHICH score components were pulling each
+candidate down — and the explanation read "all rejected by filters"
+even though nothing was filter-rejected.
+
+**Important framing**: this round is observability, not tuning. No
+scoring weights changed. No threshold moved. No components added or
+removed. The goal is to make scoring readable.
+
+### Data-model changes
+
+`Candidate` (in `src/strategies/base.py`) gained four optional fields,
+all populated by `Strategy.select()`:
+
+- `score_threshold: float | None` — the `no_trade_score_threshold` the
+  decision was measured against
+- `score_gap_to_threshold: float | None` — `threshold − score` (negative
+  for candidates that cleared)
+- `weak_components: list[str]` — top-2 lowest non-meta components,
+  formatted `"name=0.42"`
+- `rejection_type: RejectionType | None` — one of
+  `selected | score_below_threshold | filter_rejected | no_candidates | missing_quotes | missing_structure`
+
+`StrategyDecision` gained `threshold_used`, `rejection_type`,
+`best_score`, `weak_components` — same data at the decision level.
+
+New helper `weak_components_of(breakdown, n=2)` in `base.py`. The
+`SCORE_META_KEYS` constant lists the keys it skips
+(`final_score`, `no_trade_threshold`, `score_gap_to_threshold`).
+
+### `score_breakdown` enrichment
+
+`score_candidate()` now stamps `final_score` into the breakdown dict
+before returning. `VerticalWingV1.select()` also stamps
+`no_trade_threshold` and `score_gap_to_threshold` per candidate. So a
+typical post-`score` + post-`select` breakdown has 11 keys: 8 components
++ 3 meta.
+
+`time_decay_headroom` is now explicitly documented as a placeholder
+(returns 0.5 regardless of time-of-day). Calling it out in the score
+breakdown rather than removing it keeps the contract stable for when
+intraday clock data lands.
+
+### Decision-explanation rewrite
+
+`VerticalWingV1.select()` distinguishes three NO_TRADE paths in its
+explanation:
+
+1. **All filter-rejected** — `"NO_TRADE — all N candidate(s) rejected by hard filters. Reasons: [...]"` + sets `decision.rejection_type = "filter_rejected"`.
+2. **Best below threshold** — `"NO_TRADE — best candidate <SIDE> <K1>/<K2> @ <credit> scored <score>, below threshold <T> by <gap>. Weakest components: <a=v>, <b=v>."` + sets `decision.rejection_type = "score_below_threshold"`.
+3. **Selected** — unchanged ("Selected <SIDE> K=<K1>/<K2> credit=<credit> score=<score>") + `decision.rejection_type = "selected"`.
+
+Phase 2.6's `_refine_decision_explanation` in
+`scripts/run_scanner.py` still runs on top of `select()` to handle the
+two upstream branches it doesn't see (no anchors / missing chain legs).
+
+### CSV (`outputs/latest/ranked_candidates.csv`)
+
+Columns added:
+
+- `final_score`, `no_trade_threshold`, `score_gap_to_threshold`,
+  `rejection_type`, `weak_components`
+- One column per scoring component:
+  `score_credit_size`, `score_credit_to_risk`, `score_distance_from_spot`,
+  `score_structure_strength`, `score_maxvol_alignment`,
+  `score_gamma_regime`, `score_bid_ask_quality`,
+  `score_time_decay_headroom`
+- `score_breakdown_json` — the full dict serialized for tools that
+  don't want to enumerate the per-component columns
+
+The existing `planned_loss_dollars` column is kept for back-compat —
+README documents that it equals planned stop risk dollars under the
+session's `default_stop_variant`.
+
+### JSONL (`outputs/latest/decision_log.jsonl`)
+
+Per-decision: `threshold_used`, `rejection_type`, `best_score`,
+`weak_components`.
+
+Per-candidate (in `all_candidates` + `selected_candidate`):
+`score_threshold`, `score_gap_to_threshold`, `weak_components`,
+`rejection_type` (in addition to the existing `score_breakdown`).
+
+### Streamlit cockpit
+
+Candidate dataframe gains four columns (`gap`, `rejection`, `weak`,
+keeping `rejection_reasons` separate). Below the dataframe, every
+candidate gets its own `st.expander` with:
+
+- top-row metrics (Score / Threshold / Gap / Rejection type)
+- "Weakest components" as inline code chips
+- Full `score_breakdown` JSON in a nested expander
+- The "selected" winner's expander is `expanded=True` by default
+
+### 12 new tests in `tests/test_phase2p7_observability.py`
+
+- `score_breakdown` contains every component + `final_score`
+- `select()` stamps threshold + gap onto every candidate (including filter-rejected)
+- `weak_components_of` excludes meta keys + returns lowest n
+- `weak_components_of` handles None / empty / all-meta input
+- `rejection_type` is "selected" for winner, "score_below_threshold" for runner-up
+- Manual filter-reject path correctly tags `filter_rejected`
+- All-filter-rejected branch: decision and every candidate tagged `filter_rejected`
+- Below-threshold explanation names best/threshold/gap/weak
+- CSV includes per-component columns + `score_breakdown_json` + meta cols
+- CSV `rejection_type` distinguishes selected vs below-threshold
+- JSONL decision + candidate dicts carry Phase 2.7 fields
+- Streamlit module imports without error
+
+Total: **89/89 passing** (was 77, +12). Ruff clean.
+
+### Next step
+
+Compare scoring output against discretionary expectations. Run the
+scanner against the live ZS structure on a market session, capture the
+ranked_candidates.csv, and Dan walks each candidate to say "this score
+matches my read" or "this score is too high/low because of X." Then —
+and only then — parameterize the scoring weights into
+`config/strategies.yaml` so the session config can override them.

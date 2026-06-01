@@ -11,7 +11,7 @@ from typing import Any
 
 from src.providers.quotes.types import OptionChainSnapshot
 from src.providers.structure.types import StructureSnapshot
-from src.strategies.base import Candidate, StrategyDecision
+from src.strategies.base import Candidate, StrategyDecision, weak_components_of
 from src.strategies.vertical_wing.candidates import (
     build_call_floor_put_credit,
     build_put_ceiling_call_credit,
@@ -120,15 +120,38 @@ class VerticalWingV1:
         threshold = float(merged.get("no_trade_score_threshold", 0.60))
         side_priority = merged.get("side_priority", ["CALL_CREDIT", "PUT_CREDIT"])
 
+        # ── annotate EVERY candidate with observability fields ──
+        # This runs before the no-survivors / below-threshold branches so
+        # the decision log carries weak_components / score_threshold /
+        # score_gap_to_threshold for filter-rejected ones too.
+        for c in candidates:
+            c.score_threshold = threshold
+            c.score_gap_to_threshold = threshold - c.score
+            c.weak_components = weak_components_of(c.score_breakdown, n=2)
+            # Mirror the threshold into the breakdown dict for CSV/JSONL.
+            c.score_breakdown["no_trade_threshold"] = threshold
+            c.score_breakdown["score_gap_to_threshold"] = c.score_gap_to_threshold
+            if c.rejected:
+                c.rejection_type = "filter_rejected"
+            # other branches set "selected" / "score_below_threshold" below
+
         active = [c for c in candidates if not c.rejected]
         if not active:
+            reasons = [r for c in candidates for r in c.rejection_reasons]
             return StrategyDecision(
                 strategy_id=self.id,
                 decision="NO_TRADE",
                 selected=None,
                 all_candidates=candidates,
-                explanation="No surviving candidates (all rejected by filters).",
-                rejection_reasons=[r for c in candidates for r in c.rejection_reasons],
+                explanation=(
+                    f"NO_TRADE — all {len(candidates)} candidate(s) rejected by "
+                    f"hard filters. Reasons: {reasons or '[]'}"
+                ),
+                rejection_reasons=reasons,
+                threshold_used=threshold,
+                rejection_type="filter_rejected",
+                best_score=None,
+                weak_components=[],
             )
 
         def sort_key(c: Candidate) -> tuple[float, int]:
@@ -142,16 +165,35 @@ class VerticalWingV1:
         best = active[0]
 
         if best.score < threshold:
+            gap = threshold - best.score
+            weak = weak_components_of(best.score_breakdown, n=2)
+            # Mark every active non-winner as score_below_threshold for the log
+            for c in active:
+                c.rejection_type = "score_below_threshold"
             return StrategyDecision(
                 strategy_id=self.id,
                 decision="NO_TRADE",
                 selected=None,
                 all_candidates=candidates,
                 explanation=(
-                    f"Best score {best.score:.2f} below no_trade_score_threshold "
-                    f"{threshold:.2f}."
+                    f"NO_TRADE — best candidate {best.side} "
+                    f"{best.short_strike}/{best.long_strike} @ {best.credit:.2f} "
+                    f"scored {best.score:.4f}, below threshold {threshold:.2f} "
+                    f"by {gap:.4f}. Weakest components: "
+                    f"{', '.join(weak) if weak else '[]'}."
                 ),
+                threshold_used=threshold,
+                rejection_type="score_below_threshold",
+                best_score=best.score,
+                weak_components=weak,
             )
+
+        # selected — mark the rest as score_below_threshold (they cleared
+        # filters but lost the side_priority/score sort)
+        best.rejection_type = "selected"
+        for c in active:
+            if c is not best and c.rejection_type is None:
+                c.rejection_type = "score_below_threshold"
 
         decision: str = "TRADE_CALL_CREDIT" if best.side == "CALL_CREDIT" else "TRADE_PUT_CREDIT"
         return StrategyDecision(
@@ -163,6 +205,10 @@ class VerticalWingV1:
                 f"Selected {best.side} K={best.short_strike}/{best.long_strike} "
                 f"credit={best.credit:.2f} score={best.score:.2f}"
             ),
+            threshold_used=threshold,
+            rejection_type="selected",
+            best_score=best.score,
+            weak_components=weak_components_of(best.score_breakdown, n=2),
         )
 
     def explain(self, decision: StrategyDecision) -> str:

@@ -26,6 +26,11 @@ def build_decision_record(
         "score": decision.selected.score if decision.selected else None,
         "rejection_reasons": decision.rejection_reasons,
         "explanation": decision.explanation,
+        # Phase 2.7 — decision-level observability
+        "threshold_used":   decision.threshold_used,
+        "rejection_type":   decision.rejection_type,
+        "best_score":       decision.best_score,
+        "weak_components":  list(decision.weak_components or []),
         "snapshot_summary": snapshot_summary,
     }
 
@@ -70,5 +75,10 @@ def _candidate_to_dict(c) -> dict[str, Any]:  # type: ignore[no-untyped-def]
         "score_breakdown": c.score_breakdown,
         "rejected": c.rejected,
         "rejection_reasons": c.rejection_reasons,
-        "meta": c.meta,
+        # Phase 2.7 — per-candidate observability
+        "score_threshold":        c.score_threshold,
+        "score_gap_to_threshold": c.score_gap_to_threshold,
+        "weak_components":        list(c.weak_components or []),
+        "rejection_type":         c.rejection_type,
+        "meta":                   c.meta,
     }

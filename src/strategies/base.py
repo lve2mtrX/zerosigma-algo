@@ -14,6 +14,47 @@ from src.providers.structure.types import StructureSnapshot
 
 Decision = Literal["TRADE_CALL_CREDIT", "TRADE_PUT_CREDIT", "NO_TRADE"]
 Side = Literal["CALL_CREDIT", "PUT_CREDIT"]
+RejectionType = Literal[
+    "selected",
+    "score_below_threshold",
+    "filter_rejected",
+    "no_candidates",
+    "missing_quotes",
+    "missing_structure",
+]
+
+# Keys in `score_breakdown` that are META values, not weighted components.
+# `weak_components_of` skips these when ranking the weakest contributors.
+SCORE_META_KEYS: frozenset[str] = frozenset({
+    "final_score",
+    "no_trade_threshold",
+    "score_gap_to_threshold",
+})
+
+
+def weak_components_of(
+    breakdown: dict[str, float] | None,
+    *,
+    n: int = 2,
+    exclude: frozenset[str] = SCORE_META_KEYS,
+) -> list[str]:
+    """Return the `n` weakest scoring components from a breakdown dict.
+
+    Output items are "<key>=<value:.2f>" strings, ascending by value. Meta
+    keys (final_score / no_trade_threshold / score_gap_to_threshold) are
+    skipped — they're descriptive, not weighted inputs.
+
+    Example: ['maxvol_alignment=0.00', 'credit_size=0.43']
+    """
+    if not breakdown:
+        return []
+    items = [
+        (k, float(v))
+        for k, v in breakdown.items()
+        if k not in exclude and v is not None and isinstance(v, (int, float))
+    ]
+    items.sort(key=lambda kv: kv[1])
+    return [f"{k}={v:.2f}" for k, v in items[: max(0, int(n))]]
 
 
 @dataclass
@@ -39,6 +80,12 @@ class Candidate:
     rejected: bool = False
     rejection_reasons: list[str] = field(default_factory=list)
 
+    # filled in by select() — observability fields
+    score_threshold: float | None = None
+    score_gap_to_threshold: float | None = None
+    weak_components: list[str] = field(default_factory=list)
+    rejection_type: RejectionType | None = None
+
     # arbitrary strategy-specific context
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -51,6 +98,12 @@ class StrategyDecision:
     all_candidates: list[Candidate]
     explanation: str
     rejection_reasons: list[str] = field(default_factory=list)
+    # observability: surfaced from select() so the decision log shows
+    # exactly which threshold + best candidate produced the outcome.
+    threshold_used: float | None = None
+    rejection_type: RejectionType | None = None
+    best_score: float | None = None
+    weak_components: list[str] = field(default_factory=list)
 
 
 @runtime_checkable

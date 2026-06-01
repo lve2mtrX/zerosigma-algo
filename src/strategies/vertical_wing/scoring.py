@@ -71,7 +71,12 @@ def _bid_ask_quality_score(candidate: Candidate) -> float:
 
 
 def _time_decay_headroom_score(_: StructureSnapshot) -> float:
-    # Placeholder; eventually time-to-close in minutes / 390.
+    """Placeholder until intraday time-of-day is plumbed through.
+
+    Returns a NEUTRAL 0.5 so this component neither favors nor penalizes
+    any candidate. Documented as a placeholder in plan.md §7.4 — listed
+    here so observability output makes its placeholder nature obvious.
+    """
     return 0.5
 
 
@@ -97,4 +102,10 @@ def score_candidate(
 
     total_weight = sum(weights.get(k, 0.0) for k in parts) or 1.0
     weighted = sum(parts[k] * weights.get(k, 0.0) for k in parts) / total_weight
-    return _clip(weighted), parts
+    final = _clip(weighted)
+    # Echo the final back into the breakdown so per-candidate JSONL and CSV
+    # can carry it alongside the components. `no_trade_threshold` and
+    # `score_gap_to_threshold` are added later in select(), after the
+    # threshold is known.
+    parts["final_score"] = final
+    return final, parts

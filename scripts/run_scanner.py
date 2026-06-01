@@ -197,22 +197,50 @@ def main() -> int:
     return 0
 
 
+# Score components VW emits today (per src/strategies/vertical_wing/scoring.py).
+# When new strategies land, their components will join this list — anything not
+# listed still rides along inside `score_breakdown_json`.
+_SCORE_COMPONENT_COLUMNS = [
+    "credit_size",
+    "credit_to_risk",
+    "distance_from_spot",
+    "structure_strength",
+    "maxvol_alignment",
+    "gamma_regime",
+    "bid_ask_quality",
+    "time_decay_headroom",
+]
+
 _DEFAULT_RANKED_FIELDS = [
     "ts", "strategy_id", "decision", "side", "short_strike", "long_strike",
     "credit", "spread_width", "max_risk", "reward_risk", "breakeven",
-    "distance_from_spot", "score", "rejected", "rejection_reasons",
+    "distance_from_spot",
+    # scoring observability (Phase 2.7)
+    "score", "final_score", "no_trade_threshold", "score_gap_to_threshold",
+    "rejection_type", "weak_components",
+    *(f"score_{c}" for c in _SCORE_COMPONENT_COLUMNS),
+    "score_breakdown_json",
+    # filter / risk
+    "rejected", "rejection_reasons",
+    # dollar risk under session profile
+    # `planned_loss_dollars` = planned stop risk $ under default_stop_variant
     "planned_loss_dollars", "theoretical_max_loss_dollars",
+    # leg quotes
     "short_bid", "short_ask", "short_mid", "long_bid", "long_ask", "long_mid",
     "bid_ask_quality",
 ]
 
 
 def _candidate_row(strategy_id: str, c, session, ts: datetime, decision_str: str) -> dict:
+    import json as _json
+
     from src.risk.limits import planned_loss_dollars, theoretical_max_loss_dollars
 
     short = c.meta.get("short_leg") or {}
     long_ = c.meta.get("long_leg")  or {}
-    return {
+    breakdown = c.score_breakdown or {}
+
+    row: dict = {
         "ts": ts.isoformat(),
         "strategy_id": strategy_id,
         "decision": decision_str,
@@ -225,8 +253,24 @@ def _candidate_row(strategy_id: str, c, session, ts: datetime, decision_str: str
         "reward_risk": round(c.reward_risk, 4),
         "breakeven": round(c.breakeven, 4),
         "distance_from_spot": round(c.distance_from_spot, 4),
-        "score": round(c.score, 4),
-        "rejected": c.rejected,
+        # ── scoring observability (Phase 2.7) ──
+        "score":              round(c.score, 4),
+        "final_score":        round(breakdown.get("final_score", c.score), 4),
+        "no_trade_threshold": c.score_threshold,
+        "score_gap_to_threshold": (
+            round(c.score_gap_to_threshold, 4)
+            if c.score_gap_to_threshold is not None else None
+        ),
+        "rejection_type":  c.rejection_type,
+        "weak_components": "; ".join(c.weak_components),
+    }
+    for k in _SCORE_COMPONENT_COLUMNS:
+        v = breakdown.get(k)
+        row[f"score_{k}"] = round(v, 4) if isinstance(v, (int, float)) else None
+    row["score_breakdown_json"] = _json.dumps(breakdown, default=float)
+
+    row.update({
+        "rejected":          c.rejected,
         "rejection_reasons": "; ".join(c.rejection_reasons),
         "planned_loss_dollars": round(
             planned_loss_dollars(
@@ -237,7 +281,8 @@ def _candidate_row(strategy_id: str, c, session, ts: datetime, decision_str: str
         "short_bid": short.get("bid"), "short_ask": short.get("ask"), "short_mid": short.get("mid"),
         "long_bid":  long_.get("bid"), "long_ask":  long_.get("ask"), "long_mid":  long_.get("mid"),
         "bid_ask_quality": round(c.meta.get("bid_ask_quality", 0.0), 3),
-    }
+    })
+    return row
 
 
 def _collect_required_strikes(strategies: dict, structure) -> list[float]:  # type: ignore[no-untyped-def]

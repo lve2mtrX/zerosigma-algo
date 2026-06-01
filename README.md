@@ -267,6 +267,73 @@ secret-looking key (`token`, `password`, `service_key`, `authorization`,
 `bearer`, `api_key`, `apikey`, `private`, `jwt`) is replaced with
 `<REDACTED>`. Safe to share in a bug report.
 
+##### Score-breakdown debugging (Phase 2.7)
+
+Every candidate now carries its full score breakdown plus three meta
+fields, plus a `rejection_type` enum and a `weak_components` list. The
+ranked-candidates CSV exposes one column per scoring component AND the
+breakdown as JSON, so PowerShell can slice it directly:
+
+```powershell
+# Quick high-level look at why each candidate landed where it did
+Import-Csv .\outputs\latest\ranked_candidates.csv |
+  Select-Object side,short_strike,long_strike,credit,score,
+                score_gap_to_threshold,weak_components,rejection_type,
+                rejection_reasons |
+  Format-Table -AutoSize
+
+# All score columns + the JSON breakdown for one candidate
+Import-Csv .\outputs\latest\ranked_candidates.csv |
+  Select-Object -First 1 | Format-List
+
+# Discover every column the scanner emits today
+(Import-Csv .\outputs\latest\ranked_candidates.csv | Select-Object -First 1).PSObject.Properties.Name
+```
+
+**`rejection_type` taxonomy** (per-candidate AND per-decision):
+
+| Value | Meaning |
+|---|---|
+| `selected` | This candidate is the winner — `TRADE_*` decision. |
+| `score_below_threshold` | Cleared hard filters; score < `no_trade_score_threshold`. |
+| `filter_rejected` | Removed by hard filters before scoring (`rejection_reasons` populated). |
+| `no_candidates` | Strategy returned zero candidates (decision-level only). |
+| `missing_quotes` | Quote chain didn't cover required structure strikes (decision-level). |
+| `missing_structure` | StructureProvider supplied no anchors (decision-level). |
+
+**`weak_components`**: top-2 lowest-scoring sub-components per candidate,
+formatted `"name=0.42"`. The helper `weak_components_of()` in
+`src/strategies/base.py` filters out the meta keys (`final_score`,
+`no_trade_threshold`, `score_gap_to_threshold`) so they never surface as
+"weak."
+
+**`planned_loss_dollars`** = **planned stop risk dollars** under the
+session's `default_stop_variant`. Computed as
+`credit × (stop_multiple − 1) × 100 × contracts`, capped at the
+theoretical max loss. Column name preserved for back-compat with earlier
+runs; semantic clarification only.
+
+**`time_decay_headroom` is a documented placeholder** (returns a neutral
+0.5 regardless of intraday time-of-day). Its column will become
+informative when minutes-to-close is plumbed into the scorer. Today it
+counts as 5% of the weighted total, which is small enough that the
+placeholder doesn't materially distort decisions — but the breakdown
+makes it visible.
+
+> This phase is **observability, not tuning**. We haven't changed any
+> weights, haven't moved any thresholds, haven't added or removed any
+> components. The next phase will compare scoring output against
+> discretionary expectations (Dan's intuition for each candidate) and
+> THEN parameterize weights via the session config.
+
+##### Example below-threshold explanation
+
+```
+NO_TRADE — best candidate PUT_CREDIT 7550.0/7545.0 @ 0.50 scored 0.4639,
+below threshold 0.60 by 0.1361. Weakest components:
+credit_to_risk=0.14, maxvol_alignment=0.00.
+```
+
 ##### What's still missing under `public_only`
 
 | Field | Still None under public_only? | How to populate |

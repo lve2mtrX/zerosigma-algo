@@ -471,10 +471,50 @@ else:
                 "b/a quality": round(c.meta.get("bid_ask_quality", 0.0), 2),
                 "breakeven":   round(c.breakeven, 2),
                 "score":       round(c.score, 2),
-                "rejected":    c.rejected,
+                "gap":         (round(c.score_gap_to_threshold, 3)
+                                if c.score_gap_to_threshold is not None else None),
+                "rejection":   c.rejection_type or ("rejected" if c.rejected else None),
+                "weak":        "; ".join(c.weak_components),
                 "rejection_reasons": "; ".join(c.rejection_reasons),
             })
         st.dataframe(rows, use_container_width=True, hide_index=True)
+
+        # Per-candidate score breakdown expanders (Phase 2.7 observability)
+        st.caption("Click a candidate to inspect its full score breakdown.")
+        for c in candidates:
+            sel_badge = "✅ " if c.rejection_type == "selected" else ""
+            gap_str = (
+                f"gap {c.score_gap_to_threshold:+.4f}"
+                if c.score_gap_to_threshold is not None else ""
+            )
+            label = (
+                f"{sel_badge}{c.side}  K {c.short_strike}/{c.long_strike}  "
+                f"score {c.score:.4f}  ({gap_str})  rejection={c.rejection_type or '—'}"
+            )
+            with st.expander(label, expanded=(c.rejection_type == "selected")):
+                top = st.columns(4)
+                top[0].metric("Score", f"{c.score:.4f}")
+                top[1].metric(
+                    "Threshold",
+                    f"{c.score_threshold:.2f}" if c.score_threshold is not None else "—",
+                )
+                top[2].metric(
+                    "Gap",
+                    f"{c.score_gap_to_threshold:+.4f}"
+                    if c.score_gap_to_threshold is not None else "—",
+                )
+                top[3].metric("Rejection type", c.rejection_type or "—")
+                if c.weak_components:
+                    st.markdown(
+                        "**Weakest components:** "
+                        + ", ".join(f"`{w}`" for w in c.weak_components)
+                    )
+                if c.rejection_reasons:
+                    st.markdown(
+                        "**Filter reasons:** "
+                        + ", ".join(f"`{r}`" for r in c.rejection_reasons)
+                    )
+                st.json(c.score_breakdown, expanded=False)
 
     decision = strat.select(candidates, params)
     st.subheader("Decision")
