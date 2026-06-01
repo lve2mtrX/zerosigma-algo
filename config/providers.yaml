@@ -4,9 +4,11 @@
 # implementation. Implementation classes live in src/providers/*.
 
 structure:
-  # Phase 1: stub (returns hand-crafted snapshots for testing).
-  # Phase 2: switch to zerosigma_api.
-  active: "stub"
+  # SAFE DEFAULT: stub (deterministic mock — no network, no creds).
+  # Set ZS_STRUCTURE_PROVIDER=zerosigma_api in .env (with auth creds) to
+  # switch to the real read-only provider. Empty / missing → "stub".
+  active: "${ZS_STRUCTURE_PROVIDER}"
+  default_if_unset: "stub"
 
   implementations:
 
@@ -19,13 +21,19 @@ structure:
       module: "src.providers.structure.zerosigma_api"
       class:  "ZeroSigmaApiStructureProvider"
       params:
-        base_url:    "${ZS_API_BASE_URL}"
-        token:       "${ZS_API_TOKEN}"
-        admin_key:   "${ZS_API_ADMIN_SERVICE_KEY}"
-        symbol:      "${ZS_PRIMARY_SYMBOL}"
-        refresh_seconds: "${ZS_REFRESH_SECONDS}"
-        timeout_seconds: 10
-        max_retries: 3
+        base_url:          "${ZS_API_BASE_URL}"
+        auth_mode:         "${ZS_API_AUTH_MODE}"
+        token:             "${ZS_API_TOKEN}"
+        username:          "${ZS_API_USERNAME}"
+        password:          "${ZS_API_PASSWORD}"
+        service_key:       "${ZS_API_SERVICE_KEY}"
+        symbol:            "${ZS_PRIMARY_SYMBOL}"
+        refresh_seconds:   "${ZS_REFRESH_SECONDS}"
+        timeout_seconds:   "${ZS_API_TIMEOUT_SECONDS}"
+        verify_ssl:        "${ZS_API_VERIFY_SSL}"
+        max_retries:       "${ZS_API_MAX_RETRIES}"
+        enable_exposure_series: "${ZS_API_ENABLE_EXPOSURE_SERIES}"
+        enable_ddoi:       "${ZS_API_ENABLE_DDOI}"
 
 quotes:
   # Phase 1: null provider — returns None, forcing manual marks.

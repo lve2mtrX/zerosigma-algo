@@ -33,13 +33,16 @@ def main() -> int:
     parser.add_argument("--strategy", default=None,
                         help="restrict to one strategy_id (default: all enabled)")
     parser.add_argument("--symbol",   default=None, help="symbol to scan (default: SPX)")
+    parser.add_argument("--structure-provider", dest="structure_provider", default=None,
+                        choices=["stub", "zerosigma_api"],
+                        help="override active structure provider (default: from config/.env)")
     parser.add_argument("--dry-run",  action="store_true",
                         help="do not write decision_log / ranked_candidates")
     args = parser.parse_args()
 
     from src.app.session_state import SessionConfig
     from src.providers.quotes.mock_provider import MockQuoteProvider
-    from src.providers.structure.stub import StubStructureProvider
+    from src.providers.structure.factory import build_structure_provider
     from src.reporting.decision_log import log_decision, log_decision_to_file
     from src.risk.filters import apply_filters
     from src.risk.limits import load_profile
@@ -70,21 +73,34 @@ def main() -> int:
 
     symbol = args.symbol or cfg.scanner.get("symbols", ["SPX"])[0]
 
-    # Acquire BOTH providers — explicit separation
-    structure_provider = StubStructureProvider()
-    quote_provider     = MockQuoteProvider()
-    structure = structure_provider.get_snapshot(symbol)
-    chain     = quote_provider.get_option_chain(symbol, expiry=structure.expiry)
+    # Acquire BOTH providers — explicit separation. Structure provider can be
+    # overridden by --structure-provider; quote provider is mock for Phase 2.
+    structure_provider, resolved_structure_name = build_structure_provider(
+        cfg, override=args.structure_provider,
+    )
+    quote_provider = MockQuoteProvider()
+    try:
+        structure = structure_provider.get_snapshot(symbol)
+    except Exception as exc:
+        log.error("StructureProvider %s failed: %s — falling back to stub.",
+                  resolved_structure_name, type(exc).__name__)
+        from src.providers.structure.stub import StubStructureProvider
+        structure_provider = StubStructureProvider()
+        resolved_structure_name = "stub"
+        structure = structure_provider.get_snapshot(symbol)
+    chain = quote_provider.get_option_chain(symbol, expiry=structure.expiry)
     if chain is None:
         log.error("QuoteProvider returned no chain for %s — aborting tick.", symbol)
         return 3
     quote_provider.get_spot(symbol)  # heartbeat
     quote_status = quote_provider.status()
 
+    structure_missing = (structure.raw or {}).get("missing_fields") or []
     log.info(
-        "scan tick: symbol=%s profile=%s strategies=%s structure=%s quotes=%s",
+        "scan tick: symbol=%s profile=%s strategies=%s structure=%s quotes=%s "
+        "missing_structure_fields=%d",
         symbol, profile.name, list(strategies.keys()),
-        structure.source, chain.provider_name,
+        structure.source, chain.provider_name, len(structure_missing),
     )
 
     output_root = cfg.output_dir
@@ -116,6 +132,8 @@ def main() -> int:
             "call_floor_2k":      structure.exposures.call_floor_2k,
             "call_floor_5k":      structure.exposures.call_floor_5k,
             "gamma_regime":       structure.exposures.gamma_regime,
+            "structure_missing_fields": list(structure_missing),
+            "structure_subscription_active": (structure.raw or {}).get("subscription_active"),
         }
 
         if not args.dry_run:

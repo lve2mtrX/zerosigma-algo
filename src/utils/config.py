@@ -86,10 +86,24 @@ def load_config(repo_root: Path) -> AppConfig:
     providers_raw = _load_yaml(cfg_dir / "providers.yaml")
     scanner = _load_yaml(cfg_dir / "scanner.yaml").get("scanner", {})
 
-    structure_active = (providers_raw.get("structure") or {}).get("active") or "stub"
-    quotes_active = (providers_raw.get("quotes") or {}).get("active") or "null"
+    struct_section = providers_raw.get("structure") or {}
+    structure_active = (
+        struct_section.get("active")
+        or struct_section.get("default_if_unset")
+        or "stub"
+    )
+    quotes_section = providers_raw.get("quotes") or {}
+    quotes_active = (
+        quotes_section.get("active")
+        or quotes_section.get("default_if_unset")
+        or "null"
+    )
     exec_section = providers_raw.get("execution") or {}
-    execution_active = exec_section.get("active") or exec_section.get("default_if_unset") or "disabled"
+    execution_active = (
+        exec_section.get("active")
+        or exec_section.get("default_if_unset")
+        or "disabled"
+    )
 
     return AppConfig(
         repo_root=repo_root,

@@ -36,8 +36,8 @@ letters.
 | **0 — Scaffold** | Folder layout, configs, base interfaces, README/plan/notes. | ✅ |
 | **1 — Framework + manual flow** | Strategy registry, decision log, manual trade tracker, EOD summary, Streamlit shell. ZS API stubbed. | ✅ |
 | **1.5 — Provider split** | Clean separation of StructureProvider (context only) and QuoteProvider (chain pricing). Strategy takes both; scanner + cockpit reflect both timestamps. | ✅ |
-| **2 — ZS API wired (read-only)** | StructureProvider implementation against `/api/v1/market/*` + `/api/v1/exposure/*`. Polling loop. Cached snapshots. | 🚧 next |
-| **3 — Vertical Wing v1 end-to-end** | Full candidate generation, scoring, hard filters, decision engine, paper P&L. | ⏳ |
+| **2 — ZS API wired (read-only)** | StructureProvider implementation against `/api/v1/market/snapshot` + `/api/v1/exposure/series`. Three auth modes (bearer / login / service_token). Subscription-gated endpoints degrade gracefully. | ✅ |
+| **3 — Vertical Wing v1 end-to-end** | Full candidate generation, scoring, hard filters, decision engine, paper P&L. | 🚧 next (with optional Phase 2.1 broker capability probe in parallel) |
 | **4 — Broker Capability Probe** | Read-only probe of candidate brokers (Tastytrade / Webull / Alpaca / Tradier / IBKR / Schwab). Selects QuoteProvider. | ⏳ |
 | **5 — Broker quotes** | QuoteProvider wired. Live mid for paper marks. | ⏳ |
 | **6 — Manual-confirm execution** | `manual_confirm` execution mode. Cockpit shows the order ticket; human clicks "Send" through broker UI. | ⏳ |
@@ -622,6 +622,16 @@ They are NOT to be implemented by this repo:
    should warn (not fail) when prev-wings is stale.
 7. **Replay mode**: would be valuable for backtesting candidate generation
    against historical chain snapshots in `history/raw/`. Out of scope Phase 1.
+8. **ZS API fields not exposed** (Phase 2 gap): `gamma_flip`, `call_wall`,
+   `put_wall`, `ddoi_pin` aren't surfaced by any `/api/v1/*` endpoint. The
+   Dashboard derives them internally from chain CSV + OI distribution.
+   Two ways to close the gap:
+   - **(a)** Ask the ZS team for a bundled `/api/v1/market/structure-levels`
+     endpoint (lowest algo-side complexity; see §13 recommendations).
+   - **(b)** Pull `/api/v1/exposure/series?metric=raw_gex&mode=net` and
+     derive walls + flip locally (mirrors production logic in the algo repo).
+   Phase 3 picks one based on ZS-team bandwidth. Until then those four
+   fields stay `None` and the strategy scorer treats them as neutral.
 
 ---
 
@@ -687,12 +697,14 @@ informs the QuoteProvider choice.
   and `outputs/runs/{date}/` without requiring Streamlit.
 - ✅ 34 tests, 0 failures, ruff clean.
 
-### Still mock / stubbed (Phase 2+)
+### Still mock / stubbed (Phase 3+)
 
-- `ZeroSigmaApiStructureProvider` exists but raises `NotImplementedError` —
-  wire to `/api/v1/market/*` and `/api/v1/exposure/*` in Phase 2. Boundary
-  now clean (Phase 1.5): the integration only has to populate
-  `StructureSnapshot` / `ExposureContext`; it does NOT touch quote flow.
+- `ZeroSigmaApiStructureProvider` is **implemented** as of Phase 2. Default
+  stays on stub for safety; switch via `ZS_STRUCTURE_PROVIDER=zerosigma_api`
+  in `.env` or `--structure-provider zerosigma_api` on the scanner CLI.
+  Fields not exposed by the current ZS API land as `None` with their names
+  tracked in `snapshot.raw["missing_fields"]`: `gamma_flip`, `call_wall`,
+  `put_wall`, `ddoi_pin`. Filed as open question §14.8.
 - `QuoteProvider` is `MockQuoteProvider` (deterministic chain from
   `_mock_data.MOCK_CHAIN`) + `NullQuoteProvider`. Broker probe → real
   provider lands in Phase 4–5.

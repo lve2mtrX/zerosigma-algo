@@ -36,6 +36,7 @@ from src.paper.manual_tracker import (  # noqa: E402
 )
 from src.paper.positions import PaperPosition  # noqa: E402
 from src.providers.quotes.mock_provider import MockQuoteProvider  # noqa: E402
+from src.providers.structure.factory import build_structure_provider  # noqa: E402
 from src.providers.structure.stub import StubStructureProvider  # noqa: E402
 from src.reporting.config_change_log import (  # noqa: E402
     log_config_change,
@@ -131,18 +132,44 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.caption(f"Structure provider: `{CFG.providers.structure_active}`")
-    st.caption(f"Quote provider:     `{CFG.providers.quotes_active}`")
+    st.caption("Provider selection (config/providers.yaml + .env)")
+    # Structure provider is user-selectable in the cockpit; defaults to the
+    # YAML/env value. Switching to zerosigma_api without creds is allowed —
+    # the factory falls back to stub and logs the reason.
+    available_structure = ["stub", "zerosigma_api"]
+    default_structure_idx = (
+        available_structure.index(CFG.providers.structure_active)
+        if CFG.providers.structure_active in available_structure else 0
+    )
+    chosen_structure = st.selectbox(
+        "Structure provider",
+        options=available_structure,
+        index=default_structure_idx,
+        help="Stub = deterministic mock. zerosigma_api = read-only against the ZS API "
+             "(requires ZS_API_AUTH_MODE + credentials in .env). Empty creds → falls "
+             "back to stub automatically.",
+    )
+    st.caption(f"Quote provider:     `{CFG.providers.quotes_active}`  (mock until broker wired)")
     st.caption(f"Execution mode:     `{CFG.providers.execution_active}`")
 
 
 # Acquire snapshots — explicit separation of structure vs quotes.
 #   StructureProvider → structure context (MaxVol / DA-GEX / ceilings / floors / DDOI)
 #   QuoteProvider     → spot + full option chain (bid/ask/mid/volume per strike)
-structure_provider = StubStructureProvider()
+structure_provider, resolved_structure_name = build_structure_provider(
+    CFG, override=chosen_structure,
+)
 quote_provider     = MockQuoteProvider()
 SYMBOL = CFG.scanner.get("symbols", ["SPX"])[0]
-structure  = structure_provider.get_snapshot(SYMBOL)
+try:
+    structure = structure_provider.get_snapshot(SYMBOL)
+    structure_error: str | None = None
+except Exception as exc:
+    # Never surface secrets — just the exception type + sanitized message.
+    structure_error = f"{type(exc).__name__}: {exc}"
+    structure_provider = StubStructureProvider()
+    resolved_structure_name = "stub"
+    structure = structure_provider.get_snapshot(SYMBOL)
 spot_quote = quote_provider.get_spot(SYMBOL)
 chain      = quote_provider.get_option_chain(SYMBOL, expiry=structure.expiry)
 quote_status = quote_provider.status()
@@ -182,6 +209,28 @@ with st.expander("Provider status", expanded=True):
     )
     if not quote_status.connected:
         st.caption(f"_QuoteProvider notes: {quote_status.notes or 'disconnected'}_")
+
+    # If the user picked zerosigma_api but the factory degraded to stub —
+    # or get_snapshot raised — surface a clear warning. Never display
+    # tokens, passwords, or service keys.
+    if chosen_structure == "zerosigma_api" and resolved_structure_name != "zerosigma_api":
+        st.warning(
+            "Selected `zerosigma_api` but provider is not configured "
+            "(missing ZS_API_AUTH_MODE or credentials). Running on the stub. "
+            "See `.env.example` for the required variable names."
+        )
+    elif structure_error is not None:
+        st.warning(
+            f"`zerosigma_api` failed at boot → fell back to stub. "
+            f"Error: `{structure_error}`. Check `ZS_API_BASE_URL` and auth env vars."
+        )
+    # When the real provider is connected, surface its status (no secrets).
+    if resolved_structure_name == "zerosigma_api" and hasattr(structure_provider, "status"):
+        with st.expander("zerosigma_api status (no secrets)", expanded=False):
+            st.json(structure_provider.status())
+            missing = (structure.raw or {}).get("missing_fields") or []
+            if missing:
+                st.caption(f"_Missing structure fields this tick: {', '.join(missing)}_")
 
 
 # ──────────────────────────────────────────────────────────────────────

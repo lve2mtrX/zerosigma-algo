@@ -259,6 +259,132 @@ are populated.
 
 ---
 
+## 8a. Phase 2 Read-Only ZS API Contract Notes
+
+> Captured during Phase 2 implementation of `ZeroSigmaApiStructureProvider`.
+> Re-inspection of `zerosigma-api` and `Dashboard` (read-only). No external
+> files were modified. Values below are CONTRACT DETAILS; **no real secrets
+> were copied** — only env-var names.
+
+### Auth
+
+| Mechanism | Endpoint | Body | Returns | Notes |
+|---|---|---|---|---|
+| User JWT | `POST /api/v1/auth/login` | `{email, password}` | `{access_token, token_type:"bearer", user_id}` | 5/min. Token TTL = `ACCESS_TOKEN_EXPIRE_MINUTES` (default 15). |
+| Service token | `POST /api/v1/auth/service-token` | `{email, service_key}` | `{access_token, token_type:"bearer"}` | 10/min. Server validates `service_key` against `ADMIN_SERVICE_KEY` env. **Caller must be an admin user.** Returns 501 if `ADMIN_SERVICE_KEY` is not configured on the server, 401 if key invalid, 403 if user not admin. |
+| Refresh | `POST /api/v1/auth/refresh` | (Bearer) | new `{access_token, ...}` | 30/min. Old token remains valid until natural expiry. |
+| Logout | `POST /api/v1/auth/logout` | (Bearer) | `{detail}` | Idempotent. Deletes JTI in Redis. |
+
+Header for authenticated calls: `Authorization: Bearer <access_token>`.
+Server tracks each JWT's JTI in Redis (`zs:token:{jti}`); revocation is via logout.
+
+### Endpoints the Phase 2 StructureProvider consumes
+
+| Method | Path | Auth | Cache | Phase 2 use |
+|---|---|---|---|---|
+| GET | `/api/v1/market/snapshot?symbol=SPX` | public | 1s | Primary call. Returns `{symbol, timestamp, spot:{...}, exposures:{...}, chain:{...}}`. |
+| GET | `/api/v1/market/exposures?symbol=SPX` | public | 1s | Backup if `snapshot.exposures` is missing. Returns `{ts, total_gex_bn, da_gex_bn, dex, vex, cex}`. |
+| GET | `/api/v1/exposure/series?symbol=SPX&metric=volume&mode=split` | **subscription** | 2s | Per-strike call/put volumes. Used to derive `PUT_CEILING_{2K,5K}` / `CALL_FLOOR_{2K,5K}` and `maxvol`. Rate 60/min. Returns 403 if user not subscribed → provider degrades gracefully. |
+| GET | `/api/v1/exposure/ddoi?symbol=SPX` | **subscription** | 5min | DDOI history. Optional; sets `ddoi_pin = None` when 503/missing. Rate 30/min. Returns 503 if `DO_SPACES_*` not configured. |
+
+**Response shapes** (real ZS field names):
+
+```jsonc
+// /market/exposures
+{ "ts": "2026-03-18T14:30:00", "total_gex_bn": 12.34,
+  "da_gex_bn": 5.67, "dex": 2.1, "vex": -0.5, "cex": 0.3 }
+
+// /market/snapshot
+{ "symbol": "SPX", "timestamp": "...",
+  "spot": { "underlying": "SPX", "price": 5850.25, "timestamp": "..." },
+  "exposures": { ... same as /market/exposures ... },
+  "chain":     { "strikes": [...], "calls": [...], "puts": [...] } }
+
+// /exposure/series (mode=split)
+{ "symbol": "SPX", "metric": "volume", "mode": "split", "weight": "oi",
+  "spot": 5850.25, "ts": "...",
+  "strikes": [5700, 5750, ...],
+  "calls":   [120,   200, ...],
+  "puts":    [80,    150, ...] }
+```
+
+### Field-by-field mapping into `ExposureContext`
+
+| ExposureContext field | Source | Derivation |
+|---|---|---|
+| `total_gex_bn` | `/market/exposures.total_gex_bn` | direct |
+| `total_vex_bn` | `/market/exposures.vex` | direct (ZS uses `vex`, no `_bn` suffix) |
+| `total_dex_bn` | `/market/exposures.dex` | direct (algo doesn't actually expose this field today; documented for future) |
+| `total_cex_bn` | `/market/exposures.cex` | direct |
+| `da_gex_signed` | `/market/exposures.da_gex_bn` | direct |
+| `gamma_regime` | derived | `"positive" if da_gex_bn > 0 else "negative" if da_gex_bn < 0 else None` |
+| `maxvol` | derived from `/exposure/series` (subscription) | strike with max `call_volume[k] + put_volume[k]` |
+| `put_ceiling_2k` | derived from `/exposure/series` | `max(strike for k, vol in zip(strikes, puts) if vol >= 2000)` |
+| `put_ceiling_5k` | derived | same with threshold 5000 |
+| `call_floor_2k` | derived from `/exposure/series` | `min(strike for k, vol in zip(strikes, calls) if vol >= 2000)` |
+| `call_floor_5k` | derived | same with threshold 5000 |
+| `ddoi_pin` | `/exposure/ddoi` (subscription, 5-min cache) | most-recent record's `pin` field if present, else None |
+| `gamma_flip` | _not exposed_ | None on Phase 2 launch — Dashboard's `gamma_flow_incremental` carries it but no API endpoint surfaces it. |
+| `call_wall` / `put_wall` | _not exposed directly_ | None on Phase 2 launch — Dashboard derives from OI distribution; no API endpoint surfaces it. |
+
+`StructureSnapshot.spot` is taken from `snapshot.spot.price`. `quote_ts` from `snapshot.timestamp` (parsed to aware `datetime`). `expiry` is from `snapshot.chain.expiry` if present, else `None`.
+
+### Auth-flow algorithm used by the provider
+
+```
+1. If ZS_API_TOKEN env is set → use it directly as Bearer.
+2. Else if ZS_API_USERNAME + ZS_API_PASSWORD are set →
+       POST /auth/login {email, password} → cache access_token.
+3. Else if ZS_API_ADMIN_SERVICE_KEY + ZS_API_USERNAME are set →
+       POST /auth/service-token {email, service_key} → cache access_token.
+4. Else → status() reports "no auth configured"; get_snapshot raises
+       RuntimeError before any HTTP call.
+
+On 401 from a data endpoint → invalidate cached token + retry once.
+```
+
+We do NOT call `/auth/refresh` in Phase 2 — simpler to re-mint via login/service-token on expiry.
+
+### Rate-limit safety
+
+Cockpit polls structure every ~60 s by default (`ZS_REFRESH_SECONDS`).
+That's well inside ZS's published caps:
+
+- public market endpoints (`/market/*`): no SlowAPI limit (1 s server cache)
+- `/exposure/series`: 60/min
+- `/exposure/ddoi`: 30/min
+- auth: 5–30/min depending on endpoint
+
+### ZS API server env vars (read-only knowledge — do NOT copy values)
+
+`DATABASE_URL`, `SECRET_KEY`, `ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES`,
+`REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB`,
+`ADMIN_SERVICE_KEY`, `DO_SPACES_KEY/SECRET/REGION/BUCKET`,
+`REVENUECAT_SECRET_API_KEY`, `REVENUECAT_WEBHOOK_AUTH`.
+
+**The cockpit only cares about a tiny subset for outbound auth** — see
+`.env.example` for the algo's own variable names (`ZS_API_*`).
+
+### Why we don't read Redis or DigitalOcean Spaces directly
+
+Dashboard reads Redis (`zs:latest:{SYMBOL}:*`) and Spaces history JSONL
+directly because it lives inside the same VPC + has the credentials. The
+algo cockpit is a **separate, portable process** that runs from a user's
+laptop. Hitting the public ZS API is the supported integration path.
+
+### Phase 2 acceptance criteria
+
+- ✅ Single `/market/snapshot` call populates spot + exposure aggregates.
+- ✅ Optional `/exposure/series?metric=volume&mode=split` enriches
+  `put_ceiling_*` / `call_floor_*` / `maxvol` when the user is subscribed.
+- ✅ Subscription gate (`/exposure/*` returning 403) degrades gracefully —
+  those fields go to None, provider continues serving the rest.
+- ✅ Auth failures surface via `status()` rather than crashing the cockpit.
+- ✅ `gamma_flip`, `call_wall`, `put_wall`, `ddoi_pin` are explicitly None
+  on launch day with a follow-up tracked in `notes.md`.
+
+---
+
 ## 9. Future recommendations for the ZS team
 
 These are out of scope for this repo; recording so they aren't lost:

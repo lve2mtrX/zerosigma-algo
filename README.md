@@ -156,6 +156,59 @@ outputs/
     └── eod_summary.json
 ```
 
+### Provider modes
+
+Two structure-provider modes are available; the default is **safe (stub)**.
+
+```powershell
+# (1) Safe default — stub + mock (no network, no credentials)
+python -m scripts.run_scanner
+python -m scripts.run_scanner --structure-provider stub
+
+# (2) Read-only ZS API — requires ZS_API_AUTH_MODE + credentials in .env
+python -m scripts.run_scanner --structure-provider zerosigma_api
+```
+
+The Streamlit cockpit also exposes a structure-provider dropdown in the sidebar.
+
+#### Required `.env` for ZS API mode
+
+Set `ZS_API_AUTH_MODE` to one of `bearer | login | service_token`, then
+populate the matching credential block:
+
+| Mode | Env vars |
+|---|---|
+| `bearer`        | `ZS_API_BASE_URL`, `ZS_API_TOKEN` |
+| `login`         | `ZS_API_BASE_URL`, `ZS_API_USERNAME`, `ZS_API_PASSWORD` |
+| `service_token` | `ZS_API_BASE_URL`, `ZS_API_USERNAME`, `ZS_API_SERVICE_KEY` |
+
+Optional:
+
+```
+ZS_API_TIMEOUT_SECONDS=10
+ZS_API_VERIFY_SSL=true
+ZS_API_MAX_RETRIES=3
+ZS_API_ENABLE_EXPOSURE_SERIES=true    # /exposure/series requires subscription
+ZS_API_ENABLE_DDOI=false              # /exposure/ddoi requires subscription + Spaces
+ZS_STRUCTURE_PROVIDER=zerosigma_api   # default selection at startup
+```
+
+If `ZS_STRUCTURE_PROVIDER=zerosigma_api` but auth env vars are missing, the
+factory falls back to `stub` and surfaces a clear warning in the cockpit.
+Tokens, passwords, and service keys are NEVER displayed or logged.
+
+#### Endpoints consumed by the read-only provider
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /api/v1/market/snapshot?symbol=SPX` | public | spot + aggregated exposures (`total_gex_bn`, `da_gex_bn`, `vex`, `dex`, `cex`) |
+| `GET /api/v1/exposure/series?symbol=SPX&metric=volume&mode=split` | subscription | per-strike call/put volumes → derives `PUT_CEILING_{2K,5K}`, `CALL_FLOOR_{2K,5K}`, `maxvol` |
+| `POST /api/v1/auth/login` or `/auth/service-token` | n/a | auth handshake; cached JWT used as `Authorization: Bearer …` |
+
+`gamma_regime` is derived from `sign(da_gex_bn)`. Fields not exposed by the
+current ZS API contract (`gamma_flip`, `call_wall`, `put_wall`, `ddoi_pin`)
+land as `None` and are listed in `snapshot.raw["missing_fields"]` for audit.
+
 ### Provider separation (Phase 1.5)
 
 The cockpit deliberately separates structure context from quote pricing.

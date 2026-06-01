@@ -125,3 +125,56 @@ Phase 2: wire `ZeroSigmaApiStructureProvider` against `/api/v1/market/*`
 and `/api/v1/exposure/*`. The provider boundary is now clean — that work
 only needs to populate `StructureSnapshot` / `ExposureContext` from JSON
 responses; it does NOT touch quote-side code or the strategy contract.
+
+---
+
+## 2026-06-01 (later) — Phase 2: read-only ZS API StructureProvider
+
+- Inspected `zerosigma-api` + `Dashboard` read-only — no external files
+  modified. Documented the contract in `docs/reference_notes.md §8a`.
+- Implemented `src/providers/structure/zerosigma_api.py` against the public
+  ZS API surface:
+  - `GET /api/v1/market/snapshot` → spot + aggregate exposures.
+  - `GET /api/v1/exposure/series?metric=volume&mode=split` → per-strike
+    call/put volumes → derives `PUT_CEILING_{2K,5K}`, `CALL_FLOOR_{2K,5K}`,
+    `maxvol`.
+- Three auth modes wired (`bearer`, `login`, `service_token`); none of the
+  three is the default — `ZS_API_AUTH_MODE=none` keeps the cockpit on the
+  stub provider with no network attempts.
+- `gamma_regime` derived from `sign(da_gex_bn)`. `total_vex_bn` <-
+  `exposures.vex` (ZS uses unsuffixed `vex`/`dex`/`cex`).
+- Fields the current ZS API does NOT expose: `gamma_flip`, `call_wall`,
+  `put_wall`, `ddoi_pin` — set to `None`, listed in
+  `snapshot.raw["missing_fields"]`. Tracked in plan.md §14.8.
+- Subscription gate: when `/exposure/series` returns 403 (user not
+  subscribed), the provider degrades gracefully — VW levels drop to None,
+  the rest of the snapshot still populates, `status().subscription_active`
+  flips to `False`, and the UI surfaces a warning.
+- New module: `src/providers/structure/factory.py` — resolves the active
+  provider name → instance, with stub fallback on any error. Scanner
+  + Streamlit both go through it.
+- `scripts/run_scanner.py --structure-provider {stub|zerosigma_api}` flag;
+  decision log now carries `structure_missing_fields` and
+  `structure_subscription_active`.
+- Streamlit sidebar: structure-provider dropdown; clear warning if user
+  picks `zerosigma_api` but env isn't configured (or boot fails); status
+  panel shows `provider.status()` (no secrets) + the missing-field list.
+- Env: `.env.example` lists `ZS_API_AUTH_MODE`, `ZS_API_TOKEN`,
+  `ZS_API_USERNAME`, `ZS_API_PASSWORD`, `ZS_API_SERVICE_KEY`,
+  `ZS_API_TIMEOUT_SECONDS`, `ZS_API_VERIFY_SSL`, `ZS_API_MAX_RETRIES`,
+  `ZS_API_ENABLE_EXPOSURE_SERIES`, `ZS_API_ENABLE_DDOI`,
+  `ZS_STRUCTURE_PROVIDER`. **No real secrets in the repo.**
+- 9 new tests against `httpx.MockTransport` — happy path, 403 graceful
+  degrade, missing exposures payload, service-token auth handshake,
+  unconfigured no-network behavior, no-secret-leak invariant, factory
+  default/explicit/unknown selection. Total: 51/51 passing.
+- Ruff clean.
+- Demo unchanged when running with default safe mode: stub structure +
+  mock quotes → `TRADE_CALL_CREDIT` SPX 5815/5820 @ $0.60 credit, score 0.61.
+
+### Next step
+
+Phase 3: Vertical Wing v1 end-to-end paper P&L runs against live ZS API
+context (where available) + mock quotes. Decide gap-closure path for the
+four unexposed structure fields (plan.md §14.8). Phase 4 broker probe can
+run in parallel since it's independent.
