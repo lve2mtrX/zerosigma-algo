@@ -20,6 +20,13 @@ What it never does:
 
 Auth modes (env: `ZS_API_AUTH_MODE`):
   none           → reject `get_snapshot`; `status()` reports unconfigured.
+  public_only    → call `/market/snapshot` and any other public endpoint
+                   WITHOUT an Authorization header. Subscription-gated
+                   endpoints (`/exposure/series`, `/exposure/ddoi`) are
+                   skipped — even if `enable_exposure_series=True` — so
+                   volume-derived fields (PUT_CEILING / CALL_FLOOR / MaxVol)
+                   land as None and are tracked in `missing_fields`. No
+                   secrets required; nothing is ever sent.
   bearer         → use env `ZS_API_TOKEN` verbatim as the bearer.
   login          → POST /auth/login with ZS_API_USERNAME + ZS_API_PASSWORD.
   service_token  → POST /auth/service-token with ZS_API_USERNAME + ZS_API_SERVICE_KEY.
@@ -47,7 +54,12 @@ from src.utils.time import now_et
 log = get_logger("provider.zerosigma_api")
 
 
-_VALID_AUTH_MODES = {"none", "bearer", "login", "service_token"}
+_VALID_AUTH_MODES = {"none", "public_only", "bearer", "login", "service_token"}
+
+# Modes that may attach an Authorization header. `public_only` deliberately
+# is NOT in this set — even if a token happened to be present, the provider
+# must not send it when the user has opted into public-only reads.
+_AUTHED_MODES = {"bearer", "login", "service_token"}
 
 
 def _coerce_bool(v: Any, default: bool = False) -> bool:
@@ -153,6 +165,10 @@ class ZeroSigmaApiStructureProvider:
             return False
         if self.auth_mode == "none":
             return False
+        if self.auth_mode == "public_only":
+            # No creds required — just a base_url. Subscription-gated
+            # endpoints are skipped by `_use_authed_endpoints`.
+            return True
         if self.auth_mode == "bearer":
             return bool(self._token)
         if self.auth_mode == "login":
@@ -160,6 +176,10 @@ class ZeroSigmaApiStructureProvider:
         if self.auth_mode == "service_token":
             return bool(self._username and self._service_key)
         return False
+
+    def _use_authed_endpoints(self) -> bool:
+        """True when the provider may call subscription-gated endpoints."""
+        return self.auth_mode in _AUTHED_MODES and self._is_configured()
 
     def _build_client(self) -> httpx.Client:
         if self._client_factory is not None:
@@ -171,6 +191,11 @@ class ZeroSigmaApiStructureProvider:
         )
 
     def _ensure_token(self, client: httpx.Client) -> str:
+        if self.auth_mode in {"none", "public_only"}:
+            # Caller should never reach here in these modes; guard defensively.
+            raise RuntimeError(
+                f"ZS API auth_mode={self.auth_mode!r} does not use tokens"
+            )
         if self._token:
             return self._token
         if self.auth_mode == "bearer":
@@ -240,8 +265,10 @@ class ZeroSigmaApiStructureProvider:
                 raise RuntimeError(f"ZS API /market/snapshot returned no data for {sym}")
 
             # 2) per-strike volume series for VW levels (subscription-gated)
+            #    Only attempted when caller has creds AND has opted in.
+            #    public_only / none → skipped silently; fields land as None.
             vol_series = None
-            if self.enable_exposure_series:
+            if self.enable_exposure_series and self._use_authed_endpoints():
                 vol_series = self._get_json(
                     client, "/api/v1/exposure/series",
                     params={"symbol": sym, "metric": "volume", "mode": "split"},
@@ -296,16 +323,24 @@ class ZeroSigmaApiStructureProvider:
 
     def status(self) -> dict[str, Any]:
         """Light status snapshot — never contains secrets."""
+        # `effective_exposure_series` reflects what the provider WILL actually
+        # try, after the public_only / no-auth guard. Useful for the cockpit
+        # to show "exposure series disabled in public_only mode" warnings.
+        effective_exposure_series = (
+            self.enable_exposure_series and self._use_authed_endpoints()
+        )
         return {
             "provider": self.name,
             "base_url": self.base_url or None,
             "auth_mode": self.auth_mode,
             "configured": self._is_configured(),
+            "public_only": self.auth_mode == "public_only",
             "last_status_code": self._state.last_status_code,
             "last_error": self._state.last_error,
             "last_missing_fields": list(self._state.last_missing_fields),
             "subscription_active": self._state.has_subscription,
             "exposure_series_enabled": self.enable_exposure_series,
+            "exposure_series_effective": effective_exposure_series,
             "ddoi_enabled": self.enable_ddoi,
         }
 

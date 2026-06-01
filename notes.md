@@ -178,3 +178,54 @@ Phase 3: Vertical Wing v1 end-to-end paper P&L runs against live ZS API
 context (where available) + mock quotes. Decide gap-closure path for the
 four unexposed structure fields (plan.md §14.8). Phase 4 broker probe can
 run in parallel since it's independent.
+
+---
+
+## 2026-06-01 (Phase 2.5) — `public_only` auth mode + smoke script
+
+- Added fifth auth mode `public_only` to
+  `ZeroSigmaApiStructureProvider`. It allows live calls to
+  `/api/v1/market/snapshot` (public endpoint) without an `Authorization`
+  header AND silently skips `/api/v1/exposure/series` (subscription-gated)
+  regardless of `enable_exposure_series` — so volume-derived VW levels
+  (`PUT_CEILING_{2K,5K}`, `CALL_FLOOR_{2K,5K}`, `MaxVol`) come back as
+  `None` and are listed in `missing_fields`. **No secrets required.**
+- New module-level constant `_AUTHED_MODES = {"bearer", "login",
+  "service_token"}` and helper `_use_authed_endpoints()` — the
+  authoritative gate for whether the provider may attach a Bearer header.
+  `public_only` is explicitly NOT in that set.
+- `status()` now reports `public_only: bool` and
+  `exposure_series_effective: bool` (true only if `enable_exposure_series`
+  AND the auth mode actually supports auth headers). The cockpit reads
+  the effective flag, not the raw config flag, so the warning is honest.
+- New `scripts/smoke_zs_api.py` — a credentials-free smoke test for the
+  ZS API integration. Loads `.env` + config, builds the real provider,
+  calls `get_snapshot(symbol)` once, prints a sanitized summary (allow-listed
+  status + exposure fields). Never prints tokens/passwords/service keys.
+  Exit codes: 0 on success, 0 with warning when unconfigured (CI-safe),
+  1 with a clean type-only message when configured-but-failed.
+- `.env.example` defaults shifted: `ZS_API_AUTH_MODE=public_only`,
+  `ZS_API_ENABLE_EXPOSURE_SERIES=false`, `ZS_API_MAX_RETRIES=1`,
+  `ZS_STRUCTURE_PROVIDER=stub`. Added a comment block explaining the
+  three read paths (stub → public smoke → authenticated).
+- Streamlit cockpit: provider status panel now prominently shows
+  `auth_mode`, `configured`, `exposure_series_effective`. When
+  `public_only` is active a blue info banner explains why VW levels are
+  None and how to flip to a credentialed mode.
+- 9 new tests covering: snapshot WITHOUT Authorization header under
+  `public_only`, `/exposure/series` correctly skipped, `status()` reports
+  the effective flag, status doesn't leak left-over secrets,
+  `auth_mode=none` makes zero HTTP calls, regression on the bearer flow,
+  smoke script in three states (unconfigured warning, mocked happy path,
+  500 → exit 1 with no traceback), scanner subprocess in stub mode.
+  Total: 60/60 passing (was 51).
+- Ruff clean.
+
+### Next step
+
+Phase 3: VW v1 end-to-end runs against either stub (default) or
+`public_only` live ZS context + mock quotes. After Dan tests
+`scripts.smoke_zs_api` against the real API and confirms response shapes
+match the contract in `docs/reference_notes.md §8a`, we can enable
+authenticated `/exposure/series` to populate VW levels. Phase 4 broker
+probe remains parallelizable.

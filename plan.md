@@ -37,6 +37,7 @@ letters.
 | **1 — Framework + manual flow** | Strategy registry, decision log, manual trade tracker, EOD summary, Streamlit shell. ZS API stubbed. | ✅ |
 | **1.5 — Provider split** | Clean separation of StructureProvider (context only) and QuoteProvider (chain pricing). Strategy takes both; scanner + cockpit reflect both timestamps. | ✅ |
 | **2 — ZS API wired (read-only)** | StructureProvider implementation against `/api/v1/market/snapshot` + `/api/v1/exposure/series`. Three auth modes (bearer / login / service_token). Subscription-gated endpoints degrade gracefully. | ✅ |
+| **2.5 — `public_only` mode + smoke** | Fifth auth mode `public_only` for credentials-free live reads against `/market/snapshot`. Dedicated `scripts.smoke_zs_api` sanitizing output. Cockpit surfaces auth_mode + public_only warnings. | ✅ |
 | **3 — Vertical Wing v1 end-to-end** | Full candidate generation, scoring, hard filters, decision engine, paper P&L. | 🚧 next (with optional Phase 2.1 broker capability probe in parallel) |
 | **4 — Broker Capability Probe** | Read-only probe of candidate brokers (Tastytrade / Webull / Alpaca / Tradier / IBKR / Schwab). Selects QuoteProvider. | ⏳ |
 | **5 — Broker quotes** | QuoteProvider wired. Live mid for paper marks. | ⏳ |

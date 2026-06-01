@@ -226,11 +226,26 @@ with st.expander("Provider status", expanded=True):
         )
     # When the real provider is connected, surface its status (no secrets).
     if resolved_structure_name == "zerosigma_api" and hasattr(structure_provider, "status"):
+        provider_status = structure_provider.status()
+        # Promote auth_mode + public_only to a top-line caption so it's not
+        # buried in the JSON expander.
+        st.caption(
+            f"auth_mode: **{provider_status.get('auth_mode')}**  ·  "
+            f"configured: **{provider_status.get('configured')}**  ·  "
+            f"exposure_series_effective: **{provider_status.get('exposure_series_effective')}**"
+        )
+        if provider_status.get("public_only"):
+            st.info(
+                "`public_only` mode — no Authorization header sent. "
+                "`/exposure/series` is skipped, so **PUT_CEILING / CALL_FLOOR / "
+                "MaxVol will be None**. Switch to `bearer` / `login` / `service_token` "
+                "and set `ZS_API_ENABLE_EXPOSURE_SERIES=true` to populate them."
+            )
+        missing = (structure.raw or {}).get("missing_fields") or []
+        if missing:
+            st.caption(f"_Missing structure fields this tick: `{', '.join(missing)}`_")
         with st.expander("zerosigma_api status (no secrets)", expanded=False):
-            st.json(structure_provider.status())
-            missing = (structure.raw or {}).get("missing_fields") or []
-            if missing:
-                st.caption(f"_Missing structure fields this tick: {', '.join(missing)}_")
+            st.json(provider_status)
 
 
 # ──────────────────────────────────────────────────────────────────────

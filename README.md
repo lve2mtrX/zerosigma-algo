@@ -171,16 +171,56 @@ python -m scripts.run_scanner --structure-provider zerosigma_api
 
 The Streamlit cockpit also exposes a structure-provider dropdown in the sidebar.
 
-#### Required `.env` for ZS API mode
+#### Read paths and `.env` for ZS API mode
 
-Set `ZS_API_AUTH_MODE` to one of `bearer | login | service_token`, then
-populate the matching credential block:
+The cockpit supports **five** auth modes. Picking one decides which ZS
+endpoints get called:
 
-| Mode | Env vars |
-|---|---|
-| `bearer`        | `ZS_API_BASE_URL`, `ZS_API_TOKEN` |
-| `login`         | `ZS_API_BASE_URL`, `ZS_API_USERNAME`, `ZS_API_PASSWORD` |
-| `service_token` | `ZS_API_BASE_URL`, `ZS_API_USERNAME`, `ZS_API_SERVICE_KEY` |
+| Mode | Sends Authorization header? | `/market/snapshot` | `/exposure/series` | Required `.env` vars |
+|---|---|---|---|---|
+| `none`          | n/a   | ❌ | ❌ | n/a (stub provider used) |
+| `public_only`   | **no** | ✅ | **skipped** | `ZS_API_BASE_URL` only |
+| `bearer`        | yes   | ✅ | ✅ if subscribed | `ZS_API_BASE_URL`, `ZS_API_TOKEN` |
+| `login`         | yes   | ✅ | ✅ if subscribed | `ZS_API_BASE_URL`, `ZS_API_USERNAME`, `ZS_API_PASSWORD` |
+| `service_token` | yes   | ✅ | ✅ if subscribed | `ZS_API_BASE_URL`, `ZS_API_USERNAME`, `ZS_API_SERVICE_KEY` |
+
+`public_only` is the **recommended smoke-test mode**: no credentials, no
+header attached, but you still validate connectivity, response shape, and
+the public exposures payload. VW levels (`PUT_CEILING_{2K,5K}`,
+`CALL_FLOOR_{2K,5K}`, `MaxVol`) will be `None` because they're derived
+from the subscription-gated `/exposure/series` — that's expected.
+
+##### Smoke test the live ZS API without secrets
+
+```powershell
+# .env:
+#   ZS_API_BASE_URL=https://api.your-zerosigma-host.example
+#   ZS_API_AUTH_MODE=public_only
+
+python -m scripts.smoke_zs_api                  # SPX
+python -m scripts.smoke_zs_api --symbol SPY
+python -m scripts.smoke_zs_api --json           # machine-readable
+```
+
+The script prints a SANITIZED summary (provider, auth_mode, configured,
+spot, exposures, missing_fields, http_status) and exits **0** on success,
+**0** with a warning when the provider isn't configured (so CI can run it
+defensively), and **1** with a clean message (no traceback) when a
+configured call fails.
+
+It **never** prints tokens, passwords, service keys, headers, or raw env
+values.
+
+##### Run the scanner against live ZS API + mock quotes
+
+```powershell
+python -m scripts.run_scanner --structure-provider zerosigma_api
+```
+
+Under `public_only`, VW will emit `NO_TRADE` because the volume-derived
+levels are missing — that's the expected behavior, not a bug. Enable
+`/exposure/series` (`bearer` / `login` / `service_token` +
+`ZS_API_ENABLE_EXPOSURE_SERIES=true`) to populate them.
 
 Optional:
 
