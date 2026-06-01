@@ -1,15 +1,18 @@
-"""One-shot scanner tick.
+"""One-shot scanner tick — Phase 1.5 provider-separated data flow.
 
-Phase 1: a single tick uses the stub StructureProvider, generates candidates
-from every enabled strategy under the active session config, applies risk
-filters, scores, and writes:
+  StructureProvider.get_snapshot(symbol)  →  StructureSnapshot (context)
+  QuoteProvider.get_option_chain(symbol)  →  OptionChainSnapshot (prices)
+                          │
+                          ▼
+  Strategy.generate_candidates(structure, chain, params)
+            → apply_filters → score → select → log + CSV
 
-    outputs/latest/ranked_candidates.csv          (overwrites)
-    outputs/latest/decision_log.jsonl             (append; truncated to today's run)
-    outputs/runs/{date}/ranked_candidates.csv     (append)
-    outputs/runs/{date}/decision_log.jsonl        (append)
+Writes to BOTH `outputs/latest/` (snapshot view) and `outputs/runs/{date}/`
+(append-only history). The decision log carries the names + timestamps of
+both providers + the spot from the quote provider so the audit trail makes
+clear which data drove which decision.
 
-No broker, no ZS API, no live execution.
+No broker. No ZS API. No live execution.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ def main() -> int:
     args = parser.parse_args()
 
     from src.app.session_state import SessionConfig
+    from src.providers.quotes.mock_provider import MockQuoteProvider
     from src.providers.structure.stub import StubStructureProvider
     from src.reporting.decision_log import log_decision, log_decision_to_file
     from src.risk.filters import apply_filters
@@ -65,44 +69,57 @@ def main() -> int:
         return 2
 
     symbol = args.symbol or cfg.scanner.get("symbols", ["SPX"])[0]
-    provider = StubStructureProvider()
-    snap = provider.get_snapshot(symbol)
 
-    log.info("scan tick: symbol=%s profile=%s strategies=%s",
-             symbol, profile.name, list(strategies.keys()))
+    # Acquire BOTH providers — explicit separation
+    structure_provider = StubStructureProvider()
+    quote_provider     = MockQuoteProvider()
+    structure = structure_provider.get_snapshot(symbol)
+    chain     = quote_provider.get_option_chain(symbol, expiry=structure.expiry)
+    if chain is None:
+        log.error("QuoteProvider returned no chain for %s — aborting tick.", symbol)
+        return 3
+    quote_provider.get_spot(symbol)  # heartbeat
+    quote_status = quote_provider.status()
+
+    log.info(
+        "scan tick: symbol=%s profile=%s strategies=%s structure=%s quotes=%s",
+        symbol, profile.name, list(strategies.keys()),
+        structure.source, chain.provider_name,
+    )
 
     output_root = cfg.output_dir
     latest = latest_dir(output_root)
-
-    # Accumulate every candidate across every strategy so the per-tick
-    # ranked_candidates CSV captures the full view.
     ranked_rows: list[dict] = []
     ts = now_et()
 
     for sid, strat in strategies.items():
         params = {**(strat.default_parameters or {}), **session.to_filter_params()}
-        candidates = strat.generate_candidates(snap, params)
+        candidates = strat.generate_candidates(structure, chain, params)
         apply_filters(candidates, session.to_filter_params())
         for c in candidates:
-            strat.score(c, snap, params)
+            strat.score(c, structure, chain, params)
         decision = strat.select(candidates, params)
 
         for c in candidates:
             ranked_rows.append(_candidate_row(sid, c, session, ts, decision.decision))
 
         snapshot_summary = {
-            "spot": snap.spot,
-            "maxvol": snap.exposures.maxvol,
-            "put_ceiling_2k": snap.exposures.put_ceiling_2k,
-            "put_ceiling_5k": snap.exposures.put_ceiling_5k,
-            "call_floor_2k":  snap.exposures.call_floor_2k,
-            "call_floor_5k":  snap.exposures.call_floor_5k,
-            "gamma_regime":   snap.exposures.gamma_regime,
+            "structure_provider": structure.source,
+            "structure_ts":       structure.quote_ts.isoformat(),
+            "quote_provider":     chain.provider_name,
+            "quote_ts":           chain.quote_ts.isoformat(),
+            "spot":               chain.spot,
+            "structure_spot":     structure.spot,
+            "maxvol":             structure.exposures.maxvol,
+            "put_ceiling_2k":     structure.exposures.put_ceiling_2k,
+            "put_ceiling_5k":     structure.exposures.put_ceiling_5k,
+            "call_floor_2k":      structure.exposures.call_floor_2k,
+            "call_floor_5k":      structure.exposures.call_floor_5k,
+            "gamma_regime":       structure.exposures.gamma_regime,
         }
 
         if not args.dry_run:
             log_decision(output_root, decision, snapshot_summary, ts)
-            # mirror to outputs/latest/decision_log.jsonl for the cockpit
             log_decision_to_file(
                 latest / "decision_log.jsonl", decision, snapshot_summary, ts,
             )
@@ -111,7 +128,6 @@ def main() -> int:
                  sid, decision.decision, decision.explanation)
 
     if not args.dry_run:
-        # per-day CSV (append) + latest snapshot (overwrite)
         run_path = ranked_candidates_path(output_root)
         latest_path = latest / "ranked_candidates.csv"
         fieldnames = list(ranked_rows[0].keys()) if ranked_rows else _DEFAULT_RANKED_FIELDS
@@ -120,7 +136,8 @@ def main() -> int:
             append_csv_row(run_path, row, fieldnames)
 
         log.info("wrote %d candidates to %s and %s", len(ranked_rows), run_path, latest_path)
-        log.info("decision logs at %s", decision_log_path(output_root))
+        log.info("decision logs at %s (status=%s)",
+                 decision_log_path(output_root), quote_status.connected)
 
     return 0
 
@@ -130,12 +147,16 @@ _DEFAULT_RANKED_FIELDS = [
     "credit", "spread_width", "max_risk", "reward_risk", "breakeven",
     "distance_from_spot", "score", "rejected", "rejection_reasons",
     "planned_loss_dollars", "theoretical_max_loss_dollars",
+    "short_bid", "short_ask", "short_mid", "long_bid", "long_ask", "long_mid",
+    "bid_ask_quality",
 ]
 
 
 def _candidate_row(strategy_id: str, c, session, ts: datetime, decision_str: str) -> dict:
-    # local import to avoid top-level coupling; runner is a thin orchestrator
     from src.risk.limits import planned_loss_dollars, theoretical_max_loss_dollars
+
+    short = c.meta.get("short_leg") or {}
+    long_ = c.meta.get("long_leg")  or {}
     return {
         "ts": ts.isoformat(),
         "strategy_id": strategy_id,
@@ -154,10 +175,13 @@ def _candidate_row(strategy_id: str, c, session, ts: datetime, decision_str: str
         "rejection_reasons": "; ".join(c.rejection_reasons),
         "planned_loss_dollars": round(
             planned_loss_dollars(
-                c.credit, c.max_risk, session.default_stop_variant, session.contracts_per_trade
+                c.credit, c.max_risk, session.default_stop_variant, session.contracts_per_trade,
             ), 2),
         "theoretical_max_loss_dollars": round(
             theoretical_max_loss_dollars(c.max_risk, session.contracts_per_trade), 2),
+        "short_bid": short.get("bid"), "short_ask": short.get("ask"), "short_mid": short.get("mid"),
+        "long_bid":  long_.get("bid"), "long_ask":  long_.get("ask"), "long_mid":  long_.get("mid"),
+        "bid_ask_quality": round(c.meta.get("bid_ask_quality", 0.0), 3),
     }
 
 

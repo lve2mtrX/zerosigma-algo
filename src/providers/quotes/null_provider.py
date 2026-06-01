@@ -7,7 +7,13 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from src.providers.quotes.base import OptionQuote, Right, SpotQuote
+from src.providers.quotes.base import Right
+from src.providers.quotes.types import (
+    OptionChainSnapshot,
+    OptionQuote,
+    QuoteProviderStatus,
+    SpotQuote,
+)
 
 
 class NullQuoteProvider:
@@ -28,5 +34,19 @@ class NullQuoteProvider:
     ) -> OptionQuote | None:
         return None
 
+    def get_option_chain(
+        self,
+        symbol: str,
+        expiry: str | None = None,
+    ) -> OptionChainSnapshot | None:
+        return None
+
     def quote_timestamp(self) -> datetime | None:
         return None
+
+    def status(self) -> QuoteProviderStatus:
+        return QuoteProviderStatus(
+            provider_name=self.name,
+            connected=False,
+            notes="no broker connected — manual-mark mode",
+        )

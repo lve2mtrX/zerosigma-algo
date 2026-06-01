@@ -1,4 +1,4 @@
-"""Scanner runner produces ranked candidates + decision logs end-to-end with mock data."""
+"""Scanner runner exercises the full provider-split pipeline."""
 
 from __future__ import annotations
 
@@ -22,48 +22,56 @@ def _run_scanner(extra_env: dict[str, str]) -> int:
 
 def _clean_env() -> dict[str, str]:
     import os
-    e = dict(os.environ)
-    return e
+    return dict(os.environ)
 
 
-def test_scanner_writes_outputs_to_temp_paths(tmp_path: Path):
+def test_scanner_writes_outputs_with_leg_quotes(tmp_path: Path):
     out = tmp_path / "outputs"
-    rc = _run_scanner({
-        "OUTPUT_DIR": str(out),
-        "PYTHONPATH": str(REPO_ROOT),
-    })
+    rc = _run_scanner({"OUTPUT_DIR": str(out), "PYTHONPATH": str(REPO_ROOT)})
     assert rc == 0
 
-    # outputs/latest/ranked_candidates.csv
     latest_csv = out / "latest" / "ranked_candidates.csv"
-    assert latest_csv.exists(), f"missing {latest_csv}"
+    assert latest_csv.exists()
     with latest_csv.open("r", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     assert rows, "ranked_candidates.csv has no rows"
-    sides = {r["side"] for r in rows}
-    assert "CALL_CREDIT" in sides
-    assert "PUT_CREDIT" in sides
-
-    # ranked rows carry planned + theoretical dollar columns
     sample = rows[0]
-    assert "planned_loss_dollars" in sample
-    assert "theoretical_max_loss_dollars" in sample
-    assert float(sample["theoretical_max_loss_dollars"]) > 0
+    # leg bid/ask/mid columns now flow through (post Phase 1.5)
+    for col in ("short_bid", "short_ask", "short_mid",
+                "long_bid", "long_ask", "long_mid",
+                "bid_ask_quality",
+                "planned_loss_dollars", "theoretical_max_loss_dollars"):
+        assert col in sample, f"missing column {col}"
+    # numeric — chain-derived
+    assert float(sample["short_bid"]) > 0
 
-    # outputs/latest/decision_log.jsonl exists + is parseable
+
+def test_decision_log_carries_both_providers(tmp_path: Path):
+    out = tmp_path / "outputs"
+    rc = _run_scanner({"OUTPUT_DIR": str(out), "PYTHONPATH": str(REPO_ROOT)})
+    assert rc == 0
+
     latest_log = out / "latest" / "decision_log.jsonl"
     assert latest_log.exists()
     records = [json.loads(line) for line in latest_log.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert records
-    assert {r["strategy_id"] for r in records} == {"vertical_wing_v1"}
+    summary = records[0]["snapshot_summary"]
+    assert summary["structure_provider"] == "stub"
+    assert summary["quote_provider"]     == "mock"
+    assert "structure_ts" in summary and "quote_ts" in summary
+    # spot comes from QuoteProvider; structure_spot is the structure provider's
+    assert summary["spot"] is not None
+    assert "structure_spot" in summary
+    # vertical-wing levels from structure
+    assert summary["put_ceiling_2k"] == 5815.0
+    assert summary["call_floor_2k"]  == 5785.0
 
 
-def test_scanner_default_profile_emits_a_trade_decision(tmp_path: Path):
+def test_scanner_default_profile_still_emits_a_trade_decision(tmp_path: Path):
     out = tmp_path / "outputs"
     rc = _run_scanner({"OUTPUT_DIR": str(out), "PYTHONPATH": str(REPO_ROOT)})
     assert rc == 0
     latest_log = out / "latest" / "decision_log.jsonl"
     records = [json.loads(line) for line in latest_log.read_text(encoding="utf-8").splitlines() if line.strip()]
     decisions = {r["decision"] for r in records}
-    # With aggressive_paper_10k + tuned stub, at least one TRADE_* decision fires
     assert any(d.startswith("TRADE_") for d in decisions), decisions

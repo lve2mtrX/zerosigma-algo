@@ -33,9 +33,10 @@ letters.
 
 | Phase | Scope | Status |
 |---|---|---|
-| **0 — Scaffold** | Folder layout, configs, base interfaces, README/plan/notes. | ✅ this commit |
-| **1 — Framework + manual flow** | Strategy registry, decision log, manual trade tracker, EOD summary, Streamlit shell. ZS API stubbed. | 🚧 next |
-| **2 — ZS API wired (read-only)** | StructureProvider implementation against `/api/v1/market/*` + `/api/v1/exposure/*`. Polling loop. Cached snapshots. | ⏳ |
+| **0 — Scaffold** | Folder layout, configs, base interfaces, README/plan/notes. | ✅ |
+| **1 — Framework + manual flow** | Strategy registry, decision log, manual trade tracker, EOD summary, Streamlit shell. ZS API stubbed. | ✅ |
+| **1.5 — Provider split** | Clean separation of StructureProvider (context only) and QuoteProvider (chain pricing). Strategy takes both; scanner + cockpit reflect both timestamps. | ✅ |
+| **2 — ZS API wired (read-only)** | StructureProvider implementation against `/api/v1/market/*` + `/api/v1/exposure/*`. Polling loop. Cached snapshots. | 🚧 next |
 | **3 — Vertical Wing v1 end-to-end** | Full candidate generation, scoring, hard filters, decision engine, paper P&L. | ⏳ |
 | **4 — Broker Capability Probe** | Read-only probe of candidate brokers (Tastytrade / Webull / Alpaca / Tradier / IBKR / Schwab). Selects QuoteProvider. | ⏳ |
 | **5 — Broker quotes** | QuoteProvider wired. Live mid for paper marks. | ⏳ |
@@ -231,6 +232,54 @@ rejection reason — so we can audit what we missed and why.
 ---
 
 ## 6. Providers
+
+### 6.0 Provider separation (Phase 1.5)
+
+The cockpit treats structure and quote data as **independent contracts**.
+No provider knows about the other; strategies are the only layer that
+combines them.
+
+```
+StructureSnapshot                      OptionChainSnapshot
+  symbol, spot, quote_ts                 underlying, spot, expiry
+  exposures: ExposureContext             quotes: list[OptionQuote]
+    - total_gex_bn / total_vex_bn        quote_ts, provider_name
+    - gamma_flip, call_wall, put_wall
+    - maxvol, gamma_regime               OptionQuote (per strike, per side)
+    - da_gex_signed                        - underlying, expiry, option_type
+    - put_ceiling_2k / 5k                  - strike
+    - call_floor_2k / 5k                   - bid, ask, mid
+    - ddoi_pin                             - volume, open_interest
+                                           - optional Greeks (iv, delta, ...)
+                                           - quote_time, vendor_symbol
+```
+
+Strategy contract:
+
+```python
+class Strategy(Protocol):
+    def generate_candidates(
+        self,
+        structure: StructureSnapshot,
+        chain:     OptionChainSnapshot,
+        params:    dict[str, Any],
+    ) -> list[Candidate]: ...
+    def score(self, c, structure, chain, params) -> float: ...
+    def select(self, candidates, params) -> StrategyDecision: ...
+```
+
+**Why this separation matters:**
+
+- Production: structure (ZS API) and quotes (broker API) are two different
+  external services with different cadences, auth, and rate limits. Bundling
+  them up-front would force lock-step polling.
+- Testability: the mock dataset in `src/providers/_mock_data.py` feeds both
+  providers but each can be stubbed independently in tests.
+- Future broker swap: changing brokers means dropping in a new
+  `QuoteProvider` implementation — zero impact on the structure pipeline.
+- Strategy independence: strategies state explicitly what they need
+  (`required_data_fields`) and the framework can refuse to scan if a
+  provider isn't supplying it.
 
 ### 6.1 StructureProvider (read-only, ZS API)
 
@@ -641,9 +690,12 @@ informs the QuoteProvider choice.
 ### Still mock / stubbed (Phase 2+)
 
 - `ZeroSigmaApiStructureProvider` exists but raises `NotImplementedError` —
-  wire to `/api/v1/market/*` and `/api/v1/exposure/*` in Phase 2.
-- `QuoteProvider` is `MockQuoteProvider` (deterministic synthetic mids) +
-  `NullQuoteProvider`. Broker probe → real provider lands in Phase 4–5.
+  wire to `/api/v1/market/*` and `/api/v1/exposure/*` in Phase 2. Boundary
+  now clean (Phase 1.5): the integration only has to populate
+  `StructureSnapshot` / `ExposureContext`; it does NOT touch quote flow.
+- `QuoteProvider` is `MockQuoteProvider` (deterministic chain from
+  `_mock_data.MOCK_CHAIN`) + `NullQuoteProvider`. Broker probe → real
+  provider lands in Phase 4–5.
 - Execution provider modes available: `disabled`, `local_paper`,
   `manual_trade_tracking`. Live modes stubbed only.
 - `force_stop` on a `BASELINE_CASH_SETTLE` position is intentionally a no-op

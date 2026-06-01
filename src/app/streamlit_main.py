@@ -136,12 +136,16 @@ with st.sidebar:
     st.caption(f"Execution mode:     `{CFG.providers.execution_active}`")
 
 
-# Acquire snapshot + quote (deterministic stub + mock)
+# Acquire snapshots — explicit separation of structure vs quotes.
+#   StructureProvider → structure context (MaxVol / DA-GEX / ceilings / floors / DDOI)
+#   QuoteProvider     → spot + full option chain (bid/ask/mid/volume per strike)
 structure_provider = StubStructureProvider()
-quote_provider = MockQuoteProvider()
+quote_provider     = MockQuoteProvider()
 SYMBOL = CFG.scanner.get("symbols", ["SPX"])[0]
-snap = structure_provider.get_snapshot(SYMBOL)
+structure  = structure_provider.get_snapshot(SYMBOL)
 spot_quote = quote_provider.get_spot(SYMBOL)
+chain      = quote_provider.get_option_chain(SYMBOL, expiry=structure.expiry)
+quote_status = quote_provider.status()
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -155,15 +159,29 @@ session: SessionConfig = st.session_state["session_config"]
 baseline: SessionConfig = st.session_state["session_baseline"]
 paper_account: PaperAccount = st.session_state["paper_account"]
 
-with st.expander("Provider status", expanded=False):
+with st.expander("Provider status", expanded=True):
     cols = st.columns(3)
-    cols[0].metric("StructureProvider", structure_provider.name, snap.quote_ts.strftime("%H:%M:%S"))
+    cols[0].metric(
+        "StructureProvider",
+        f"{structure_provider.name}",
+        f"context @ {structure.quote_ts.strftime('%H:%M:%S')}",
+    )
     cols[1].metric(
         "QuoteProvider",
-        quote_provider.name,
-        spot_quote.ts.strftime("%H:%M:%S") if spot_quote else "—",
+        f"{quote_provider.name}",
+        (
+            f"chain @ {chain.quote_ts.strftime('%H:%M:%S')}"
+            if chain else
+            ("spot @ " + spot_quote.ts.strftime("%H:%M:%S") if spot_quote else "no quotes")
+        ),
     )
-    cols[2].metric("ExecutionProvider", CFG.providers.execution_active, "no live execution")
+    cols[2].metric(
+        "ExecutionProvider",
+        CFG.providers.execution_active,
+        "no live execution",
+    )
+    if not quote_status.connected:
+        st.caption(f"_QuoteProvider notes: {quote_status.notes or 'disconnected'}_")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -303,24 +321,35 @@ session = st.session_state["session_config"]
 # ──────────────────────────────────────────────────────────────────────
 
 st.header("Market / structure")
+
+# Spot comes from the QuoteProvider; structure context comes from StructureProvider.
+# Both are surfaced so the user can spot drift between them.
+quote_spot     = chain.spot if chain else (spot_quote.last if spot_quote else None)
+structure_spot = structure.spot
+
 top = st.columns(6)
-top[0].metric("Spot",        f"{snap.spot:,.2f}")
-top[1].metric("MaxVol",      f"{snap.exposures.maxvol or '—'}")
-top[2].metric("Call wall",   f"{snap.exposures.call_wall or '—'}")
-top[3].metric("Put wall",    f"{snap.exposures.put_wall or '—'}")
-top[4].metric("DA-GEX",      f"{snap.exposures.da_gex_signed or '—'}")
-top[5].metric("Gamma regime", snap.exposures.gamma_regime or "—")
+top[0].metric(
+    "Spot (quote)", f"{quote_spot:,.2f}" if quote_spot is not None else "—",
+    f"struct {structure_spot:,.2f}" if structure_spot is not None else "—",
+)
+top[1].metric("MaxVol",      f"{structure.exposures.maxvol or '—'}")
+top[2].metric("Call wall",   f"{structure.exposures.call_wall or '—'}")
+top[3].metric("Put wall",    f"{structure.exposures.put_wall or '—'}")
+top[4].metric("DA-GEX",      f"{structure.exposures.da_gex_signed or '—'}")
+top[5].metric("Gamma regime", structure.exposures.gamma_regime or "—")
 
 levels = st.columns(5)
-levels[0].metric("PUT_CEILING (2K)", f"{snap.exposures.put_ceiling_2k or '—'}")
-levels[1].metric("PUT_CEILING (5K)", f"{snap.exposures.put_ceiling_5k or '—'}")
-levels[2].metric("CALL_FLOOR (2K)",  f"{snap.exposures.call_floor_2k or '—'}")
-levels[3].metric("CALL_FLOOR (5K)",  f"{snap.exposures.call_floor_5k or '—'}")
-levels[4].metric("DDOI pin",         f"{snap.exposures.ddoi_pin or '—'}")
+levels[0].metric("PUT_CEILING (2K)", f"{structure.exposures.put_ceiling_2k or '—'}")
+levels[1].metric("PUT_CEILING (5K)", f"{structure.exposures.put_ceiling_5k or '—'}")
+levels[2].metric("CALL_FLOOR (2K)",  f"{structure.exposures.call_floor_2k or '—'}")
+levels[3].metric("CALL_FLOOR (5K)",  f"{structure.exposures.call_floor_5k or '—'}")
+levels[4].metric("DDOI pin",         f"{structure.exposures.ddoi_pin or '—'}")
 
 st.caption(
-    f"Snapshot from `{snap.source}` @ {snap.quote_ts.isoformat()}  ·  "
-    f"expiry {snap.expiry}  ·  DTE {snap.dte}"
+    f"Structure from `{structure.source}` @ {structure.quote_ts.isoformat()}  ·  "
+    f"chain from `{chain.provider_name if chain else '—'}` "
+    f"@ {chain.quote_ts.isoformat() if chain else '—'}  ·  "
+    f"expiry {structure.expiry}  ·  DTE {structure.dte}"
 )
 
 
@@ -328,17 +357,29 @@ st.caption(
 # Candidates + decision
 # ──────────────────────────────────────────────────────────────────────
 
+def _fmt_quote(q: dict) -> str:
+    """'bid / mid / ask' formatting for the candidate table."""
+    b = q.get("bid")
+    m = q.get("mid")
+    a = q.get("ask")
+    if b is None or m is None or a is None:
+        return "—"
+    return f"{b:.2f} / {m:.2f} / {a:.2f}"
+
+
 st.header("Ranked candidates")
 
 if not STRATEGIES:
     st.warning("No strategies registered. Check `config/strategies.yaml`.")
+elif chain is None:
+    st.error("QuoteProvider returned no chain. Cannot build candidates.")
 else:
     strat = STRATEGIES[st.session_state["active_strategy"]]
     params = {**(strat.default_parameters or {}), **session.to_filter_params()}
-    candidates = strat.generate_candidates(snap, params)
+    candidates = strat.generate_candidates(structure, chain, params)
     apply_filters(candidates, session.to_filter_params())
     for c in candidates:
-        strat.score(c, snap, params)
+        strat.score(c, structure, chain, params)
     candidates.sort(key=lambda c: -c.score)
 
     if not candidates:
@@ -350,18 +391,23 @@ else:
                 c.credit, c.max_risk, session.default_stop_variant, session.contracts_per_trade,
             )
             theoretical = theoretical_max_loss_dollars(c.max_risk, session.contracts_per_trade)
+            short_leg = c.meta.get("short_leg") or {}
+            long_leg  = c.meta.get("long_leg")  or {}
             rows.append({
-                "side": c.side,
-                "short": c.short_strike,
-                "long":  c.long_strike,
-                "credit ($)": round(c.credit, 2),
-                "width": round(c.max_risk + c.credit, 2),
+                "side":        c.side,
+                "short K":     c.short_strike,
+                "long K":      c.long_strike,
+                "short b/a/m": _fmt_quote(short_leg),
+                "long b/a/m":  _fmt_quote(long_leg),
+                "credit ($)":  round(c.credit, 2),
+                "width":       round(c.max_risk + c.credit, 2),
                 "theoretical $": round(theoretical, 0),
-                "planned $":     round(planned, 0),
-                "R:R":   round(c.reward_risk, 2),
-                "breakeven": round(c.breakeven, 2),
-                "score": round(c.score, 2),
-                "rejected": c.rejected,
+                "planned $":   round(planned, 0),
+                "R:R":         round(c.reward_risk, 2),
+                "b/a quality": round(c.meta.get("bid_ask_quality", 0.0), 2),
+                "breakeven":   round(c.breakeven, 2),
+                "score":       round(c.score, 2),
+                "rejected":    c.rejected,
                 "rejection_reasons": "; ".join(c.rejection_reasons),
             })
         st.dataframe(rows, use_container_width=True, hide_index=True)
@@ -406,13 +452,16 @@ with st.form("manual_trade"):
 
 if submit_trade:
     ts = now_et()
+    # Entry spot prefers the QuoteProvider's current spot; falls back to
+    # structure spot if the quote provider is unavailable.
+    entry_spot = quote_spot if quote_spot is not None else structure.spot
     record = build_manual_trade_record(
         ts=ts,
         strategy_id=st.session_state["active_strategy"] or "manual",
-        side=side, symbol=SYMBOL, expiry=snap.expiry or "",
+        side=side, symbol=SYMBOL, expiry=structure.expiry or "",
         short_strike=short_strike, long_strike=long_strike,
         credit=credit, contracts=int(contracts),
-        entry_spot=snap.spot, stop_variant=stop, profit_target=profit_target,
+        entry_spot=entry_spot, stop_variant=stop, profit_target=profit_target,
         notes=notes,
     )
     record_manual_trade(OUTPUT_ROOT, row=record)
@@ -420,10 +469,10 @@ if submit_trade:
     pos = PaperPosition(
         position_id=uuid.uuid4().hex[:8],
         strategy_id=record["strategy_id"], side=side, symbol=SYMBOL,
-        expiry=snap.expiry or "",
+        expiry=structure.expiry or "",
         short_strike=short_strike, long_strike=long_strike,
         credit=credit, contracts=int(contracts),
-        entry_time=ts, entry_spot=snap.spot, stop_variant=stop,
+        entry_time=ts, entry_spot=entry_spot, stop_variant=stop,
         profit_targets=[profit_target] if profit_target else [],
         source="manual", notes=notes,
     )

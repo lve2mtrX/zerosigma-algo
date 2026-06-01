@@ -1,37 +1,40 @@
 """QuoteProvider interface.
 
-Single source for live spot + per-option quotes. Broker-specific.
-Phase 1: only `NullQuoteProvider` exists.
+Single source for live spot + per-option quotes + full option chains.
+Broker-specific. Phase 1: `NullQuoteProvider` + `MockQuoteProvider` only.
+
+Concrete data models live in `src.providers.quotes.types`. They are
+re-exported here so existing imports of `OptionQuote` / `SpotQuote` from
+`src.providers.quotes.base` keep working.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Protocol, runtime_checkable
 
+from src.providers.quotes.types import (
+    OptionChainSnapshot,
+    OptionQuote,
+    OptionType,
+    QuoteProviderStatus,
+    SpotQuote,
+    SpreadQuote,
+)
+
+# Back-compat alias for the old short-form "C"/"P" string. Prefer OptionType.
 Right = Literal["C", "P"]
 
-
-@dataclass(frozen=True)
-class OptionQuote:
-    symbol: str
-    expiry: str          # YYYY-MM-DD
-    strike: float
-    right: Right
-    bid: float | None
-    ask: float | None
-    mid: float | None
-    ts: datetime
-
-
-@dataclass(frozen=True)
-class SpotQuote:
-    symbol: str
-    last: float | None
-    bid: float | None
-    ask: float | None
-    ts: datetime
+__all__ = [
+    "OptionChainSnapshot",
+    "OptionQuote",
+    "OptionType",
+    "QuoteProvider",
+    "QuoteProviderStatus",
+    "Right",
+    "SpotQuote",
+    "SpreadQuote",
+]
 
 
 @runtime_checkable
@@ -49,4 +52,22 @@ class QuoteProvider(Protocol):
         right: Right,
     ) -> OptionQuote | None: ...
 
-    def quote_timestamp(self) -> datetime | None: ...
+    def get_option_chain(
+        self,
+        symbol: str,
+        expiry: str | None = None,
+    ) -> OptionChainSnapshot | None:
+        """Return the full chain for `expiry`. None if not available.
+
+        Implementations should treat `expiry=None` as "use the nearest expiry
+        the provider knows about" — typically today's 0DTE for SPX.
+        """
+        ...
+
+    def quote_timestamp(self) -> datetime | None:
+        """Most-recent successful read across spot/option/chain. UI uses this."""
+        ...
+
+    def status(self) -> QuoteProviderStatus:
+        """Health snapshot for the cockpit's provider-status panel."""
+        ...

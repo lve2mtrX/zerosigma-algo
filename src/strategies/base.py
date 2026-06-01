@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from src.providers.quotes.types import OptionChainSnapshot
 from src.providers.structure.types import StructureSnapshot
 
 Decision = Literal["TRADE_CALL_CREDIT", "TRADE_PUT_CREDIT", "NO_TRADE"]
@@ -54,6 +55,15 @@ class StrategyDecision:
 
 @runtime_checkable
 class Strategy(Protocol):
+    """A registered strategy.
+
+    Framework dataflow:
+        generate_candidates(structure, chain, params)
+                 → (risk filters)
+                 → score(c, structure, chain, params)
+                 → select(candidates, params)
+                 → log / execute
+    """
 
     id: str
     display_name: str
@@ -62,14 +72,16 @@ class Strategy(Protocol):
 
     def generate_candidates(
         self,
-        snapshot: StructureSnapshot,
+        structure: StructureSnapshot,
+        chain: OptionChainSnapshot,
         params: dict[str, Any],
     ) -> list[Candidate]: ...
 
     def score(
         self,
         candidate: Candidate,
-        snapshot: StructureSnapshot,
+        structure: StructureSnapshot,
+        chain: OptionChainSnapshot,
         params: dict[str, Any],
     ) -> float: ...
 

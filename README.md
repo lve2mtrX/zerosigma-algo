@@ -92,14 +92,23 @@ python -m scripts.run_eod_summary
 ```
 
 What the scanner does in one tick:
-- Loads `config/*` and the active risk profile (or `--profile NAME`).
-- Snapshots the stub structure provider (deterministic chain with 2K + 5K PUT_CEILING and CALL_FLOOR, MaxVol, gamma regime, DDOI pin).
-- Asks every enabled strategy to generate candidates → applies risk filters → scores → selects.
-- Writes ranked candidates (CSV) and the decision log (JSONL) to BOTH:
-  - `outputs/runs/{YYYY-MM-DD}/` (append, per-day history)
-  - `outputs/latest/` (overwrite for the cockpit's "current view")
+1. Loads `config/*` and the active risk profile (or `--profile NAME`).
+2. Acquires a **StructureSnapshot** from the StructureProvider — context only
+   (MaxVol, DA-GEX, gamma regime, DDOI pin, PUT_CEILING and CALL_FLOOR levels
+   at 2K and 5K thresholds). No bid/ask/mid here.
+3. Acquires an **OptionChainSnapshot** from the QuoteProvider — full chain
+   with bid/ask/mid, volume, OI, optional Greeks per strike, plus spot.
+4. Passes **both** to every enabled strategy: `generate_candidates(structure, chain, params)`
+   → applies risk filters → scores → selects.
+5. Writes ranked candidates (CSV with leg bid/ask/mid + planned/theoretical $)
+   and the decision log (JSONL, with both provider names + timestamps +
+   spot from QuoteProvider) to:
+   - `outputs/runs/{YYYY-MM-DD}/` (append, per-day history)
+   - `outputs/latest/` (overwrite for the cockpit's "current view")
 
-Under the default `aggressive_paper_10k` profile the demo data emits a `TRADE_CALL_CREDIT` decision for SPX 5815/5820 at $0.60 credit (planned stop risk $450; theoretical max loss $2,100).
+Under the default `aggressive_paper_10k` profile the demo data emits a
+`TRADE_CALL_CREDIT` decision for SPX 5815/5820 at $0.60 credit (planned stop
+risk $450; theoretical max loss $2,100; score ~0.61).
 
 ### Session controls in the cockpit
 
@@ -147,13 +156,46 @@ outputs/
     └── eod_summary.json
 ```
 
-### What's mock / stubbed (Phase 1)
+### Provider separation (Phase 1.5)
 
-| Layer | Phase 1 implementation | Phase 2+ plan |
+The cockpit deliberately separates structure context from quote pricing.
+The two providers live behind independent interfaces and the strategy is
+the only layer that sees both at once:
+
+```
+┌───────────────────────────┐    ┌─────────────────────────────────┐
+│ StructureProvider          │    │ QuoteProvider                    │
+│  → StructureSnapshot       │    │  → OptionChainSnapshot           │
+│     · MaxVol               │    │     · spot                       │
+│     · DA-GEX / gamma       │    │     · OptionQuote per strike     │
+│     · PUT_CEILING(2K/5K)   │    │       (bid, ask, mid, volume,    │
+│     · CALL_FLOOR(2K/5K)    │    │        OI, optional Greeks)      │
+│     · DDOI pin             │    │     · quote_ts                   │
+│     · structure_ts         │    │  → SpotQuote (back-compat)       │
+└────────────┬───────────────┘    └─────────────┬───────────────────┘
+             │                                  │
+             ▼                                  ▼
+        Strategy.generate_candidates(structure, chain, params)
+                     → filter → score → select → decide
+```
+
+Both providers in Phase 1 read from the same canonical mock dataset
+(`src/providers/_mock_data.py`) so they stay in agreement without
+importing each other — production providers will pull from independent
+real services (ZS API for structure, broker API for quotes).
+
+### What's mock / stubbed (Phase 1.5)
+
+| Layer | Phase 1.5 implementation | Phase 2+ plan |
 |---|---|---|
-| `StructureProvider` | `StubStructureProvider` — deterministic SPX chain with PUT_CEILING(2K/5K), CALL_FLOOR(2K/5K), MaxVol, gamma regime, DDOI pin, DA-GEX. | `ZeroSigmaApiStructureProvider` against `/api/v1/market/*` and `/api/v1/exposure/*` (already stubbed, raises NotImplementedError). |
-| `QuoteProvider` | `MockQuoteProvider` — deterministic spot + intrinsic-plus-time mids. | Broker-specific provider (TBD via capability probe). |
+| `StructureProvider` | `StubStructureProvider` — structure context only (MaxVol, DA-GEX, gamma regime, DDOI pin, PUT/CALL 2K/5K levels). No chain quotes. | `ZeroSigmaApiStructureProvider` against `/api/v1/market/*` and `/api/v1/exposure/*` (stubbed, raises NotImplementedError). |
+| `QuoteProvider` | `MockQuoteProvider` — deterministic SPX chain with bid/ask/mid, volume, OI, optional Greeks per strike + spot. `NullQuoteProvider` available for manual-mark mode. | Broker-specific provider (TBD via Phase 4 capability probe). |
 | `ExecutionProvider` | `disabled` / `local_paper` / `manual_trade_tracking`. **No live orders.** | `broker_paper`, `manual_confirm`, `live_tiny`, `live` — stubbed today, raise NotImplementedError. |
+
+**Next step:** wire the real `ZeroSigmaApiStructureProvider` against
+`/api/v1/market/*` + `/api/v1/exposure/*`. Provider boundaries are now
+clean — that integration only needs to populate `StructureSnapshot` /
+`ExposureContext` from JSON; it does NOT touch the quote-side flow.
 
 ### Adding a new strategy
 

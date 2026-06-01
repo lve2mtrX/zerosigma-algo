@@ -3,12 +3,17 @@
 Each sub-score is normalized to ~[0, 1]; the final score is a weighted sum
 using the weights from strategy params. Sub-scores are returned in
 `Candidate.score_breakdown` so the UI/decision log can show *why*.
+
+Quote-derived inputs (bid/ask quality, anchor volume) are read from
+`Candidate.meta`, which `candidates.py` populates from the
+`OptionChainSnapshot` at construction time.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from src.providers.quotes.types import OptionChainSnapshot
 from src.providers.structure.types import StructureSnapshot
 from src.strategies.base import Candidate
 
@@ -39,8 +44,8 @@ def _structure_strength_score(volume_at_anchor: float | None) -> float:
     return _clip((volume_at_anchor - 1000) / 4000)
 
 
-def _maxvol_alignment_score(candidate: Candidate, snapshot: StructureSnapshot) -> float:
-    mv = snapshot.exposures.maxvol
+def _maxvol_alignment_score(candidate: Candidate, structure: StructureSnapshot) -> float:
+    mv = structure.exposures.maxvol
     if mv is None:
         return 0.5  # neutral
     if candidate.side == "CALL_CREDIT":
@@ -50,46 +55,44 @@ def _maxvol_alignment_score(candidate: Candidate, snapshot: StructureSnapshot) -
     return 1.0 if candidate.short_strike <= mv else 0.0
 
 
-def _gamma_regime_score(candidate: Candidate, snapshot: StructureSnapshot) -> float:
-    regime = snapshot.exposures.gamma_regime
+def _gamma_regime_score(_: Candidate, structure: StructureSnapshot) -> float:
+    regime = structure.exposures.gamma_regime
     if regime is None:
         return 0.5
-    # positive gamma → premium-selling friendly
     return 1.0 if regime == "positive" else 0.3
 
 
-def _bid_ask_quality_score(_: Candidate) -> float:
-    # Placeholder until per-leg b/a width is plumbed through. The hard filter
-    # already drops things wider than max_bid_ask_width.
-    return 0.6
+def _bid_ask_quality_score(candidate: Candidate) -> float:
+    """Quote-derived. `candidates.py` precomputed this from leg bid/ask widths."""
+    v = candidate.meta.get("bid_ask_quality")
+    if v is None:
+        return 0.5
+    return _clip(float(v))
 
 
-def _time_decay_headroom_score(snapshot: StructureSnapshot) -> float:
+def _time_decay_headroom_score(_: StructureSnapshot) -> float:
     # Placeholder; eventually time-to-close in minutes / 390.
     return 0.5
 
 
 def score_candidate(
     candidate: Candidate,
-    snapshot: StructureSnapshot,
+    structure: StructureSnapshot,
+    chain: OptionChainSnapshot,
     params: dict[str, Any],
 ) -> tuple[float, dict[str, float]]:
     weights = params.get("score_weights", {})
-    vol_at_anchor = (
-        candidate.meta.get("put_volume_at_ceiling")
-        if candidate.side == "CALL_CREDIT"
-        else candidate.meta.get("call_volume_at_floor")
-    )
+    vol_at_anchor = candidate.meta.get("anchor_volume")
 
     parts = {
         "credit_size":         _credit_size_score(candidate.credit),
         "credit_to_risk":      _credit_to_risk_score(candidate.reward_risk),
         "distance_from_spot":  _distance_score(candidate.distance_from_spot),
         "structure_strength":  _structure_strength_score(vol_at_anchor),
-        "maxvol_alignment":    _maxvol_alignment_score(candidate, snapshot),
-        "gamma_regime":        _gamma_regime_score(candidate, snapshot),
+        "maxvol_alignment":    _maxvol_alignment_score(candidate, structure),
+        "gamma_regime":        _gamma_regime_score(candidate, structure),
         "bid_ask_quality":     _bid_ask_quality_score(candidate),
-        "time_decay_headroom": _time_decay_headroom_score(snapshot),
+        "time_decay_headroom": _time_decay_headroom_score(structure),
     }
 
     total_weight = sum(weights.get(k, 0.0) for k in parts) or 1.0

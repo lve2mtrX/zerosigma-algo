@@ -75,3 +75,53 @@
 - `_f_max_bid_ask_width` is referenced in the session_state filter-params dict
   but isn't yet a registered filter in `DEFAULT_FILTERS`; the wide-bid/ask ATM
   strikes in the stub are correct setup for adding that filter next.
+
+---
+
+## 2026-06-01 (PM) — Phase 1.5: provider split
+
+- Cleanly separated StructureProvider (structure context only) from
+  QuoteProvider (chain + pricing).
+- New: `src/providers/quotes/types.py` with `OptionType`, `OptionQuote`,
+  `OptionChainSnapshot`, `SpreadQuote`, `QuoteProviderStatus`.
+- New: `src/providers/_mock_data.py` — single canonical mock dataset
+  (`MOCK_CHAIN` + helpers). Both providers read from it; neither imports
+  the other.
+- `StructureSnapshot` no longer carries chain quotes (`ChainRow` removed).
+  Strategies receive `(structure, chain, params)`. The `Strategy` protocol
+  was updated accordingly.
+- `MockQuoteProvider.get_option_chain(symbol)` returns an
+  `OptionChainSnapshot` matching the mock dataset; `NullQuoteProvider`
+  matches the same interface for the disconnected case.
+- VW candidate generation now: reads `PUT_CEILING`/`CALL_FLOOR` from
+  `structure.exposures.put_ceiling_2k/5k` (or `call_floor_*`); looks up
+  leg quotes from `chain.find(strike, OptionType)`; computes credit, R:R,
+  bid/ask quality, and stores leg + spread metadata on `candidate.meta`.
+- Scoring updated to use the new `(structure, chain, params)` signature
+  and the new `meta["anchor_volume"]` field (put-volume at ceiling for
+  CALL_CREDIT, call-volume at floor for PUT_CREDIT — caught a subtle bug
+  where the anchor was incorrectly read from the same-side leg).
+- Scanner runner: explicit `StructureProvider` + `QuoteProvider`; decision
+  log carries both `*_provider` names + both `*_ts` timestamps + spot from
+  the quote provider; ranked CSV adds leg bid/ask/mid + b/a quality.
+- Streamlit cockpit: dual-provider status panel; "Spot (quote)" with a
+  structure-spot delta; structure-vs-chain timestamps both displayed;
+  candidate table now shows `short b/a/m` and `long b/a/m` columns plus
+  `b/a quality`.
+- Tests: 42/42 pass (was 34). New: `test_mock_quote_provider.py` (6 tests
+  covering chain shape, determinism, status, SpreadQuote math, back-compat
+  `get_option_quote`); `test_no_vw_leak.py` (regression: no `vertical_wing`
+  imports outside its folder). Updated: `test_stub_provider.py` asserts
+  StructureSnapshot lacks a `chain` attribute; `test_registry.py` exercises
+  the new `(structure, chain)` signature; `test_scanner_runner.py` checks
+  both provider names + timestamps in the decision log + leg b/a columns
+  in the ranked CSV.
+- Ruff clean. Demo still emits `TRADE_CALL_CREDIT` SPX 5815/5820 @ $0.60
+  credit (score 0.61, planned $450, theoretical $2,100).
+
+### Next step
+
+Phase 2: wire `ZeroSigmaApiStructureProvider` against `/api/v1/market/*`
+and `/api/v1/exposure/*`. The provider boundary is now clean — that work
+only needs to populate `StructureSnapshot` / `ExposureContext` from JSON
+responses; it does NOT touch quote-side code or the strategy contract.

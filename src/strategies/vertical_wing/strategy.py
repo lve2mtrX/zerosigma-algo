@@ -1,9 +1,15 @@
-"""Vertical Wing v1 — orchestrates candidate generation, scoring, selection."""
+"""Vertical Wing v1 — orchestrates candidate generation, scoring, selection.
+
+Phase 1.5 contract: takes BOTH a `StructureSnapshot` (structure levels) and
+an `OptionChainSnapshot` (per-strike quotes). No reach-through into either
+provider's internals.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
+from src.providers.quotes.types import OptionChainSnapshot
 from src.providers.structure.types import StructureSnapshot
 from src.strategies.base import Candidate, StrategyDecision
 from src.strategies.vertical_wing.candidates import (
@@ -29,27 +35,35 @@ class VerticalWingV1:
 
     def required_data_fields(self) -> list[str]:
         return [
-            "spot",
-            "chain.strikes",
-            "chain.c_volume", "chain.p_volume",
-            "chain.c_bid", "chain.c_ask",
-            "chain.p_bid", "chain.p_ask",
+            "structure.exposures.put_ceiling_2k",
+            "structure.exposures.put_ceiling_5k",
+            "structure.exposures.call_floor_2k",
+            "structure.exposures.call_floor_5k",
+            "structure.exposures.maxvol",
+            "structure.exposures.gamma_regime",
+            "chain.quotes",   # bid/ask/mid + volume at the relevant strikes
         ]
 
     def generate_candidates(
         self,
-        snapshot: StructureSnapshot,
+        structure: StructureSnapshot,
+        chain: OptionChainSnapshot,
         params: dict[str, Any],
     ) -> list[Candidate]:
         merged = {**self.default_parameters, **(params or {})}
         threshold = float(merged.get("volume_threshold", 2000))
         width = float(merged.get("spread_width", 5))
+        max_ba = float(merged.get("max_bid_ask_width", 0.20))
 
         out: list[Candidate] = []
-        cc = build_put_ceiling_call_credit(snapshot, threshold, width, self.id)
+        cc = build_put_ceiling_call_credit(
+            structure, chain, threshold, width, self.id, max_bid_ask_width=max_ba,
+        )
         if cc is not None:
             out.append(cc)
-        pc = build_call_floor_put_credit(snapshot, threshold, width, self.id)
+        pc = build_call_floor_put_credit(
+            structure, chain, threshold, width, self.id, max_bid_ask_width=max_ba,
+        )
         if pc is not None:
             out.append(pc)
         return out
@@ -57,11 +71,12 @@ class VerticalWingV1:
     def score(
         self,
         candidate: Candidate,
-        snapshot: StructureSnapshot,
+        structure: StructureSnapshot,
+        chain: OptionChainSnapshot,
         params: dict[str, Any],
     ) -> float:
         merged = {**self.default_parameters, **(params or {})}
-        total, breakdown = score_candidate(candidate, snapshot, merged)
+        total, breakdown = score_candidate(candidate, structure, chain, merged)
         candidate.score = total
         candidate.score_breakdown = breakdown
         return total
