@@ -45,15 +45,29 @@ class ChainRow:
 
 @dataclass(frozen=True)
 class ExposureContext:
-    """Aggregated context from /api/v1/market/exposures."""
+    """Aggregated context from /api/v1/market/exposures.
+
+    `put_ceiling_*` and `call_floor_*` are the Vertical-Wing levels: the
+    strike at which put / call volume crosses the named volume threshold.
+    Strategy modules can either consult these directly OR re-derive them
+    from the chain (the stub provider populates both for convenience).
+    """
     total_gex_bn:  float | None = None
     total_vex_bn:  float | None = None
     gamma_flip:    float | None = None
     call_wall:     float | None = None
     put_wall:      float | None = None
-    maxvol:        float | None = None   # strike with max volume
+    maxvol:        float | None = None   # strike with max combined volume
     gamma_regime:  str   | None = None   # "positive" | "negative" | None
     da_gex_signed: float | None = None
+    # Vertical-Wing levels (highest put-volume strike / lowest call-volume strike
+    # at each named threshold). All optional — None means "no qualifying strike".
+    put_ceiling_2k:  float | None = None
+    put_ceiling_5k:  float | None = None
+    call_floor_2k:   float | None = None
+    call_floor_5k:   float | None = None
+    # DDOI pin (open-interest concentration level) and DA-GEX regime hint.
+    ddoi_pin: float | None = None
 
 
 @dataclass(frozen=True)

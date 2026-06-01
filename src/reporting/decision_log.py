@@ -11,15 +11,13 @@ from src.storage.paths import decision_log_path
 from src.strategies.base import StrategyDecision
 
 
-def log_decision(
-    output_root: Path,
+def build_decision_record(
     decision: StrategyDecision,
     snapshot_summary: dict[str, Any],
     ts: datetime,
-    date_str: str | None = None,
-) -> Path:
-    path = decision_log_path(output_root, date_str)
-    record = {
+) -> dict[str, Any]:
+    """Pure shaper — turn a StrategyDecision + snapshot into the JSONL record."""
+    return {
         "ts": ts.isoformat(),
         "strategy_id": decision.strategy_id,
         "decision": decision.decision,
@@ -30,8 +28,30 @@ def log_decision(
         "explanation": decision.explanation,
         "snapshot_summary": snapshot_summary,
     }
-    append_jsonl(path, record)
+
+
+def log_decision(
+    output_root: Path,
+    decision: StrategyDecision,
+    snapshot_summary: dict[str, Any],
+    ts: datetime,
+    date_str: str | None = None,
+) -> Path:
+    """Append to outputs/runs/{date}/decision_log.jsonl."""
+    path = decision_log_path(output_root, date_str)
+    append_jsonl(path, build_decision_record(decision, snapshot_summary, ts))
     return path
+
+
+def log_decision_to_file(
+    target: Path,
+    decision: StrategyDecision,
+    snapshot_summary: dict[str, Any],
+    ts: datetime,
+) -> Path:
+    """Append a decision to an arbitrary file path (e.g. outputs/latest/decision_log.jsonl)."""
+    append_jsonl(target, build_decision_record(decision, snapshot_summary, ts))
+    return target
 
 
 def _candidate_to_dict(c) -> dict[str, Any]:  # type: ignore[no-untyped-def]

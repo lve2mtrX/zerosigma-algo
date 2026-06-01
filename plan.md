@@ -614,13 +614,38 @@ informs the QuoteProvider choice.
 ## 17. Definition of done — Phase 1
 
 - ✅ Scaffold present, importable, lint-clean.
-- ⏳ `strategies.yaml` registers `vertical_wing_v1` and the registry loads it.
-- ⏳ Strategy returns at least one `Candidate` object given a hand-crafted
-  test snapshot.
-- ⏳ Risk filters reject a non-positive credit; risk limits enforce max open
-  positions = 1.
-- ⏳ Manual trade entry writes a row to `outputs/runs/.../manual_trades.csv`.
-- ⏳ Decision log writes a `NO_TRADE` record when no candidate clears the
-  threshold.
-- ⏳ EOD script runs and emits a non-empty markdown summary.
-- ⏳ Streamlit shell launches with all panels visible (placeholder data fine).
+- ✅ `strategies.yaml` registers `vertical_wing_v1` and the registry loads it.
+- ✅ Strategy returns at least one `Candidate` object given the stub snapshot
+  (both CALL_CREDIT and PUT_CREDIT candidates produced from the deterministic
+  chain).
+- ✅ Risk filters reject a non-positive credit; planned + theoretical trade-loss
+  gates wired and tested under both `aggressive_paper_10k` and
+  `conservative_paper_10k` profiles.
+- ✅ Manual trade entry writes rows to `outputs/runs/{date}/manual_trades.csv`
+  AND mirrors to `outputs/latest/manual_trades.csv`.
+- ✅ Decision log writes records (TRADE_CALL_CREDIT, TRADE_PUT_CREDIT, or
+  NO_TRADE) to both `outputs/runs/{date}/decision_log.jsonl` and
+  `outputs/latest/decision_log.jsonl`.
+- ✅ EOD script runs from `python -m scripts.run_eod_summary`; emits md + json
+  to both `outputs/daily/{date}/` and `outputs/latest/`.
+- ✅ Streamlit shell launches end-to-end with: strategy + risk-profile
+  selectors, editable session controls (with config-change log), structure
+  panel (spot/MaxVol/walls/gamma/PUT_CEILING/CALL_FLOOR/DDOI), candidate
+  table with planned + theoretical $, decision card, manual trade entry,
+  open positions panel, P&L + equity curve, "Generate EOD" button.
+- ✅ One-shot scanner runner (`python -m scripts.run_scanner`) writes
+  `ranked_candidates.csv` + `decision_log.jsonl` to both `outputs/latest/`
+  and `outputs/runs/{date}/` without requiring Streamlit.
+- ✅ 34 tests, 0 failures, ruff clean.
+
+### Still mock / stubbed (Phase 2+)
+
+- `ZeroSigmaApiStructureProvider` exists but raises `NotImplementedError` —
+  wire to `/api/v1/market/*` and `/api/v1/exposure/*` in Phase 2.
+- `QuoteProvider` is `MockQuoteProvider` (deterministic synthetic mids) +
+  `NullQuoteProvider`. Broker probe → real provider lands in Phase 4–5.
+- Execution provider modes available: `disabled`, `local_paper`,
+  `manual_trade_tracking`. Live modes stubbed only.
+- `force_stop` on a `BASELINE_CASH_SETTLE` position is intentionally a no-op
+  at the paper-account level — the docs make this explicit; you should not
+  call it on no-stop positions.

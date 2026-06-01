@@ -73,16 +73,95 @@ copy .env.example .env           # then edit .env locally
 
 ## Run
 
+All three entry points work locally against the stub structure + mock quote providers. No broker. No live ZS API call.
+
 ```powershell
-# Local Streamlit cockpit (placeholder UI in Phase 1)
-python scripts/run_streamlit.py
+# 1) Streamlit cockpit (preferred — full UI)
+python -m scripts.run_streamlit
+# (equivalent: streamlit run src/app/streamlit_main.py)
 
-# One-shot scanner pass (placeholder in Phase 1)
-python scripts/run_scanner.py
+# 2) One-shot scanner tick — writes outputs/latest/ and outputs/runs/{date}/
+python -m scripts.run_scanner
+#    --profile aggressive_paper_10k    (default; see config/risk_profiles.yaml)
+#    --strategy vertical_wing_v1
+#    --symbol SPX
+#    --dry-run                          (don't persist)
 
-# Generate EOD summary from today's outputs/
-python scripts/run_eod_summary.py
+# 3) Generate EOD summary — writes outputs/daily/{date}/ AND outputs/latest/
+python -m scripts.run_eod_summary
 ```
+
+What the scanner does in one tick:
+- Loads `config/*` and the active risk profile (or `--profile NAME`).
+- Snapshots the stub structure provider (deterministic chain with 2K + 5K PUT_CEILING and CALL_FLOOR, MaxVol, gamma regime, DDOI pin).
+- Asks every enabled strategy to generate candidates → applies risk filters → scores → selects.
+- Writes ranked candidates (CSV) and the decision log (JSONL) to BOTH:
+  - `outputs/runs/{YYYY-MM-DD}/` (append, per-day history)
+  - `outputs/latest/` (overwrite for the cockpit's "current view")
+
+Under the default `aggressive_paper_10k` profile the demo data emits a `TRADE_CALL_CREDIT` decision for SPX 5815/5820 at $0.60 credit (planned stop risk $450; theoretical max loss $2,100).
+
+### Session controls in the cockpit
+
+`config/risk_profiles.yaml` ships two templates: `aggressive_paper_10k` (active default) and `conservative_paper_10k`. In the Streamlit sidebar you can:
+
+- pick a strategy
+- pick a risk profile (resets the session)
+- click **Reset to profile defaults**
+
+In the **Session controls** expander you can edit every field below for the running session — every change is appended to `outputs/runs/{date}/config_change_log.jsonl`:
+
+```
+starting balance · contracts/trade · max open positions
+max daily loss (dollars / percent)
+max planned trade loss (dollars / percent)
+max theoretical trade loss (dollars / percent)
+spread width · stop variant · profit targets
+no-trade score threshold · minimum credit
+max bid/ask width · minimum distance from spot
+```
+
+### Where outputs live
+
+```
+outputs/
+├── latest/                       # always-current view (overwrites)
+│   ├── ranked_candidates.csv
+│   ├── decision_log.jsonl
+│   ├── manual_trades.csv
+│   ├── paper_trades.csv
+│   ├── paper_positions.csv
+│   ├── paper_equity_curve.csv
+│   ├── eod_summary.md
+│   └── eod_summary.json
+├── runs/{YYYY-MM-DD}/            # per-day append-only history
+│   ├── ranked_candidates.csv
+│   ├── decision_log.jsonl
+│   ├── manual_trades.csv
+│   ├── paper_trades.csv
+│   ├── paper_positions.csv
+│   ├── paper_equity_curve.csv
+│   └── config_change_log.jsonl
+└── daily/{YYYY-MM-DD}/
+    ├── eod_summary.md
+    └── eod_summary.json
+```
+
+### What's mock / stubbed (Phase 1)
+
+| Layer | Phase 1 implementation | Phase 2+ plan |
+|---|---|---|
+| `StructureProvider` | `StubStructureProvider` — deterministic SPX chain with PUT_CEILING(2K/5K), CALL_FLOOR(2K/5K), MaxVol, gamma regime, DDOI pin, DA-GEX. | `ZeroSigmaApiStructureProvider` against `/api/v1/market/*` and `/api/v1/exposure/*` (already stubbed, raises NotImplementedError). |
+| `QuoteProvider` | `MockQuoteProvider` — deterministic spot + intrinsic-plus-time mids. | Broker-specific provider (TBD via capability probe). |
+| `ExecutionProvider` | `disabled` / `local_paper` / `manual_trade_tracking`. **No live orders.** | `broker_paper`, `manual_confirm`, `live_tiny`, `live` — stubbed today, raise NotImplementedError. |
+
+### Adding a new strategy
+
+1. Drop a new package under `src/strategies/<strategy_name>/` exposing a class that implements `src/strategies/base.py::Strategy` (the protocol with `generate_candidates`, `score`, `select`, `explain`).
+2. Add a YAML entry in `config/strategies.yaml` with `module`, `class`, `enabled: true`, and any `default_parameters` / `editable_parameters` / `required_data_fields`.
+3. That's it — the cockpit's sidebar selector picks it up at next launch; `scripts/run_scanner.py` will exercise it in the loop; the decision log gets an entry per tick.
+
+No app / provider / risk / reporting / storage code imports a specific strategy. The registry is the only seam.
 
 ---
 
