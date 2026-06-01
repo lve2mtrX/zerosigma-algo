@@ -681,3 +681,376 @@ Expected: `anchor_volume` shows the ZS-reported volume at the live
 anchor strike (some 4-5 digit number), `anchor_volume_source =
 zs_exposure_series`, `score_structure_strength` between 0.2 and 1.0
 depending on how strong that strike's volume is.
+
+---
+
+## 2026-06-01 (Phase 3) — Tastytrade capability probe scaffold
+
+**Why now**: ZS structure is correct enough for live VW scoring. The
+remaining blocker for end-to-end is real per-strike option quotes —
+mock prices can't validate the strategy. Tastytrade is Dan's account
+broker of choice; before wiring a production QuoteProvider we need to
+confirm what the Tasty API actually supports for this use case.
+
+**Research method**: parallel workflow agent against
+`developer.tastytrade.com` + the unofficial `tastyware/tastytrade`
+Python SDK source code. Findings landed verbatim in
+`docs/reference_notes.md §8b` with URL citations.
+
+### Headline findings (full contract in §8b)
+
+- **Base URLs**: `api.tastyworks.com` (prod), `api.cert.tastyworks.com`
+  (sandbox). Note the `tastyworks.com` domain, NOT `tastytrade.com`.
+- **Auth**: two flows coexist. Legacy `POST /sessions` with
+  `{login, password, remember-me}` returns `data.session-token`, used
+  as a BARE `Authorization: <token>` header (no `Bearer ` prefix).
+  Tastytrade announced sunset (community references say Dec 1, 2025 —
+  verify empirically before relying long-term). OAuth2 (`/oauth/token`,
+  Bearer-prefixed, 900s access tokens) is the durable path forward.
+- **Accounts**: `GET /customers/me/accounts`.
+- **Chains**: `GET /option-chains/{symbol}/nested` (expirations →
+  strikes → call/put + streamer symbols). SPX and SPXW are SEPARATE
+  underlyings on the same `/option-chains/SPX/...` payload —
+  AM-settled vs PM-settled, the latter is the 0DTE family VW targets.
+- **Quotes**: REST via `GET /market-data/by-type?equity-option=SYM1,SYM2,...`
+  up to 100 symbols per call. Returns bid/ask/mid/last/mark.
+- **DXLink**: `GET /api-quote-tokens` returns
+  `{token, dxlink-url, level}`. WebSocket protocol is DXFeed DXLink
+  (SETUP → AUTH → CHANNEL_REQUEST → FEED_SUBSCRIPTION + KEEPALIVE).
+- **Dry-run** (no-routing preview): `POST /accounts/{n}/orders/dry-run`
+  and `/complex-orders/dry-run`. Safe by design.
+- **Sandbox**: 15-min delayed quotes; 24-hour position reset. Index
+  options (SPX/SPXW) availability in cert is undocumented — treat as
+  empirical (catch 422 on chain).
+- **Rate limits**: not publicly documented. Community SDKs self-
+  throttle ~2 req/s. Tastytrade inspects User-Agent — descriptive UA
+  required.
+
+### Probe scaffold
+
+`src/providers/quotes/tasty_probe.py`:
+
+- `TastyProbeConfig` dataclass — env, base_url, username, password,
+  account_number, use_dxlink, timeout, verify_ssl, user_agent.
+  `__repr__` redacts password and account number to last-4. Read from
+  `.env` via `config_from_env()`.
+- `TastyProbeStatus` dataclass — `configured`, `auth_attempted`,
+  `auth_success`, `session_token_present`, `last_http_status`,
+  `last_error`. `sanitize()` returns a dict safe to print.
+- `TastyProbeClient` — narrow class with just the read-only methods:
+  `login()`, `list_accounts()`, `get_option_chain_summary(symbol)`,
+  `get_option_quotes(equity_option_symbols)`, `get_dxlink_token()`,
+  `capabilities_summary(symbol)`. HTTP client is injectable via
+  `client_factory=...` so tests use `httpx.MockTransport` — no live
+  network in CI.
+
+Explicitly **NOT implemented** — three stubs that raise
+`NotImplementedError`:
+
+```python
+TastyProbeClient.submit_order()
+TastyProbeClient.submit_complex_order()
+TastyProbeClient.open_streaming()
+```
+
+These exist so future code that imports the class and tries to do
+something dangerous fails loudly. The probe's `dir(class)` is checked
+in tests for `place_order` / `route` / `execute` / `preview` /
+`dry_run` — none of those names exist on the class.
+
+### CLI (`scripts/probe_tastytrade.py`)
+
+Subcommands (mutually exclusive):
+
+- `--auth-only` — POST `/sessions` only
+- `--accounts` — login + list accounts (redacted)
+- `--chain --symbol SPX` — login + nested chain summary
+- `--quotes --symbol SPX --expiry YYYY-MM-DD --strikes K1,K2,... --right C|P` — bulk REST quotes
+- `--capabilities --symbol SPX` — full matrix
+
+Plus `--json` and `--symbol` modifiers. Builds OCC 21-char symbols
+locally for `--quotes` (root padded to 6 chars, expiry `YYMMDD`,
+right C/P, strike `*1000` as 8-digit padded integer).
+
+Exit codes:
+
+- `0` configured + probe ran
+- `0` unconfigured (clean warning, no traceback)
+- `1` configured but a hard failure (network / unexpected) — exception
+  TYPE only, never values
+- `2` bad arguments
+
+### Sanitization invariants (locked by tests)
+
+- `TastyProbeStatus.sanitize()` does not contain
+  `password` / `hunter2` / `session-token` / `Bearer ` substrings.
+- `TastyProbeConfig.__repr__` does not contain the password, full
+  account number, session token, or remember token; instead shows
+  `password_present=True/False` and `account='****1234'`.
+- Authenticated requests use BARE `Authorization: <token>`, NOT
+  `Bearer <token>` — there's a regression test for this.
+- `--quotes` request never echoes the requested OCC symbols back into
+  log output as a way to confirm they look right; tests assert the
+  query string carries them but the rendered output uses only counts.
+- `--capabilities` never opens the WebSocket. The test uses
+  `httpx.MockTransport` which physically can't carry a `wss://` URL.
+
+### 19 tests in `tests/test_phase3_tasty_probe.py`
+
+Coverage matrix:
+
+| # | What it locks |
+|---|---|
+| 1 | Unconfigured client never makes HTTP, never echoes secrets in status |
+| 2 | `_redact_account` helper math |
+| 3 | `__repr__` redacts password + account + tokens |
+| 4 | Login body shape (`login` + `password` + `remember-me: true`) |
+| 5 | Login output never includes raw token values |
+| 6 | Authenticated requests use BARE token (NO `Bearer ` prefix) |
+| 7 | Auth HTTP error sanitized (no traceback, no values) |
+| 8 | Account list redacts account numbers to last-4 |
+| 9 | Chain summary maps SPX vs SPXW roots + 0DTE detection |
+| 10 | Quotes map bid/ask/mid/last/mark from `/market-data/by-type` |
+| 11 | Quotes cap at 100 symbols per Tasty `by-type` limit |
+| 12 | DXLink token check confirms token presence WITHOUT opening WS |
+| 13 | `submit_order` / `submit_complex_order` / `open_streaming` all raise NotImplementedError |
+| 14 | Probe class doesn't expose forbidden names (`place_order` / `route` / etc.) |
+| 15 | `capabilities_summary` runs the full sequence under mock |
+| 16 | `capabilities_summary` under auth failure returns a partial matrix (not a crash) |
+| 17 | CLI `--help` renders without credentials |
+| 18 | CLI unconfigured returns 0 with a clean warning (no traceback) |
+| 19 | CLI `--capabilities --json` drives the full path under mocked transport, never leaks creds |
+
+Total project tests: **123/123** (was 104, +19 new). Ruff clean.
+
+### Still NOT in this round
+
+- **No production `TastytradeQuoteProvider`.** That comes after Dan
+  runs the probe against a real account (sandbox or live) and we
+  review the capability matrix together. Key questions the probe will
+  answer empirically:
+  - Does cert support SPX/SPXW chains end-to-end?
+  - Does the legacy `/sessions` flow still work, or has it been
+    migrated to OAuth2 only?
+  - Are real-time quotes available without a DXFeed entitlement
+    purchase?
+- **No DXLink WebSocket implementation.** Phase 3 only confirms the
+  token endpoint is reachable. Real streaming is a separate task.
+- **No order paths of any kind** — not even `/dry-run`. That belongs
+  behind an explicit opt-in CLI flag after the rest is stable.
+- **No scanner wiring.** The scanner still uses `MockQuoteProvider`.
+
+### Next step (after the probe runs)
+
+1. Dan adds `TASTY_USERNAME` + `TASTY_PASSWORD` to local `.env`.
+2. Run `python -m scripts.probe_tastytrade --capabilities --symbol SPX`.
+3. Capture the capability matrix + any 4xx / 5xx + which root symbols
+   appeared in the chain.
+4. Phase 4 plan based on the results:
+   - If cert supports SPX/SPXW + real quotes work → implement
+     `TastytradeQuoteProvider` as a thin wrapper over the probe client
+     plus the DXLink WebSocket.
+   - If cert returns 422 on SPX → move probe to production with a
+     paper-only sandbox account; production DXFeed entitlement may be
+     required for real-time SPX/SPXW.
+   - If OAuth2 is required → implement `/oauth/token` flow in the
+     probe before the real provider.
+
+---
+
+## 2026-06-01 (Phase 3 extension) — OAuth refresh + scope parser + hard safety gate
+
+**Driver**: Dan's actual `.env` was already populated with OAuth fields
+(`TASTY_CLIENT_ID`, `TASTY_CLIENT_SECRET`, `TASTY_REDIRECT_URI`,
+`TASTY_SCOPES=read trade openid`) plus the new safety knobs
+(`TASTY_ALLOW_TRADE_SCOPE=true`, `TASTY_ENABLE_ORDER_SUBMISSION=false`).
+The Phase 3 probe shipped with only the legacy `/sessions` path —
+extending so it can handle the real config without leaking secrets and
+without ever lifting the execution gate just because trade scope happens
+to be granted.
+
+### `TastyProbeConfig` (extended)
+
+New fields:
+- `client_id`, `client_secret`, `redirect_uri`, `refresh_token` —
+  OAuth Personal Application credentials.
+- `scopes: list[str]` — parsed via `_parse_scopes()`.
+- `allow_trade_scope: bool` (default True) — lets the OAuth app keep
+  `trade` in its scope list without the probe complaining.
+- `enable_order_submission: bool` (default **False**) — the HARD
+  execution gate. Phase 3 only ever READS this for reporting.
+
+Derived helpers:
+- `has_oauth()` → True when client_id + client_secret + refresh_token
+  are ALL set.
+- `has_legacy_session()` → True when username + password are set.
+- `auth_mode()` → `"oauth"` | `"legacy_session"` | `"none"`.
+- `trade_scope_present()` → True if `"trade"` is in the parsed scopes.
+- `missing_fields()` → list of TASTY_* env names still empty.
+
+`__repr__` extended to surface auth_mode + every credential's
+`*_present` boolean + safety-gate state, but NEVER a single secret
+value. Sample under partial config:
+
+```
+TastyProbeConfig(env='certification', base_url='...',
+  auth_mode='none',
+  username_present=False, password_present=False,
+  client_id_present=True, client_secret_present=True,
+  refresh_token_present=False,
+  scopes=['read', 'trade', 'openid'], trade_scope_present=True,
+  enable_order_submission=False,
+  account='', use_dxlink=False)
+```
+
+### `_parse_scopes()` helper
+
+```python
+_parse_scopes("read trade openid")   # → ["read", "trade", "openid"]
+_parse_scopes("read,trade,openid")   # → ["read", "trade", "openid"]
+_parse_scopes("read, trade openid")  # → ["read", "trade", "openid"]  (mixed OK)
+_parse_scopes("  READ  Trade  ")     # → ["read", "trade"]            (case + ws)
+_parse_scopes("read trade trade")    # → ["read", "trade"]            (deduped)
+_parse_scopes(None)                  # → []
+```
+
+Splits on commas first, then whitespace within each piece. Lowercases.
+Dedupes preserving order. Locked by `@pytest.mark.parametrize`.
+
+### OAuth refresh login
+
+`login_oauth()` POSTs to `/oauth/token` with
+`grant_type=refresh_token&client_secret=...&refresh_token=...`
+(form-urlencoded — the ONE Tasty endpoint that's not kebab-case JSON).
+On success it stores the `access_token` internally and switches
+`_auth_mode_used = "oauth"` so `_auth_headers()` returns
+`Authorization: Bearer <token>` instead of the legacy BARE format.
+
+`login()` is the dispatcher:
+1. If config has OAuth (`client_id + client_secret + refresh_token`),
+   → `login_oauth()`.
+2. Else if config has legacy (`username + password`),
+   → `login_legacy_session()`.
+3. Else → sanitized "not configured" reply, NO HTTP call.
+
+Both login flows emit:
+- `auth_mode` (so callers can tell which path ran)
+- `trade_scope_present` + `order_submission_enabled` on success
+  (informational; the gate isn't read for anything else in Phase 3)
+
+### `SafetyGateError`
+
+```python
+class SafetyGateError(RuntimeError):
+    """Raised when code tries to perform an account-changing action while
+    the safety gate is closed."""
+```
+
+`submit_order()` and `submit_complex_order()` now raise this (was
+generic `NotImplementedError`). The message explicitly references
+"Phase 3 is read-only" and "trade scope and TASTY_ENABLE_ORDER_SUBMISSION
+are tracked for future capability ONLY." `open_streaming()` stays
+`NotImplementedError` because it's a feature gap, not a safety boundary.
+
+### `--config` CLI subcommand
+
+New `python -m scripts.probe_tastytrade --config` prints a sanitized
+config dump via `TastyProbeClient.config_summary()`:
+
+```jsonc
+{
+  "provider":     "tasty_probe",
+  "configured":   false,
+  "auth_mode":    "none",
+  "env":          "certification",
+  "base_url":     "https://api.cert.tastyworks.com",
+  "redirect_uri": "https://localhost:8000",
+  "scopes":       ["read", "trade", "openid"],
+  "trade_scope_present":           true,
+  "trade_scope_allowed":           true,
+  "order_submission_enabled":      false,
+  "execution_blocked_by_safety_gate": true,
+  "execution_status_note":         "trade scope is FUTURE-only; this phase NEVER submits orders",
+  "credentials_present": {
+    "username":       false, "password":     false,
+    "client_id":      true,  "client_secret": true,
+    "refresh_token":  false, "account_number": false
+  },
+  "account_redacted": "",
+  "use_dxlink":       false,
+  "timeout_seconds":  10,
+  "verify_ssl":       true,
+  "missing_fields":   ["TASTY_REFRESH_TOKEN", "TASTY_USERNAME", "TASTY_PASSWORD"]
+}
+```
+
+**Critical**: `--config` runs BEFORE the unconfigured short-circuit in
+`main()`, so it works without ANY credentials. Test
+`test_cli_config_runs_before_unconfigured_short_circuit` locks this.
+
+### `capabilities_summary` extensions
+
+Reports the following new keys (all keyed off config, no extra HTTP):
+- `trade_scope_present` (bool)
+- `trade_scope_allowed` (bool)
+- `order_submission_enabled` (bool — reflects the gate)
+- `execution_blocked_by_safety_gate` (bool — inverse of above)
+- `probe_exposes_submit_path` (bool — always **False**)
+- `has_dxlink` (bool — aliases `has_streaming_token`)
+- `has_certification_or_sandbox` (bool — env=='certification')
+- `has_paper_or_sandbox_order_support` (`"yes_per_docs"` |
+  `"unknown_in_production"`)
+
+### Tests added (+19 → 38 in this module)
+
+| # | What it locks |
+|---|---|
+| `_parse_scopes` parametrized | 7 input variants (space / comma / mixed / case / dedup / "" / None) |
+| `enable_order_submission_defaults_false` | Trade scope alone doesn't open the gate; status reports `execution_blocked_by_safety_gate=True` |
+| `trade_scope_alone_does_not_enable_execution` | `submit_order` / `submit_complex_order` raise `SafetyGateError` even with token + trade scope |
+| `safety_gate_message_mentions_trade_scope_and_phase3` | Error message context is informative |
+| `oauth_login_uses_refresh_token_grant_and_form_body` | POST `/oauth/token`, form-urlencoded body has all three OAuth fields; no token value in output |
+| `oauth_authenticated_requests_use_bearer_prefix` | `Authorization: Bearer <token>` (NOT bare) for OAuth flow |
+| `login_picks_oauth_when_both_oauth_and_legacy_present` | OAuth precedence — never falls through to legacy when OAuth is fully configured |
+| `oauth_login_http_error_is_sanitized` | 400 → exit-clean, no traceback |
+| `oauth_unconfigured_short_circuits_without_http` | Partial OAuth (no refresh_token) makes zero HTTP calls |
+| `capabilities_includes_trade_scope_and_safety_gate` | All five new capability keys present + correct values |
+| `cli_config_works_without_credentials` | `--config --json` runs without ANY env, output sanitized |
+| `cli_config_with_partial_creds_lists_missing_fields` | `missing_fields` populated; client_secret value never appears |
+| `cli_config_runs_before_unconfigured_short_circuit` | Dispatch order is correct |
+
+### Tasty `.env.example` block (extended)
+
+`.env.example` now contains the full TASTY_* block (~55 lines) with
+explanatory comments grouping into:
+- environment selector (`TASTY_ENV` / `TASTY_BASE_URL` / `TASTY_ACCOUNT_NUMBER`)
+- OAuth refresh credentials (`TASTY_CLIENT_ID` / `TASTY_CLIENT_SECRET`
+  / `TASTY_REDIRECT_URI` / `TASTY_REFRESH_TOKEN` / `TASTY_SCOPES`)
+- legacy fallback (`TASTY_USERNAME` / `TASTY_PASSWORD`)
+- safety gates (`TASTY_ALLOW_TRADE_SCOPE` / `TASTY_ENABLE_ORDER_SUBMISSION`)
+- transport (`TASTY_USE_DXLINK` / `TASTY_TIMEOUT_SECONDS` / `TASTY_VERIFY_SSL`)
+
+### What this round still does NOT do
+
+- **No production `TastytradeQuoteProvider`**. The probe is still the
+  only Tasty-aware code, still isolated from the scanner.
+- **No DXLink WebSocket connection**. Only `/api-quote-tokens`.
+- **No order paths of any kind** — `submit_*` raise `SafetyGateError`,
+  no `/dry-run`, no `--dry-run-vertical` flag yet.
+- **No ZS API chain quotes**. ZS stays structure-only by design.
+- **No scanner wiring**. `MockQuoteProvider` is still the source of
+  truth for bid/ask in scoring.
+
+### Next step
+
+1. Dan re-runs `python -m scripts.probe_tastytrade --config` against his
+   live `.env`. The output will tell him whether the OAuth bootstrap is
+   done (`refresh_token` present) or whether the one-time interactive
+   authorization step still needs to happen.
+2. If the OAuth bootstrap isn't done, capture the refresh_token via the
+   Tasty dev-UI authorization-code dance (one-time manual step), then
+   drop it in `.env`.
+3. Then `python -m scripts.probe_tastytrade --capabilities --symbol SPX
+   --json | Out-File phase3_capabilities.json` — the capability matrix
+   decides what Phase 4 looks like (`TastytradeQuoteProvider` shape,
+   DXLink integration scope, etc.).

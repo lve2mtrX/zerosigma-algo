@@ -385,6 +385,236 @@ laptop. Hitting the public ZS API is the supported integration path.
 
 ---
 
+## 8b. Phase 3 Tastytrade Capability Probe Notes
+
+> Research done for the Phase 3 probe scaffold. **Do not** treat this as
+> the final QuoteProvider contract — these are findings to verify
+> empirically once Dan runs `scripts.probe_tastytrade` against a real
+> account. Sources cited inline; full URL list at the end of the section.
+
+### Base URLs
+
+| Environment | Host | Notes |
+|---|---|---|
+| Production | `https://api.tastyworks.com` | Note the **tastyworks.com** domain (not `tastytrade.com`). |
+| Certification (sandbox) | `https://api.cert.tastyworks.com` | 15-minute delayed quotes; resets every 24 hours. |
+
+Tastyware/tastytrade Python SDK constants `API_URL` / `CERT_URL` confirm
+these verbatim. The `developer.tastytrade.com` site documents the same.
+
+### Authentication
+
+Two flows coexist; Tastytrade announced the legacy `/sessions` flow
+would be deprecated (community references cite Dec 1, 2025 — the
+deprecation has slipped before, verify empirically).
+
+**Legacy session-token flow** (lowest friction for the smoke probe):
+
+```
+POST /sessions
+Content-Type: application/json
+{
+  "login":       "<username-or-email>",
+  "password":    "<password>",
+  "remember-me": true
+}
+→ 200 OK
+{
+  "data": {
+    "user":           { "email": "...", "username": "...", "external-id": "..." },
+    "session-token":  "<token>",
+    "remember-token": "<token>"   // present only when remember-me=true
+  },
+  "context": "/sessions"
+}
+```
+
+Subsequent requests use the BARE token in the `Authorization` header —
+**no `Bearer ` prefix**:
+
+```
+Authorization: <session-token>
+```
+
+Remember-token can be reused for password-less re-login by POSTing
+`{"login": "...", "remember-token": "..."}`. The remember-token rotates
+on each use.
+
+**OAuth2 flow** (recommended/durable path forward — Personal OAuth
+Application registered in the Tastytrade UI):
+
+```
+POST /oauth/token
+Content-Type: application/x-www-form-urlencoded
+grant_type=refresh_token&client_secret=<secret>&refresh_token=<token>
+→ 200 OK
+{ "access_token": "<token>", "token_type": "Bearer", "expires_in": 900, ... }
+```
+
+Authenticated requests use `Authorization: Bearer <access_token>`.
+Access token TTL ≈ 900s; refresh via the same endpoint with the
+refresh token. The SDK refreshes with a 60s buffer.
+
+**Probe choice**: implement legacy `/sessions` for the smoke test; document
+OAuth2 in the probe module's docstring as the path for the eventual
+production QuoteProvider.
+
+### REST endpoints the probe touches
+
+All responses are wrapped in a `data` envelope and use **kebab-case**
+field names.
+
+| Endpoint | Path | Purpose |
+|---|---|---|
+| Login | `POST /sessions` | Returns `data.session-token`. |
+| List accounts | `GET /customers/me/accounts` | `data.items[].account.account-number`. |
+| Account details | `GET /customers/me/accounts/{n}` | `data.account-type-name`, margin-or-cash, etc. |
+| Option chain (nested) | `GET /option-chains/{symbol}/nested` | Expiration → strikes → `{call, put, call-streamer-symbol, put-streamer-symbol, strike-price}`. Best shape for SPX/SPXW per-expiration walks. |
+| Option chain (flat) | `GET /option-chains/{symbol}` | Flat list, grouped by expiration in the payload. |
+| Option chain (compact) | `GET /option-chains/{symbol}/compact` | OCC symbols + streamer symbols, minimal payload. |
+| Quote (single) | `GET /market-data/{instrument-type}/{symbol}` | `data.{bid, ask, mid, last, mark}`. `instrument-type` ∈ `equity \| equity-option \| index \| future \| future-option \| cryptocurrency`. |
+| Quote (bulk) | `GET /market-data/by-type?equity-option=SYM1,SYM2,…` | Up to **100** symbols in one call across all instrument-type params. |
+| DXLink token | `GET /api-quote-tokens` | `data.{token, dxlink-url, level}`. **Use this, not `/quote-streamer-tokens`** — the latter is reserved for Tastytrade's own apps and is out-of-TOS for API consumers. |
+| Order dry-run (simple) | `POST /accounts/{n}/orders/dry-run` | Preflight only. Returns `buying-power-effect`, `fee-calculation`, `warnings`, `errors`. Does NOT route. |
+| Order dry-run (multi-leg) | `POST /accounts/{n}/complex-orders/dry-run` | Same, for vertical / multi-leg orders. |
+
+**For the Phase 3 probe**: hit ONLY `/sessions`, `/customers/me/accounts`,
+`/option-chains/{symbol}/nested`, `/market-data/by-type`,
+`/api-quote-tokens`. Skip `/orders` and `/complex-orders` entirely. The
+`/dry-run` endpoint IS safe (no routing), but the cockpit must not POST
+to it until Dan has reviewed the probe results.
+
+### DXLink streaming (probe scope: confirm token availability only)
+
+Tastytrade streams market data over **DXFeed DXLink** (WebSocket).
+
+1. `GET /api-quote-tokens` → `{token, dxlink-url, level}`.
+2. WebSocket connect to `dxlink-url` (community references point to
+   `wss://tasty-openapi-ws.dxfeed.com/realtime`; **read it from the API
+   response, don't hardcode**).
+3. Handshake: client `SETUP` → server `AUTH_STATE=UNAUTHORIZED` →
+   client `AUTH(token)` → server `AUTH_STATE=AUTHORIZED` → client
+   `CHANNEL_REQUEST{service:'FEED', parameters:{contract:'AUTO'}}` →
+   server `CHANNEL_OPENED` → client `FEED_SETUP` → client
+   `FEED_SUBSCRIPTION{add:[{type:'Quote', symbol:'.SPXW250620C5000'}, ...]}`.
+4. Keepalive every ~30s.
+
+**Phase 3 probe scope**: fetch `/api-quote-tokens` and confirm `token`
+is present + `dxlink-url` is reachable in URL form. **Do NOT open the
+WebSocket** in the smoke probe — that's a deeper integration for the
+production QuoteProvider.
+
+### SPX vs SPXW
+
+Two **separate underlyings** on the Tasty API even though both appear
+under `/option-chains/SPX/nested`:
+
+| Symbol | Settlement | Expirations | Note |
+|---|---|---|---|
+| `SPX` | AM | Monthly only (3rd Friday) | Cash-settled, exercise at open. |
+| `SPXW` | PM | Weeklies + 0DTE (Mon-Wed-Fri intraday) | The one VW v1 targets. |
+
+On a date when both AM and PM listings expire (e.g. 3rd-Friday monthly
+PLUS the same-day weekly), **both appear in the same expiration bucket**
+under `/option-chains/SPX/nested`. Filter by the OCC root (SPX vs SPXW)
+or by the `settlement-type` / `expiration-type` fields on the nested
+chain. For VW 0DTE: walk `expirations` where `expiration-date == today`
+AND the streamer-symbol carries `SPXW`.
+
+OCC symbol = padded 21-char OPRA format. Streamer-symbol = DXFeed
+dotted format, e.g. `.SPXW250620C5000` for the 2025-06-20 5000 SPXW
+call. Both are exposed on every Option record (`symbol` and
+`streamer-symbol` in the flat chain; `call`/`put` and
+`call-streamer-symbol`/`put-streamer-symbol` in the nested chain).
+
+### Certification (sandbox) capabilities
+
+| Capability | State |
+|---|---|
+| Account registration | At `developer.tastytrade.com/sandbox`. |
+| Quotes | 15-minute delayed. |
+| Reset | Every 24 hours (positions + balances cleared). |
+| Multi-leg orders | Supported (`/complex-orders` + `/complex-orders/dry-run` both exposed). |
+| Fill behavior | Market → fill at $1. Limit price < $3 → immediate fill. Limit price > $3 → stays Live, never fills. |
+| Index options (SPX/SPXW) | **Unconfirmed.** developer.tastytrade.com/sandbox does not enumerate per-instrument restrictions. Community reports indicate cert symbology can lag and return 422 on valid live symbols. Probe must treat this as a runtime check — catch 422 on the chain call. |
+
+### Order preview (dry-run) — safe by design
+
+`POST /accounts/{n}/orders/dry-run` and `POST /accounts/{n}/complex-orders/dry-run`
+run preflights and **do NOT route to the exchange**. They return:
+
+```jsonc
+{
+  "data": {
+    "order":               { ... echo of the submitted shape ... },
+    "buying-power-effect": { "change-in-buying-power": ..., ... },
+    "fee-calculation":     { ... },
+    "warnings":            [ ... ],
+    "errors":              [ ... ]
+  }
+}
+```
+
+There is **no `submit=false` / `dry-run=true` flag** on the live order
+endpoint. The dry-run is a separate path — code should hit `/dry-run`
+exclusively when previewing.
+
+**Phase 3 probe**: keep `--dry-run-vertical` behind an explicit CLI flag
+(default off). Even the dry-run is one HTTP call away from a real order
+path — make the user opt in.
+
+### Rate limits
+
+- **No public, documented per-endpoint limit.** developer.tastytrade.com
+  + the FAQ do not state numbers.
+- Community SDKs (tastyware/tastytrade, tasty-agent MCP server) self-
+  throttle at ~2 req/s (~120/min) as a defensive default.
+- The FAQ notes the API inspects User-Agent and can return errors / IP
+  blocks on suspicious patterns. **Set a descriptive User-Agent.**
+- For higher limits or per-endpoint specifics, contact
+  api.support@tastytrade.com.
+
+### Knowns we are deliberately deferring
+
+1. Empirical status of legacy `/sessions` after the announced deprecation
+   date — verify before the probe ships against real creds.
+2. Whether cert supports SPX/SPXW end-to-end (chain + quotes + dry-run).
+   The probe will surface a 422 cleanly if the cert chain endpoint
+   refuses the symbol.
+3. DXLink WebSocket connection itself — Phase 3 only confirms token
+   acquisition. Real streaming lands in the production QuoteProvider.
+4. OAuth2 personal-app refresh flow with 2FA — there's lingering
+   ambiguity in the SDK issue tracker about whether headless refresh
+   needs an interactive consent step.
+
+### Sources
+
+Tastytrade developer docs:
+
+- https://developer.tastytrade.com/api-guides/sessions/  (legacy `/sessions`, `session-token`, `remember-me`)
+- https://developer.tastytrade.com/api-guides/oauth/  (OAuth2 — recommended)
+- https://developer.tastytrade.com/api-overview/
+- https://developer.tastytrade.com/basic-api-usage/  (base URLs, BARE-token Authorization header for legacy, kebab-case, data envelope)
+- https://developer.tastytrade.com/api-guides/instruments/  (`/option-chains/{symbol}`, `/nested`, `/compact`)
+- https://developer.tastytrade.com/streaming-market-data/  (`/api-quote-tokens` vs `/quote-streamer-tokens`, DXLink)
+- https://developer.tastytrade.com/sandbox/  (cert host, 15-min delay, 24h reset, fill behavior)
+- https://developer.tastytrade.com/open-api-spec/orders/  (dry-run + complex-order dry-run)
+- https://developer.tastytrade.com/order-management/  (Order Dry Run section)
+- https://developer.tastytrade.com/faq/  (User-Agent / IP-block guidance; no rate-limit statement)
+
+Reference SDK (unofficial, the authoritative reverse-engineering source):
+
+- https://github.com/tastyware/tastytrade  (Python; constants in `__init__.py`, session flow in `session.py`, chains in `instruments.py`, REST quotes in `market_data.py`, DXLink in `streamer.py`)
+- https://github.com/tastyware/tastytrade/issues/142  (DXLink vs legacy DXFeed; `/api-quote-tokens` is the API-user endpoint)
+- https://github.com/tastyware/tastytrade/issues/269  (legacy `/sessions` deprecation, migration to OAuth2)
+
+Reference SDK (official, JS):
+
+- https://github.com/tastytrade/tastytrade-api-js
+- https://github.com/tastytrade/tastytrade-api-js/blob/master/lib/services/orders-service.ts  (order paths incl. `/dry-run`, `/reconfirm`)
+
+---
+
 ## 9. Future recommendations for the ZS team
 
 These are out of scope for this repo; recording so they aren't lost:

@@ -357,6 +357,126 @@ below threshold 0.60 by 0.1361. Weakest components:
 credit_to_risk=0.14, maxvol_alignment=0.00.
 ```
 
+##### Phase 3 — Tastytrade capability probe (read-only)
+
+A separate, read-only scaffold lives at
+`scripts/probe_tastytrade.py` + `src/providers/quotes/tasty_probe.py`.
+It is **not wired into the scanner** and never submits orders. Its job
+is to answer one question per real Tasty account: *"does Tasty give us
+everything VW needs for live quotes — auth, accounts, SPX/SPXW chain,
+per-strike quotes, DXLink streamer token, multi-leg dry-run?"*
+
+The probe supports **two auth paths** — pick the one your account is set up for:
+
+**Path A — OAuth2 refresh (recommended; long-lived; the path forward)**:
+
+```bash
+TASTY_ENV=certification                # production | certification
+TASTY_CLIENT_ID=your-oauth-client-id
+TASTY_CLIENT_SECRET=your-oauth-client-secret
+TASTY_REDIRECT_URI=https://localhost:8000   # informational; only used for one-time bootstrap
+TASTY_REFRESH_TOKEN=your-refresh-token       # capture once via the interactive code flow
+TASTY_SCOPES=read trade openid               # space- OR comma-separated; both work
+
+# Safety gates (defaults shown — leave them like this)
+TASTY_ALLOW_TRADE_SCOPE=true             # allow the `trade` scope to be in the list
+TASTY_ENABLE_ORDER_SUBMISSION=false      # HARD gate; Phase 3 never reads this for anything but reporting
+```
+
+**Path B — legacy `/sessions` (fallback; Tasty announced sunset)**:
+
+```bash
+TASTY_ENV=certification
+TASTY_USERNAME=your-tasty-email-or-login
+TASTY_PASSWORD=your-tasty-password
+```
+
+Both paths share these optional knobs:
+
+```bash
+TASTY_ACCOUNT_NUMBER=                 # optional; first account picked if empty
+TASTY_USE_DXLINK=false                # true → also fetch /api-quote-tokens (token only, NO websocket)
+TASTY_TIMEOUT_SECONDS=10
+TASTY_VERIFY_SSL=true
+```
+
+(See `.env.example > Phase 3` for the full block + safety notes.)
+
+**Trade scope ≠ execution.** You can have `trade` in `TASTY_SCOPES` because
+the OAuth app was registered for future execution — that's fine and
+expected. The probe surfaces `trade_scope_present=True` for visibility but
+**will not submit orders**. The HARD execution gate is
+`TASTY_ENABLE_ORDER_SUBMISSION`, default `false`, and Phase 3 doesn't
+expose a submit path at all — even if you flip it to `true`, the probe
+class raises `SafetyGateError` from any future `submit_*` call.
+
+**Why not ZS for quotes?** The ZS API has chain endpoints but Phase 3
+intentionally treats ZS as **structure-only** (MaxVol, DA-GEX, gamma
+regime, PUT_CEILING / CALL_FLOOR / DDOI). Real per-strike bid/ask
+quotes belong on a broker provider — that's what Tastytrade is for.
+ZS chain quotes are out of scope for this repo.
+
+Safe commands:
+
+```powershell
+# Sanitized config dump — confirms your .env wiring. NO HTTP CALL.
+# Works without any credentials set.
+python -m scripts.probe_tastytrade --config
+
+# Auth check only (OAuth refresh OR /sessions, per env). Sanitized.
+python -m scripts.probe_tastytrade --auth-only
+
+# Account list — full account numbers are redacted to ****1234.
+python -m scripts.probe_tastytrade --accounts
+
+# Option chain summary — counts + small strike sample, no raw payload.
+python -m scripts.probe_tastytrade --chain --symbol SPX
+
+# Quotes for specific strikes (probe synthesizes OCC symbols, then
+# GET /market-data/by-type up to 100 symbols).
+python -m scripts.probe_tastytrade --quotes --symbol SPX `
+    --expiry 2026-06-30 --strikes 5790,5800,5810,5820 --right C
+
+# Full capability matrix — runs all the above + checks DXLink token,
+# sandbox detection, and reports yes/no/unknown per capability.
+python -m scripts.probe_tastytrade --capabilities --symbol SPX
+
+# Machine-readable variant of any subcommand
+python -m scripts.probe_tastytrade --capabilities --symbol SPX --json
+```
+
+**What each command proves**:
+
+| Command | Confirms |
+|---|---|
+| `--config` | `.env` is wired correctly. Lists which credential fields are present (without values), the chosen auth_mode (`oauth` / `legacy_session` / `none`), and the safety-gate state. NO HTTP call — safe to run anytime, even with empty `.env`. |
+| `--auth-only` | Tasty creds are valid. Uses OAuth refresh flow when all 3 OAuth fields are set; falls back to legacy `/sessions` otherwise. |
+| `--accounts` | The authenticated user owns at least one account; lists redacted ids. |
+| `--chain` | `/option-chains/SPX/nested` returns expirations + strikes; reports whether SPX and/or SPXW roots are present and whether today is a 0DTE expiry. |
+| `--quotes` | `/market-data/by-type` returns bid/ask/mid/mark for OCC symbols built from `--strikes`. |
+| `--capabilities` | All of the above + a `has_streaming_token` check via `/api-quote-tokens` (when `TASTY_USE_DXLINK=true`). Outputs a capability matrix that includes `trade_scope_present`, `order_submission_enabled`, `execution_blocked_by_safety_gate`, `has_dxlink`, `has_certification_or_sandbox`. |
+
+**What the probe explicitly does NOT do**:
+
+- **Never** POSTs to `/orders` or `/complex-orders` — the live order
+  submit paths.
+- **Never** opens the DXLink WebSocket — only confirms the token
+  endpoint is reachable.
+- **Never** prints `session-token`, `remember-token`, `access_token`,
+  `password`, `client_secret`, `refresh_token`, `Authorization` header
+  values, or full account numbers. Internal `__repr__` / `status()` /
+  `config_summary()` are all sanitized.
+- **Never** submits a dry-run (no-routing preview) by default — even
+  though the endpoint exists. Dry-runs of complex orders will be added
+  behind an explicit `--dry-run-vertical` flag after the probe results
+  are reviewed.
+- `submit_order()` / `submit_complex_order()` raise `SafetyGateError`
+  (not generic `NotImplementedError`) — the safety boundary is
+  enforced even if a future caller imports the probe class directly.
+
+If you forget the env, the probe exits 0 with a clean warning. No
+traceback, no live HTTP attempt.
+
 ##### What's still missing under `public_only`
 
 | Field | Still None under public_only? | How to populate |
