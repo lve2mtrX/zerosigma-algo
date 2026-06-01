@@ -26,18 +26,33 @@ from src.providers.structure.types import StructureSnapshot
 from src.strategies.base import Candidate
 
 
-def _ceiling_for_threshold(structure: StructureSnapshot, threshold: float) -> float | None:
-    """Pick PUT_CEILING (2K or 5K) based on the configured volume threshold."""
-    if threshold >= 5000 and structure.exposures.put_ceiling_5k is not None:
-        return structure.exposures.put_ceiling_5k
-    return structure.exposures.put_ceiling_2k
+def _ceiling_for_threshold(
+    structure: StructureSnapshot, threshold: float,
+) -> tuple[float | None, str | None, float | None]:
+    """Pick PUT_CEILING (2K or 5K) AND its anchor source + structure volume.
+
+    Returns (strike, anchor_source, anchor_volume_from_structure).
+    `anchor_source` is "put_ceiling_5k" | "put_ceiling_2k" | None.
+    `anchor_volume_from_structure` may be None when the structure source
+    didn't carry per-strike volume (e.g. wings-only fallback).
+    """
+    exp = structure.exposures
+    if threshold >= 5000 and exp.put_ceiling_5k is not None:
+        return (exp.put_ceiling_5k, "put_ceiling_5k", exp.put_ceiling_5k_volume)
+    if exp.put_ceiling_2k is not None:
+        return (exp.put_ceiling_2k, "put_ceiling_2k", exp.put_ceiling_2k_volume)
+    return (None, None, None)
 
 
-def _floor_for_threshold(structure: StructureSnapshot, threshold: float) -> float | None:
-    """Pick CALL_FLOOR (2K or 5K) based on the configured volume threshold."""
-    if threshold >= 5000 and structure.exposures.call_floor_5k is not None:
-        return structure.exposures.call_floor_5k
-    return structure.exposures.call_floor_2k
+def _floor_for_threshold(
+    structure: StructureSnapshot, threshold: float,
+) -> tuple[float | None, str | None, float | None]:
+    exp = structure.exposures
+    if threshold >= 5000 and exp.call_floor_5k is not None:
+        return (exp.call_floor_5k, "call_floor_5k", exp.call_floor_5k_volume)
+    if exp.call_floor_2k is not None:
+        return (exp.call_floor_2k, "call_floor_2k", exp.call_floor_2k_volume)
+    return (None, None, None)
 
 
 def _safe_mid(q: OptionQuote) -> float | None:
@@ -70,7 +85,7 @@ def build_put_ceiling_call_credit(
     max_bid_ask_width: float | None = None,
 ) -> Candidate | None:
     """SELL Call@K / BUY Call@(K + width) where K = StructureProvider's PUT_CEILING."""
-    short_k = _ceiling_for_threshold(structure, threshold)
+    short_k, anchor_source, structure_volume = _ceiling_for_threshold(structure, threshold)
     if short_k is None:
         return None
     long_k = short_k + spread_width
@@ -85,10 +100,18 @@ def build_put_ceiling_call_credit(
     if short_mid is None or long_mid is None:
         return None
 
-    # PUT_CEILING is defined by PUT volume at K, so the structure "strength"
-    # signal is the put-side quote's volume — not the call leg's.
-    anchor_put = chain.find(short_k, OptionType.PUT)
-    anchor_volume = anchor_put.volume if anchor_put else None
+    # PUT_CEILING is defined by PUT volume at K. Prefer the volume the
+    # StructureProvider actually used to qualify the level; fall back to
+    # the QuoteProvider's put-side quote only when structure didn't carry it.
+    if structure_volume is not None:
+        anchor_volume = structure_volume
+        anchor_volume_source = "zs_exposure_series"
+    else:
+        anchor_put = chain.find(short_k, OptionType.PUT)
+        anchor_volume = anchor_put.volume if anchor_put else None
+        anchor_volume_source = (
+            "quote_provider_fallback" if anchor_volume is not None else None
+        )
 
     spread = SpreadQuote.from_legs(short_q, long_q)
     credit = short_mid - long_mid
@@ -109,15 +132,17 @@ def build_put_ceiling_call_credit(
         breakeven=breakeven,
         distance_from_spot=short_k - chain.spot,
         meta={
-            "construction": "PUT_CEILING_CALL_CREDIT",
-            "anchor_volume": anchor_volume,         # put_volume at the ceiling
-            "short_leg":     _quote_dict(short_q),
-            "long_leg":      _quote_dict(long_q),
-            "spread_quote":  _spread_dict(spread),
-            "bid_ask_quality": _bid_ask_quality_score(
+            "construction":         "PUT_CEILING_CALL_CREDIT",
+            "anchor_source":        anchor_source,         # e.g. "put_ceiling_2k"
+            "anchor_volume":        anchor_volume,
+            "anchor_volume_source": anchor_volume_source,
+            "short_leg":            _quote_dict(short_q),
+            "long_leg":             _quote_dict(long_q),
+            "spread_quote":         _spread_dict(spread),
+            "bid_ask_quality":      _bid_ask_quality_score(
                 short_q, long_q, max_bid_ask_width or 0.20,
             ),
-            "threshold":     threshold,
+            "threshold":            threshold,
         },
     )
 
@@ -131,7 +156,7 @@ def build_call_floor_put_credit(
     max_bid_ask_width: float | None = None,
 ) -> Candidate | None:
     """SELL Put@K / BUY Put@(K - width) where K = StructureProvider's CALL_FLOOR."""
-    short_k = _floor_for_threshold(structure, threshold)
+    short_k, anchor_source, structure_volume = _floor_for_threshold(structure, threshold)
     if short_k is None:
         return None
     long_k = short_k - spread_width
@@ -146,10 +171,18 @@ def build_call_floor_put_credit(
     if short_mid is None or long_mid is None:
         return None
 
-    # CALL_FLOOR is defined by CALL volume at K, so the structure "strength"
-    # signal is the call-side quote's volume — not the put leg's.
-    anchor_call = chain.find(short_k, OptionType.CALL)
-    anchor_volume = anchor_call.volume if anchor_call else None
+    # CALL_FLOOR is defined by CALL volume at K. Prefer the structure-
+    # reported volume; fall back to the QuoteProvider's call-side quote
+    # only when structure didn't carry it.
+    if structure_volume is not None:
+        anchor_volume = structure_volume
+        anchor_volume_source = "zs_exposure_series"
+    else:
+        anchor_call = chain.find(short_k, OptionType.CALL)
+        anchor_volume = anchor_call.volume if anchor_call else None
+        anchor_volume_source = (
+            "quote_provider_fallback" if anchor_volume is not None else None
+        )
 
     spread = SpreadQuote.from_legs(short_q, long_q)
     credit = short_mid - long_mid
@@ -170,15 +203,17 @@ def build_call_floor_put_credit(
         breakeven=breakeven,
         distance_from_spot=chain.spot - short_k,
         meta={
-            "construction": "CALL_FLOOR_PUT_CREDIT",
-            "anchor_volume": anchor_volume,         # call_volume at the floor
-            "short_leg":     _quote_dict(short_q),
-            "long_leg":      _quote_dict(long_q),
-            "spread_quote":  _spread_dict(spread),
-            "bid_ask_quality": _bid_ask_quality_score(
+            "construction":         "CALL_FLOOR_PUT_CREDIT",
+            "anchor_source":        anchor_source,         # e.g. "call_floor_2k"
+            "anchor_volume":        anchor_volume,
+            "anchor_volume_source": anchor_volume_source,
+            "short_leg":            _quote_dict(short_q),
+            "long_leg":             _quote_dict(long_q),
+            "spread_quote":         _spread_dict(spread),
+            "bid_ask_quality":      _bid_ask_quality_score(
                 short_q, long_q, max_bid_ask_width or 0.20,
             ),
-            "threshold":     threshold,
+            "threshold":            threshold,
         },
     )
 

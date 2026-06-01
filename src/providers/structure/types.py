@@ -38,6 +38,19 @@ class ExposureContext:
     put_ceiling_5k:  float | None = None
     call_floor_2k:   float | None = None
     call_floor_5k:   float | None = None
+
+    # ── Anchor volumes (Phase 2.8) ──
+    # Actual volume at each VW anchor strike, as reported by the structure
+    # source. SEPARATE from whatever the QuoteProvider says at the same
+    # strike — the structure owns "which volume qualified this level."
+    # None means "no qualifying strike" or "level present but volume not
+    # reported" (e.g. structure derived the level from a non-volume source).
+    put_ceiling_2k_volume: float | None = None
+    put_ceiling_5k_volume: float | None = None
+    call_floor_2k_volume:  float | None = None
+    call_floor_5k_volume:  float | None = None
+    maxvol_volume:         float | None = None   # combined volume at maxvol strike
+
     # DDOI pin (open-interest concentration level)
     ddoi_pin:        float | None = None
 

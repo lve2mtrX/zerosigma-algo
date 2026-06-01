@@ -307,6 +307,29 @@ formatted `"name=0.42"`. The helper `weak_components_of()` in
 `no_trade_threshold`, `score_gap_to_threshold`) so they never surface as
 "weak."
 
+**Anchor-volume observability (Phase 2.8)**: every candidate also carries
+`anchor_source` (which VW level was chosen — `put_ceiling_2k` /
+`put_ceiling_5k` / `call_floor_2k` / `call_floor_5k`), `anchor_volume`
+(the actual volume at that strike), `anchor_volume_source` (one of
+`zs_exposure_series` / `quote_provider_fallback`), and
+`structure_strength_source` (`zs_volume_series` /
+`missing_anchor_volume_neutral` / `no_anchor`).
+
+VW prefers structure-supplied volume over chain-supplied volume — that
+fixes the original Phase 2.7 finding where live ZS levels at e.g. 7600
+were paired with the QuoteProvider's token volume (100) at synthesized
+strikes, producing `structure_strength=0.00` regardless of how strong the
+real level was. Under `public_only` (where ZS gives a level via
+`wings.*` but no volume), the scanner falls back to chain volume AND
+labels the row `quote_provider_fallback` so the audit trail makes the
+substitution visible.
+
+When structure has the level but volume is missing entirely, scoring
+uses a **neutral 0.5** instead of 0.0 — rationale: the existence of a
+ceiling/floor already implies SOME structure, so silently scoring it
+zero was a bug, not a policy. That neutral case is tagged
+`structure_strength_source = missing_anchor_volume_neutral`.
+
 **`planned_loss_dollars`** = **planned stop risk dollars** under the
 session's `default_stop_variant`. Computed as
 `credit × (stop_multiple − 1) × 100 × contracts`, capped at the

@@ -13,15 +13,22 @@ from datetime import datetime
 
 from src.providers._mock_data import (
     SPOT,
+    call_volume_at,
     highest_strike_where_put_volume_ge,
     lowest_strike_where_call_volume_ge,
     maxvol_strike,
+    maxvol_total_volume,
+    put_volume_at,
 )
 from src.providers.structure.types import ExposureContext, StructureSnapshot
 from src.utils.time import now_et
 
 
 def _build_exposures() -> ExposureContext:
+    pc2 = highest_strike_where_put_volume_ge(2000)
+    pc5 = highest_strike_where_put_volume_ge(5000)
+    cf2 = lowest_strike_where_call_volume_ge(2000)
+    cf5 = lowest_strike_where_call_volume_ge(5000)
     return ExposureContext(
         total_gex_bn=4.2,
         total_vex_bn=-1.1,
@@ -31,10 +38,16 @@ def _build_exposures() -> ExposureContext:
         maxvol=maxvol_strike(),
         gamma_regime="positive",
         da_gex_signed=1.8,
-        put_ceiling_2k=highest_strike_where_put_volume_ge(2000),
-        put_ceiling_5k=highest_strike_where_put_volume_ge(5000),
-        call_floor_2k=lowest_strike_where_call_volume_ge(2000),
-        call_floor_5k=lowest_strike_where_call_volume_ge(5000),
+        put_ceiling_2k=pc2,
+        put_ceiling_5k=pc5,
+        call_floor_2k=cf2,
+        call_floor_5k=cf5,
+        # Phase 2.8 — actual volumes that qualified each anchor.
+        put_ceiling_2k_volume=put_volume_at(pc2),
+        put_ceiling_5k_volume=put_volume_at(pc5),
+        call_floor_2k_volume=call_volume_at(cf2),
+        call_floor_5k_volume=call_volume_at(cf5),
+        maxvol_volume=maxvol_total_volume(),
         ddoi_pin=5800.0,
     )
 

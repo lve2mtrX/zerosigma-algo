@@ -504,6 +504,24 @@ else:
                     if c.score_gap_to_threshold is not None else "—",
                 )
                 top[3].metric("Rejection type", c.rejection_type or "—")
+
+                # Phase 2.8 — anchor observability
+                anchor_cols = st.columns(4)
+                anchor_cols[0].metric("Anchor", c.meta.get("anchor_source") or "—")
+                av = c.meta.get("anchor_volume")
+                anchor_cols[1].metric(
+                    "Anchor volume",
+                    f"{av:,.0f}" if isinstance(av, (int, float)) else "—",
+                )
+                anchor_cols[2].metric(
+                    "Volume source",
+                    c.meta.get("anchor_volume_source") or "—",
+                )
+                anchor_cols[3].metric(
+                    "structure_strength_source",
+                    c.meta.get("structure_strength_source") or "—",
+                )
+
                 if c.weak_components:
                     st.markdown(
                         "**Weakest components:** "

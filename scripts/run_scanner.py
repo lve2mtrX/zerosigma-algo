@@ -220,6 +220,9 @@ _DEFAULT_RANKED_FIELDS = [
     "rejection_type", "weak_components",
     *(f"score_{c}" for c in _SCORE_COMPONENT_COLUMNS),
     "score_breakdown_json",
+    # anchor observability (Phase 2.8)
+    "anchor_source", "anchor_volume", "anchor_volume_source",
+    "structure_strength_source",
     # filter / risk
     "rejected", "rejection_reasons",
     # dollar risk under session profile
@@ -270,6 +273,11 @@ def _candidate_row(strategy_id: str, c, session, ts: datetime, decision_str: str
     row["score_breakdown_json"] = _json.dumps(breakdown, default=float)
 
     row.update({
+        # Phase 2.8 — anchor observability
+        "anchor_source":             c.meta.get("anchor_source"),
+        "anchor_volume":             c.meta.get("anchor_volume"),
+        "anchor_volume_source":      c.meta.get("anchor_volume_source"),
+        "structure_strength_source": c.meta.get("structure_strength_source"),
         "rejected":          c.rejected,
         "rejection_reasons": "; ".join(c.rejection_reasons),
         "planned_loss_dollars": round(

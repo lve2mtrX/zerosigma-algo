@@ -92,6 +92,18 @@ def _lowest_strike_where(strikes: list[float], series: list[float], threshold: f
     return min(out) if out else None
 
 
+def _volume_at(strikes: list[float], series: list[float], strike: float | None) -> float | None:
+    """Return the value in `series` at the position where `strikes` equals
+    `strike` (None if not found). Used to lift the actual put/call volume
+    that defined a VW anchor."""
+    if strike is None:
+        return None
+    for s, v in zip(strikes, series, strict=False):
+        if s == strike:
+            return v if isinstance(v, (int, float)) else None
+    return None
+
+
 def _parse_ts(value: Any) -> datetime:
     """Parse an ISO timestamp; fall back to current ET time if unparseable."""
     if isinstance(value, datetime):
@@ -428,7 +440,10 @@ class ZeroSigmaApiStructureProvider:
 
         # ── per-strike volume series (subscription-gated) ──
         put_ceiling_2k = put_ceiling_5k = call_floor_2k = call_floor_5k = None
+        put_ceiling_2k_volume = put_ceiling_5k_volume = None
+        call_floor_2k_volume  = call_floor_5k_volume  = None
         maxvol = None
+        maxvol_volume: float | None = None
         if vol_series:
             strikes = vol_series.get("strikes") or []
             calls = vol_series.get("calls") or []
@@ -438,15 +453,23 @@ class ZeroSigmaApiStructureProvider:
                 put_ceiling_5k = _highest_strike_where(strikes, puts, 5000.0)
                 call_floor_2k  = _lowest_strike_where(strikes, calls, 2000.0)
                 call_floor_5k  = _lowest_strike_where(strikes, calls, 5000.0)
+                # Phase 2.8: also capture the ACTUAL volume at each anchor.
+                put_ceiling_2k_volume = _volume_at(strikes, puts,  put_ceiling_2k)
+                put_ceiling_5k_volume = _volume_at(strikes, puts,  put_ceiling_5k)
+                call_floor_2k_volume  = _volume_at(strikes, calls, call_floor_2k)
+                call_floor_5k_volume  = _volume_at(strikes, calls, call_floor_5k)
                 combined = [(c or 0) + (p or 0) for c, p in zip(calls, puts, strict=False)]
                 if combined:
-                    maxvol = strikes[combined.index(max(combined))]
+                    maxvol_idx = combined.index(max(combined))
+                    maxvol = strikes[maxvol_idx]
+                    maxvol_volume = float(combined[maxvol_idx])
 
         # Fall back to the public single-level wings when the subscription
         # series isn't available. 5K-tier strikes remain None (we can't
         # synthesize a stricter threshold from a single value).
         if put_ceiling_2k is None and wings_put_ceiling is not None:
             put_ceiling_2k = wings_put_ceiling
+            # No volume known under wings-only fallback — leave 2k_volume None.
         if call_floor_2k is None and wings_call_floor is not None:
             call_floor_2k = wings_call_floor
 
@@ -492,6 +515,11 @@ class ZeroSigmaApiStructureProvider:
             put_ceiling_5k=put_ceiling_5k,
             call_floor_2k=call_floor_2k,
             call_floor_5k=call_floor_5k,
+            put_ceiling_2k_volume=put_ceiling_2k_volume,
+            put_ceiling_5k_volume=put_ceiling_5k_volume,
+            call_floor_2k_volume=call_floor_2k_volume,
+            call_floor_5k_volume=call_floor_5k_volume,
+            maxvol_volume=maxvol_volume,
             ddoi_pin=ddoi_pin,
         )
 

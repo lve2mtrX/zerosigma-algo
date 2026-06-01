@@ -505,3 +505,179 @@ ranked_candidates.csv, and Dan walks each candidate to say "this score
 matches my read" or "this score is too high/low because of X." Then —
 and only then — parameterize the scoring weights into
 `config/strategies.yaml` so the session config can override them.
+
+---
+
+## 2026-06-01 (Phase 2.8) — anchor-volume correctness
+
+**Symptom**: live ZS produced
+`CALL_CREDIT 7600/7605 @ 0.50 score 0.4182` and
+`PUT_CREDIT 7550/7545 @ 0.50 score 0.4775`, both with
+`structure_strength=0.00` in the weak-components list. But `/exposure/series`
+returned real volumes that qualified the 7600 / 7550 anchors — the
+scores should have been > 0.
+
+**Root cause**: `anchor_volume` in the candidate metadata was being read
+from the **QuoteProvider**, not from the **StructureProvider**. Code
+path:
+
+```
+zerosigma_api._build_exposures
+  → _highest_strike_where(strikes, puts, 2000)
+  → returns the WINNING STRIKE only (5815 or 7600), discards the volume
+
+candidates.build_put_ceiling_call_credit
+  → chain.find(short_k, OptionType.PUT).volume
+  → in ALIGNED mock mode for a 7600 strike that's NOT in MOCK_CHAIN,
+    MockQuoteProvider._synth_quote returns volume=100.0 (token)
+
+scoring._structure_strength_score
+  → (100 - 1000) / 4000 = -0.225 → clipped to 0.0
+```
+
+The ZS volume series carried `puts[strikes.index(7600)] = 2400`
+(or whatever the live number was) — but my mapper never recorded it.
+
+### Fix — carry structure volumes through the data path
+
+`ExposureContext` (in `src/providers/structure/types.py`) gained five
+optional fields:
+
+- `put_ceiling_2k_volume` / `put_ceiling_5k_volume`
+- `call_floor_2k_volume` / `call_floor_5k_volume`
+- `maxvol_volume` (combined call+put volume at the maxvol strike)
+
+`ZeroSigmaApiStructureProvider._build_exposures` now uses a small
+`_volume_at(strikes, series, strike)` helper to lift the actual volume
+at each derived anchor. The new `maxvol_volume` records the **combined**
+volume (calls + puts) at the maxvol strike, not just one side.
+
+`StubStructureProvider` was updated for parity. New helpers
+`put_volume_at(strike)`, `call_volume_at(strike)`, `maxvol_total_volume()`
+in `src/providers/_mock_data.py` expose the MOCK_CHAIN volumes.
+
+### VW candidate construction
+
+`_ceiling_for_threshold` and `_floor_for_threshold` now return a
+3-tuple: `(strike, anchor_source, anchor_volume_from_structure)`.
+`anchor_source` is one of `"put_ceiling_2k" | "put_ceiling_5k" |
+"call_floor_2k" | "call_floor_5k"` — exactly identifies which level the
+strategy picked under the current threshold.
+
+In `build_put_ceiling_call_credit` and `build_call_floor_put_credit`:
+
+- **If** the structure-reported volume is not None → use it; tag
+  `anchor_volume_source = "zs_exposure_series"`.
+- **Else** fall back to the QuoteProvider's volume at that strike;
+  tag `anchor_volume_source = "quote_provider_fallback"`. (This is
+  what runs under `public_only`, where the public payload gives us the
+  level via `wings.*` but no volume.)
+
+The fallback is honest about itself: a downstream auditor can grep for
+`quote_provider_fallback` to find candidates whose structure_strength
+was driven by chain volume instead of ZS structure volume.
+
+### Scoring neutral-fallback policy
+
+`_structure_strength_score(volume_at_anchor, anchor_source=...)` now
+returns `(score, source_label)`:
+
+| Input | Score | Source label |
+|---|---|---|
+| Volume present | `(vol - 1000) / 4000`, clipped | `zs_volume_series` |
+| Volume None, anchor_source present | **0.5** (neutral) | `missing_anchor_volume_neutral` |
+| Volume None AND anchor_source None | 0.0 | `no_anchor` |
+
+Rationale: the structure provider giving us a level (even without the
+volume magnitude) already implies SOME structure existed at that
+strike. Scoring it to 0 silently was the bug we just fixed; this
+policy preserves the signal under public_only while keeping the
+"genuinely no anchor" path at 0.
+
+The label lands on `candidate.meta["structure_strength_source"]` so the
+CSV / JSONL / Streamlit can show it.
+
+### CSV / JSONL / Streamlit
+
+CSV gains four columns:
+`anchor_source, anchor_volume, anchor_volume_source, structure_strength_source`.
+
+JSONL carries them under each candidate's `meta` (no separate field —
+they ride with `meta`, which the decision_log already serializes whole).
+
+Streamlit candidate expander gains a 4-metric row showing all four.
+
+### 15 new tests in `tests/test_phase2p8_anchor_volume.py`
+
+- ZS mapper stores volume at each anchor strike (from
+  `_volume_at(strikes, series, strike)`)
+- ZS mapper leaves anchor volumes None under public_only (no series)
+- Stub provider populates anchor volumes from MOCK_CHAIN
+- VW CALL_CREDIT uses `structure.put_ceiling_2k_volume`, NOT chain volume
+- VW PUT_CREDIT uses `structure.call_floor_2k_volume`, NOT chain volume
+- VW falls back to chain volume with `quote_provider_fallback` source tag
+  when structure has the level but no volume
+- `_structure_strength_score` parametrized over the volume → score curve
+- Neutral 0.5 when level present but volume missing
+- 0.0 only when no anchor at all
+- CSV includes all four new columns + structure_strength > 0 in stub mode
+- JSONL per-candidate meta carries all four labels
+
+Total: **104/104 passing** (was 89, +15). Ruff clean.
+
+### Worked example — what changed for the user
+
+Before Phase 2.8 (live ZS, 7600 ceiling, mock-aligned chain):
+
+```
+weak_components: structure_strength=0.00, credit_to_risk=0.14
+score_structure_strength: 0.0
+anchor_volume: 100  (from synthesized mock — token)
+anchor_volume_source: (not recorded)
+```
+
+After Phase 2.8 (same scenario, structure now carries actual volume):
+
+```
+weak_components: credit_to_risk=0.14, time_decay_headroom=0.50
+score_structure_strength: 0.35     # = (2400 - 1000) / 4000
+anchor_source: put_ceiling_2k
+anchor_volume: 2400                # the real puts[i] from /exposure/series
+anchor_volume_source: zs_exposure_series
+structure_strength_source: zs_volume_series
+```
+
+The final candidate score still won't clear 0.60 with $0.50 credit on a
+5-wide — that's `credit_to_risk` doing its job, exactly as Phase 2.7
+intended. But `structure_strength` no longer falsely lies that the
+trade has no structure behind it.
+
+### Still NOT in this round
+
+- No scoring weights changed.
+- No threshold changed.
+- No broker integration. **Tastytrade QuoteProvider remains the next
+  phase** — Phase 3 broker capability probe, then real per-strike
+  volumes from the broker (which will INVALIDATE the
+  `quote_provider_fallback` path because real broker quotes are
+  authoritative). Until then, ZS structure volume beats broker
+  fallback.
+
+### Next step
+
+Run the live scanner again. The expected outcome:
+
+```powershell
+python -m scripts.run_scanner --structure-provider zerosigma_api
+
+Import-Csv .\outputs\latest\ranked_candidates.csv |
+  Select-Object side,short_strike,credit,score,
+                score_structure_strength,anchor_source,anchor_volume,
+                anchor_volume_source |
+  Format-Table -AutoSize
+```
+
+Expected: `anchor_volume` shows the ZS-reported volume at the live
+anchor strike (some 4-5 digit number), `anchor_volume_source =
+zs_exposure_series`, `score_structure_strength` between 0.2 and 1.0
+depending on how strong that strike's volume is.

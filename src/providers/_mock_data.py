@@ -85,6 +85,32 @@ def lowest_strike_where_call_volume_ge(threshold: float) -> float | None:
     return min(qualifying) if qualifying else None
 
 
+def put_volume_at(strike: float | None) -> float | None:
+    """Return p_volume at `strike`, or None if not in MOCK_CHAIN."""
+    if strike is None:
+        return None
+    for r in MOCK_CHAIN:
+        if r.strike == strike:
+            return r.p_volume
+    return None
+
+
+def call_volume_at(strike: float | None) -> float | None:
+    """Return c_volume at `strike`, or None if not in MOCK_CHAIN."""
+    if strike is None:
+        return None
+    for r in MOCK_CHAIN:
+        if r.strike == strike:
+            return r.c_volume
+    return None
+
+
 def maxvol_strike() -> float:
     best = max(MOCK_CHAIN, key=lambda r: r.c_volume + r.p_volume)
     return best.strike
+
+
+def maxvol_total_volume() -> float:
+    """Combined call+put volume at maxvol_strike()."""
+    best = max(MOCK_CHAIN, key=lambda r: r.c_volume + r.p_volume)
+    return best.c_volume + best.p_volume

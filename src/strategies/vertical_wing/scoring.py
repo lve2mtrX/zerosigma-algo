@@ -37,11 +37,29 @@ def _distance_score(distance_points: float) -> float:
     return _clip(abs(distance_points) / 30.0)
 
 
-def _structure_strength_score(volume_at_anchor: float | None) -> float:
-    if volume_at_anchor is None:
-        return 0.0
-    # 1000 → 0.2, 5000 → 1.0
-    return _clip((volume_at_anchor - 1000) / 4000)
+def _structure_strength_score(
+    volume_at_anchor: float | None,
+    *,
+    anchor_source: str | None = None,
+) -> tuple[float, str]:
+    """Return (score, source_label).
+
+    Policy (documented in plan.md §7.4):
+      - volume present                       → (volume-1000)/4000 clipped to [0,1];
+                                                source = "zs_volume_series"
+      - volume None BUT anchor_source set    → neutral 0.5;
+                                                source = "missing_anchor_volume_neutral"
+        (Rationale: the structure provider gave us a level, which already
+         implies some structure — we don't have the magnitude but we
+         shouldn't punish a real ceiling/floor down to zero.)
+      - no level AND no volume               → 0.0; source = "no_anchor"
+    """
+    if volume_at_anchor is not None:
+        # 1000 → 0.2, 5000 → 1.0
+        return _clip((volume_at_anchor - 1000) / 4000), "zs_volume_series"
+    if anchor_source is not None:
+        return 0.5, "missing_anchor_volume_neutral"
+    return 0.0, "no_anchor"
 
 
 def _maxvol_alignment_score(candidate: Candidate, structure: StructureSnapshot) -> float:
@@ -88,12 +106,19 @@ def score_candidate(
 ) -> tuple[float, dict[str, float]]:
     weights = params.get("score_weights", {})
     vol_at_anchor = candidate.meta.get("anchor_volume")
+    anchor_source = candidate.meta.get("anchor_source")
+    ss_score, ss_source = _structure_strength_score(
+        vol_at_anchor, anchor_source=anchor_source,
+    )
+    # Record the source label on the candidate so CSV/JSONL/UI can show it
+    # without re-deriving. (Not a numeric score component, so not weighted.)
+    candidate.meta["structure_strength_source"] = ss_source
 
     parts = {
         "credit_size":         _credit_size_score(candidate.credit),
         "credit_to_risk":      _credit_to_risk_score(candidate.reward_risk),
         "distance_from_spot":  _distance_score(candidate.distance_from_spot),
-        "structure_strength":  _structure_strength_score(vol_at_anchor),
+        "structure_strength":  ss_score,
         "maxvol_alignment":    _maxvol_alignment_score(candidate, structure),
         "gamma_regime":        _gamma_regime_score(candidate, structure),
         "bid_ask_quality":     _bid_ask_quality_score(candidate),
@@ -103,9 +128,5 @@ def score_candidate(
     total_weight = sum(weights.get(k, 0.0) for k in parts) or 1.0
     weighted = sum(parts[k] * weights.get(k, 0.0) for k in parts) / total_weight
     final = _clip(weighted)
-    # Echo the final back into the breakdown so per-candidate JSONL and CSV
-    # can carry it alongside the components. `no_trade_threshold` and
-    # `score_gap_to_threshold` are added later in select(), after the
-    # threshold is known.
     parts["final_score"] = final
     return final, parts
