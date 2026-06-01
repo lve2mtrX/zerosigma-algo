@@ -1,0 +1,63 @@
+# Secrets / local config
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Generated outputs (per-run artifacts, snapshots, summaries)
+outputs/latest/*
+outputs/runs/*
+outputs/daily/*
+!outputs/latest/.gitkeep
+!outputs/runs/.gitkeep
+!outputs/daily/.gitkeep
+
+# Local data caches
+data/
+*.parquet
+*.feather
+*.duckdb
+
+# Logs
+*.log
+logs/
+
+# OS / misc
+*.bak
+*.tmp

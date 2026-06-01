@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zerosigma-algo"
+version = "0.1.0"
+description = "Portable local multi-strategy algo cockpit (Phase 1: scanner + decision log + paper tracking)"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Dan Cameron" }]
+license = { text = "Proprietary — internal use" }
+
+dependencies = [
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.0",
+    "httpx>=0.26",
+    "pandas>=2.1",
+    "numpy>=1.26",
+    "streamlit>=1.30",
+    "rich>=13.7",
+    "tenacity>=8.2",
+    "pytz>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.3",
+    "mypy>=1.8",
+]
+
+[project.scripts]
+zs-scanner = "scripts.run_scanner:main"
+zs-eod = "scripts.run_eod_summary:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "scripts*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "N", "RUF"]
+# RUF001/002/003: keep the Greek sigma in the "ZerσSigma" brand name and
+# the "×" multiplication sign in code comments — these are deliberate.
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

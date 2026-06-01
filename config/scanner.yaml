@@ -1,0 +1,47 @@
+# ZerσSigma Algo Cockpit — scanner config
+#
+# Global scan loop settings (cadences + windows). Strategy-specific knobs live
+# in config/strategies.yaml; risk-specific knobs in config/risk_profiles.yaml.
+
+scanner:
+  # Loop cadences (seconds)
+  cadences:
+    structure_refresh: 60      # ZS API /market/snapshot poll
+    series_refresh:    60      # ZS API /exposure/series poll (per metric)
+    quote_refresh:     5       # broker spot poll (future; null in Phase 1)
+    candidate_rebuild: 10      # how often to recompute candidates from cached snapshot
+    decision_log_flush: 10     # how often to fsync the JSONL log
+
+  # Universal scan window (ET). Per-profile windows in risk_profiles.yaml.
+  market_session:
+    open:  "09:30"
+    close: "16:00"
+    timezone: "America/New_York"
+
+  # Symbols to scan (Phase 1: SPX only)
+  symbols: ["SPX"]
+
+  # Per-symbol overrides if needed later
+  per_symbol_overrides: {}
+
+  # Polling guardrails — protect against API rate limits
+  rate_limit_safety:
+    structure_min_interval_seconds: 30   # never poll structure faster than this
+    series_min_interval_seconds:    30
+    quote_min_interval_seconds:      1
+
+  # Replay (Phase 1: disabled). When enabled, the scanner pulls snapshots
+  # from a local archive instead of the live API.
+  replay:
+    enabled: false
+    source_dir: "./data/replay"
+    speed_multiplier: 1.0
+    date_range:
+      start: null
+      end:   null
+
+  # On startup, fetch these once (instead of every tick)
+  warmup:
+    fetch_prev_wings: true
+    fetch_ddoi_history: true
+    fetch_es_factor: true

@@ -1,0 +1,86 @@
+# ZerσSigma Algo Cockpit — strategy registry
+#
+# Every strategy must have a unique `strategy_id` (the top-level key).
+# `module` + `class` are imported by src/strategies/registry.py at startup.
+#
+# To add a new strategy:
+#   1. Create src/strategies/<your_strategy>/strategy.py with a class that
+#      implements src/strategies/base.Strategy.
+#   2. Add an entry here. Set `enabled: true` when ready to scan.
+
+strategies:
+
+  vertical_wing_v1:
+    display_name: "Vertical Wing v1 (SPX 0DTE)"
+    enabled: true
+    module: "src.strategies.vertical_wing.strategy"
+    class:  "VerticalWingV1"
+    symbol: "SPX"
+
+    # Defaults applied when no override comes from the UI / risk profile.
+    default_parameters:
+      # PUT_CEILING_CALL_CREDIT + CALL_FLOOR_PUT_CREDIT shared knobs
+      volume_threshold: 2000          # contracts at a strike to qualify as ceiling/floor
+      spread_width: 5                 # points between short and long strike
+      preferred_entry_windows:
+        - "10:55-11:05"
+        - "15:10-15:20"
+        - "14:55-15:05"
+
+      # candidate construction
+      side_priority: ["CALL_CREDIT", "PUT_CREDIT"]  # tie-breaker order if scores equal
+
+      # scoring weights (sum need not be 1; relative weights only)
+      score_weights:
+        credit_size: 0.20
+        credit_to_risk: 0.15
+        distance_from_spot: 0.15
+        structure_strength: 0.20
+        maxvol_alignment: 0.10
+        gamma_regime: 0.10
+        bid_ask_quality: 0.05
+        time_decay_headroom: 0.05
+
+      # hard-filter thresholds (also enforced by src/risk/filters.py)
+      hard_filters:
+        min_credit: 0.30
+        max_bid_ask_width: 0.20
+        min_distance_from_spot_points: 10
+        require_positive_credit: true
+        require_structure_confirmation: true
+
+      # decision
+      no_trade_score_threshold: 0.60
+
+      # known good cohorts (priors). The scanner can weight these higher.
+      promising_cohorts:
+        - { time: "11:00", volume: 5000, side: "CALL_CREDIT", stops: ["SL_150", "SL_200"], strength: "strongest" }
+        - { time: "11:00", volume: 2000, side: "CALL_CREDIT", stops: ["SL_150"],            strength: "strong"    }
+        - { time: "15:15", volume: 5000, side: "CALL_CREDIT", stops: ["SL_200"],            strength: "strong"    }
+        - { time: "15:15", volume: 2000, side: "CALL_CREDIT", stops: ["SL_200"],            strength: "solid"     }
+        - { time: "15:00", volume: 2000, side: "PUT_CREDIT",  stops: ["SL_200"],            strength: "weaker"    }
+
+    # Parameters the user is allowed to edit from the Streamlit UI.
+    editable_parameters:
+      - volume_threshold
+      - spread_width
+      - score_weights
+      - hard_filters
+      - no_trade_score_threshold
+      - preferred_entry_windows
+
+    # Structure fields required by this strategy. Used to validate the
+    # snapshot before invoking the strategy.
+    required_data_fields:
+      - "chain.strikes"
+      - "chain.c_volume"
+      - "chain.p_volume"
+      - "chain.c_bid"
+      - "chain.c_ask"
+      - "chain.c_mid"
+      - "chain.p_bid"
+      - "chain.p_ask"
+      - "chain.p_mid"
+      - "spot"
+      - "exposures.maxvol"      # optional but preferred
+      - "exposures.gamma_regime" # optional but preferred

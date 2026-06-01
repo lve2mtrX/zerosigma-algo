@@ -1,0 +1,99 @@
+# ZerσSigma Algo Cockpit — provider wiring
+#
+# Maps each provider role (structure, quotes, execution) to a concrete
+# implementation. Implementation classes live in src/providers/*.
+
+structure:
+  # Phase 1: stub (returns hand-crafted snapshots for testing).
+  # Phase 2: switch to zerosigma_api.
+  active: "stub"
+
+  implementations:
+
+    stub:
+      module: "src.providers.structure.stub"
+      class:  "StubStructureProvider"
+      params: {}
+
+    zerosigma_api:
+      module: "src.providers.structure.zerosigma_api"
+      class:  "ZeroSigmaApiStructureProvider"
+      params:
+        base_url:    "${ZS_API_BASE_URL}"
+        token:       "${ZS_API_TOKEN}"
+        admin_key:   "${ZS_API_ADMIN_SERVICE_KEY}"
+        symbol:      "${ZS_PRIMARY_SYMBOL}"
+        refresh_seconds: "${ZS_REFRESH_SECONDS}"
+        timeout_seconds: 10
+        max_retries: 3
+
+quotes:
+  # Phase 1: null provider — returns None, forcing manual marks.
+  active: "null"
+
+  implementations:
+
+    null:
+      module: "src.providers.quotes.null_provider"
+      class:  "NullQuoteProvider"
+      params: {}
+
+    # Future broker provider stubs (NOT implemented Phase 1).
+    tastytrade:
+      module: "src.providers.quotes.tastytrade_provider"
+      class:  "TastytradeQuoteProvider"
+      params:
+        api_key:    "${BROKER_API_KEY}"
+        api_secret: "${BROKER_API_SECRET}"
+        account_id: "${BROKER_ACCOUNT_ID}"
+        paper:      "${BROKER_PAPER_MODE}"
+
+execution:
+  # Allowed Phase 1 modes: disabled | local_paper | manual_trade_tracking
+  # Future modes:          broker_paper | manual_confirm | live_tiny | live
+  active: "${EXECUTION_MODE}"
+  default_if_unset: "local_paper"
+
+  implementations:
+
+    disabled:
+      module: "src.providers.execution.disabled"
+      class:  "DisabledExecutionProvider"
+      params: {}
+
+    local_paper:
+      module: "src.providers.execution.local_paper"
+      class:  "LocalPaperExecutionProvider"
+      params:
+        fill_at:         "mid"        # "mid" | "mark_or_manual" | "natural" (future)
+        slippage_per_leg: 0.02
+        commissions_per_contract: 0.65
+
+    manual_trade_tracking:
+      module: "src.providers.execution.manual_tracker"
+      class:  "ManualTrackerExecutionProvider"
+      params: {}
+
+    # ── future modes ─ stubbed in Phase 1, raise NotImplementedError ──
+    broker_paper:
+      module: "src.providers.execution.broker_paper"
+      class:  "BrokerPaperExecutionProvider"
+      params: {}
+
+    manual_confirm:
+      module: "src.providers.execution.manual_confirm"
+      class:  "ManualConfirmExecutionProvider"
+      params: {}
+
+    live_tiny:
+      module: "src.providers.execution.live"
+      class:  "LiveExecutionProvider"
+      params:
+        max_contracts: 1
+        require_double_confirmation: true
+
+    live:
+      module: "src.providers.execution.live"
+      class:  "LiveExecutionProvider"
+      params:
+        require_double_confirmation: true

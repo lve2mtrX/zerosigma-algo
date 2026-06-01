@@ -1,0 +1,123 @@
+# ZerσSigma Algo Cockpit — risk profile templates
+#
+# These are SESSION-START DEFAULTS, not hardcoded permanent rules.
+# At session/algo start the cockpit loads one of these templates; the
+# Streamlit dashboard will (in a later phase) let the user edit every
+# field below before kicking off a paper session. Every edit will be
+# appended to outputs/runs/{date}/config_change_log.jsonl for audit.
+#
+# Two risk concepts are tracked independently for every candidate:
+#
+#   - theoretical_max_loss_per_spread = spread_width - credit
+#       (what the spread loses if it goes fully ITM with no stop)
+#   - planned_loss_per_spread        = max(credit*(stop_mult - 1), 0)
+#                                      capped at theoretical
+#       (what we INTEND to lose given the selected stop variant)
+#
+# Both have separate caps. The cockpit's "can I take this?" gate uses
+# the planned cap; the theoretical cap is a hard ceiling and the UI
+# always displays both numbers.
+
+# Which template the cockpit boots into. Override at runtime via the
+# Streamlit selector or by passing --profile to scripts/run_scanner.py.
+active_profile: aggressive_paper_10k
+
+profiles:
+
+  # ── Default for Dan's current paper testing (5-lot, $10K) ────────
+  aggressive_paper_10k:
+    label: "Aggressive Paper 10K"
+    paper_only: true                      # surfaces a warning in the UI
+    starting_balance: 10000
+
+    # sizing
+    contracts_per_trade: 5
+    max_open_positions: 1
+    allowed_spread_widths: [5]
+    default_spread_width: 5
+
+    # stop + targets
+    default_stop_variant: "SL_150_PERCENT_LOSS"
+    # Allowed: BASELINE_CASH_SETTLE | SL_100_PERCENT_LOSS | SL_150_PERCENT_LOSS | SL_200_PERCENT_LOSS
+    profit_targets: [0.50, 0.75]          # fractions of credit captured
+
+    # ── per-trade risk caps ──
+    # Primary gate: planned stop risk under the selected stop variant.
+    max_planned_trade_loss_percent: 0.10        # = $1,000 on $10K
+    max_planned_trade_loss_dollars: null        # optional absolute floor
+
+    # Hard ceiling: theoretical max loss (spread fully ITM, no stop).
+    max_theoretical_trade_loss_percent: 0.30    # = $3,000 on $10K
+    max_theoretical_trade_loss_dollars: null    # optional absolute floor
+
+    # ── daily circuit breakers ──
+    max_daily_loss_percent: 0.10                # = $1,000 on $10K
+    max_daily_loss_dollars: null                # optional absolute floor
+
+    # candidate filters
+    minimum_credit_morning: 0.50
+    minimum_credit_afternoon: 0.30
+    max_bid_ask_width: 0.20
+    min_distance_from_spot: 10                  # points
+    minimum_reward_risk: 0.10                   # credit / max_risk
+
+    # scan windows (ET)
+    scan_start_time: "09:35"
+    scan_end_time:   "15:55"
+    preferred_entry_windows:
+      - "10:55-11:05"
+      - "15:10-15:20"
+      - "14:55-15:05"
+
+    # decision threshold
+    no_trade_score_threshold: 0.60
+
+    # gating flags
+    event_day_avoidance: true
+    require_maxvol_alignment: true
+    require_gamma_context: true
+    require_ddoi_context: false
+
+    # explicit no-trade dates (FOMC, CPI, NFP, etc.) — manually maintained.
+    no_trade_dates: []
+
+  # ── Conservative paper / smaller-size testing ───────────────────────
+  conservative_paper_10k:
+    label: "Conservative Paper 10K"
+    paper_only: true
+    starting_balance: 10000
+
+    contracts_per_trade: 1
+    max_open_positions: 1
+    allowed_spread_widths: [5]
+    default_spread_width: 5
+
+    default_stop_variant: "SL_100_PERCENT_LOSS"
+    profit_targets: [0.50, 0.75]
+
+    max_planned_trade_loss_percent: 0.03         # = $300 on $10K
+    max_planned_trade_loss_dollars: null
+    max_theoretical_trade_loss_percent: 0.07     # = $700 on $10K
+    max_theoretical_trade_loss_dollars: null
+
+    max_daily_loss_percent: 0.05                 # = $500 on $10K
+    max_daily_loss_dollars: null
+
+    minimum_credit_morning: 0.50
+    minimum_credit_afternoon: 0.30
+    max_bid_ask_width: 0.15
+    min_distance_from_spot: 15
+    minimum_reward_risk: 0.15
+
+    scan_start_time: "10:00"
+    scan_end_time:   "15:30"
+    preferred_entry_windows:
+      - "10:55-11:05"
+      - "15:10-15:20"
+
+    no_trade_score_threshold: 0.70
+    event_day_avoidance: true
+    require_maxvol_alignment: true
+    require_gamma_context: true
+    require_ddoi_context: true
+    no_trade_dates: []
