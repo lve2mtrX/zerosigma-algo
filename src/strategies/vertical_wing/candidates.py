@@ -64,7 +64,16 @@ def _safe_mid(q: OptionQuote) -> float | None:
 
 
 def _bid_ask_quality_score(short: OptionQuote, long_: OptionQuote, cap: float) -> float:
-    """1.0 = tight quotes; 0.0 = wider than `cap`. Linear in between."""
+    """1.0 = tight quotes; 0.0 = wider than `cap`. Linear in between.
+
+    Phase 4.1 NOTE: `max_bid_ask_width` reaches this function through
+    `params` via `SessionConfig.to_filter_params()` → strategy default
+    params merge → `build_*_credit(..., max_bid_ask_width=...)`. The cap
+    today is an absolute-dollar value (default 0.20). A LATER phase (4.2)
+    may switch this to a relative cap (% of mid) — the bucket field added
+    in Phase 4.1 (`quote_quality_bucket`) classifies regardless of the
+    underlying calibration so today's hard 0.0 floor stays legible.
+    """
     if cap <= 0:
         return 0.5
     spreads: list[float] = []
@@ -74,6 +83,59 @@ def _bid_ask_quality_score(short: OptionQuote, long_: OptionQuote, cap: float) -
         spreads.append(q.bid_ask_spread)
     worst = max(spreads)
     return max(0.0, min(1.0, 1.0 - (worst / cap)))
+
+
+def _worst_leg_bid_ask_metrics(
+    short_q: OptionQuote, long_q: OptionQuote,
+) -> tuple[float | None, float | None]:
+    """Return (worst_abs, worst_pct_of_mid) for the WIDER of the two legs.
+
+    Useful for the Phase 4.1 quote_quality_bucket — the strategy already
+    rejects on the worst leg, so observability surfaces that same leg.
+    Returns (None, None) when either leg's bid_ask is unknown.
+    """
+    pairs: list[tuple[OptionQuote, float]] = []
+    for q in (short_q, long_q):
+        ba = q.bid_ask_spread
+        if ba is None:
+            return None, None
+        pairs.append((q, ba))
+    worst_q, worst_abs = max(pairs, key=lambda p: p[1])
+    mid = _safe_mid(worst_q)
+    if mid is None or mid <= 0:
+        return worst_abs, None
+    return worst_abs, worst_abs / mid
+
+
+def _stamp_spread_meta(
+    meta: dict[str, object],
+    short_q: OptionQuote,
+    long_q: OptionQuote,
+    spread: SpreadQuote,
+) -> None:
+    """Phase 4.1 — surface spread bid/ask/mid + width metrics as top-level meta.
+
+    Keeps the existing `spread_quote` sub-dict for back-compat. New top-level
+    keys are consumed by readiness / CSV / Streamlit; same numbers, easier
+    to grep.
+    """
+    meta["spread_bid"]   = spread.credit_bid
+    meta["spread_ask"]   = spread.credit_ask
+    meta["spread_mid"]   = spread.credit_mid
+    meta["spread_width"] = spread.width
+    worst_abs, worst_pct = _worst_leg_bid_ask_metrics(short_q, long_q)
+    meta["worst_leg_bid_ask_abs"]         = worst_abs
+    meta["worst_leg_bid_ask_pct_of_mid"]  = worst_pct
+    # spread_width_pct_of_mid — width over spread mid (credit_mid). Useful
+    # for the Phase 5 selector that may want to compare across spread sizes.
+    if (
+        spread.credit_mid is not None
+        and spread.credit_mid > 0
+        and worst_abs is not None
+    ):
+        meta["spread_width_pct_of_mid"] = worst_abs / spread.credit_mid
+    else:
+        meta["spread_width_pct_of_mid"] = None
 
 
 def build_put_ceiling_call_credit(
@@ -119,6 +181,21 @@ def build_put_ceiling_call_credit(
     rr = (credit / max_risk) if max_risk > 0 else 0.0
     breakeven = short_k + credit
 
+    meta: dict[str, object] = {
+        "construction":         "PUT_CEILING_CALL_CREDIT",
+        "anchor_source":        anchor_source,         # e.g. "put_ceiling_2k"
+        "anchor_volume":        anchor_volume,
+        "anchor_volume_source": anchor_volume_source,
+        "short_leg":            _quote_dict(short_q),
+        "long_leg":             _quote_dict(long_q),
+        "spread_quote":         _spread_dict(spread),
+        "bid_ask_quality":      _bid_ask_quality_score(
+            short_q, long_q, max_bid_ask_width or 0.20,
+        ),
+        "threshold":            threshold,
+    }
+    _stamp_spread_meta(meta, short_q, long_q, spread)
+
     return Candidate(
         strategy_id=strategy_id,
         side="CALL_CREDIT",
@@ -131,19 +208,7 @@ def build_put_ceiling_call_credit(
         reward_risk=rr,
         breakeven=breakeven,
         distance_from_spot=short_k - chain.spot,
-        meta={
-            "construction":         "PUT_CEILING_CALL_CREDIT",
-            "anchor_source":        anchor_source,         # e.g. "put_ceiling_2k"
-            "anchor_volume":        anchor_volume,
-            "anchor_volume_source": anchor_volume_source,
-            "short_leg":            _quote_dict(short_q),
-            "long_leg":             _quote_dict(long_q),
-            "spread_quote":         _spread_dict(spread),
-            "bid_ask_quality":      _bid_ask_quality_score(
-                short_q, long_q, max_bid_ask_width or 0.20,
-            ),
-            "threshold":            threshold,
-        },
+        meta=meta,
     )
 
 
@@ -190,6 +255,21 @@ def build_call_floor_put_credit(
     rr = (credit / max_risk) if max_risk > 0 else 0.0
     breakeven = short_k - credit
 
+    meta: dict[str, object] = {
+        "construction":         "CALL_FLOOR_PUT_CREDIT",
+        "anchor_source":        anchor_source,         # e.g. "call_floor_2k"
+        "anchor_volume":        anchor_volume,
+        "anchor_volume_source": anchor_volume_source,
+        "short_leg":            _quote_dict(short_q),
+        "long_leg":             _quote_dict(long_q),
+        "spread_quote":         _spread_dict(spread),
+        "bid_ask_quality":      _bid_ask_quality_score(
+            short_q, long_q, max_bid_ask_width or 0.20,
+        ),
+        "threshold":            threshold,
+    }
+    _stamp_spread_meta(meta, short_q, long_q, spread)
+
     return Candidate(
         strategy_id=strategy_id,
         side="PUT_CREDIT",
@@ -202,19 +282,7 @@ def build_call_floor_put_credit(
         reward_risk=rr,
         breakeven=breakeven,
         distance_from_spot=chain.spot - short_k,
-        meta={
-            "construction":         "CALL_FLOOR_PUT_CREDIT",
-            "anchor_source":        anchor_source,         # e.g. "call_floor_2k"
-            "anchor_volume":        anchor_volume,
-            "anchor_volume_source": anchor_volume_source,
-            "short_leg":            _quote_dict(short_q),
-            "long_leg":             _quote_dict(long_q),
-            "spread_quote":         _spread_dict(spread),
-            "bid_ask_quality":      _bid_ask_quality_score(
-                short_q, long_q, max_bid_ask_width or 0.20,
-            ),
-            "threshold":            threshold,
-        },
+        meta=meta,
     )
 
 

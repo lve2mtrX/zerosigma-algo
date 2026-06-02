@@ -772,6 +772,89 @@ class TastyProbeClient:
             "sample_expirations_by_root": sample_by_root,
         }
 
+    # ── Phase 4.1: validate an explicit root_hint against the chain ──
+
+    def validate_root_hint(
+        self,
+        underlying: str,
+        root_hint: str,
+        expiry: str,
+    ) -> dict[str, Any]:
+        """Confirm `root_hint` is a real root for `underlying`+`expiry`.
+
+        READ-ONLY chain inspection. Reuses the chain summary that
+        `resolve_root_for` would have fetched, so a single tick that calls
+        BOTH only hits the wire once (cache is per-tick implicit — the
+        caller reuses the same `TastyProbeClient` instance).
+
+        Returns one of:
+          {ok: True,  root_symbol: <hint>, validated_via: 'chain',
+           available_roots: [...]}
+          {ok: False, reason: 'root_not_in_chain' | 'expiry_not_in_root',
+           requested_root, requested_expiry, available_roots,
+           sample_expirations_by_root,
+           fallback_root: <auto-resolved if any, else None>}
+        """
+        sym = (underlying or "").upper().strip()
+        hint = (root_hint or "").upper().strip()
+        if not sym or not hint:
+            return {"ok": False, "reason": "empty_underlying_or_hint"}
+        chain = self.get_option_chain_summary(sym)
+        if not chain.get("ok"):
+            return {
+                "ok":               False,
+                "reason":           "chain_unavailable",
+                "requested_root":   hint,
+                "requested_symbol": sym,
+                "requested_expiry": expiry,
+                "http_status":      chain.get("http_status"),
+            }
+        roots = chain.get("roots") or []
+        available = [r.get("root_symbol") for r in roots if r.get("root_symbol")]
+        sample_by_root = {
+            r.get("root_symbol"): (r.get("expirations") or [])[:8]
+            for r in roots
+        }
+
+        # Find the hint in the chain
+        hit = next(
+            (r for r in roots if (r.get("root_symbol") or "").upper() == hint),
+            None,
+        )
+        if hit is None:
+            # Hint not in chain at all — propose a fallback via auto resolve.
+            auto = self.resolve_root_for(sym, expiry)
+            return {
+                "ok":                          False,
+                "reason":                      "root_not_in_chain",
+                "requested_root":              hint,
+                "requested_symbol":            sym,
+                "requested_expiry":            expiry,
+                "available_roots":             available,
+                "sample_expirations_by_root":  sample_by_root,
+                "fallback_root":               (auto.get("root_symbol") if auto.get("ok") else None),
+            }
+        # Hint exists; does the requested expiry land in this root?
+        if expiry not in (hit.get("expirations") or []):
+            auto = self.resolve_root_for(sym, expiry)
+            return {
+                "ok":                          False,
+                "reason":                      "expiry_not_in_root",
+                "requested_root":              hint,
+                "requested_symbol":            sym,
+                "requested_expiry":            expiry,
+                "available_roots":             available,
+                "sample_expirations_by_root":  sample_by_root,
+                "fallback_root":               (auto.get("root_symbol") if auto.get("ok") else None),
+            }
+        return {
+            "ok":              True,
+            "root_symbol":     hint,
+            "validated_via":   "chain",
+            "available_roots": available,
+            "expiry":          expiry,
+        }
+
     # ── Phase 3.1: quote lookup with auto root resolution ────────────
 
     def get_option_quotes_for_strikes(
@@ -810,6 +893,66 @@ class TastyProbeClient:
                 "ok": True, "root_symbol": resolved_root, "source": "explicit",
                 "expiry": expiry,
             }
+            # Phase 4.1 — validate explicit hints against the chain so the
+            # operator can't silently OCC-build against a wrong root.
+            # Under STRICT_ROOT_HINT=true, an invalid hint hard-fails;
+            # otherwise we auto-fall back to the resolver's pick and stamp
+            # `root_hint_mismatch=true` on the result for audit.
+            # When the chain itself is UNAVAILABLE (404 / no auth / etc.),
+            # we KEEP the explicit hint — that's a transient network issue,
+            # not a hint vs chain mismatch. Only an actual mismatch downgrades.
+            import os as _os
+            strict_hint = _os.environ.get("STRICT_ROOT_HINT", "").strip().lower() in {
+                "true", "1", "yes", "on",
+            }
+            v = self.validate_root_hint(underlying, resolved_root, expiry)
+            if not v.get("ok") and v.get("reason") in (
+                "root_not_in_chain", "expiry_not_in_root",
+            ):
+                if strict_hint:
+                    return {
+                        "ok":                          False,
+                        "requested_underlying_symbol": (underlying or "").upper(),
+                        "requested_expiry":            expiry,
+                        "resolved_root_symbol":        None,
+                        "root_resolution_source":      "explicit_invalid",
+                        "reason":                      v.get("reason"),
+                        "available_roots":             v.get("available_roots") or [],
+                        "sample_expirations_by_root":  v.get("sample_expirations_by_root") or {},
+                        "requested_symbols":           [],
+                        "quote_count":                 0,
+                        "quotes":                      [],
+                        "root_hint_invalid":           True,
+                    }
+                # Lax mode — auto-fallback (or auto-resolve fresh)
+                auto_root = v.get("fallback_root")
+                if not auto_root:
+                    auto = self.resolve_root_for(underlying, expiry)
+                    if not auto.get("ok"):
+                        return {
+                            "ok":                          False,
+                            "requested_underlying_symbol": (underlying or "").upper(),
+                            "requested_expiry":            expiry,
+                            "resolved_root_symbol":        None,
+                            "root_resolution_source":      "unresolved",
+                            "reason":                      auto.get("reason"),
+                            "available_roots":             auto.get("available_roots") or [],
+                            "sample_expirations_by_root":  auto.get(
+                                "sample_expirations_by_root") or {},
+                            "requested_symbols":           [],
+                            "quote_count":                 0,
+                            "quotes":                      [],
+                            "root_hint_invalid":           True,
+                        }
+                    auto_root = auto.get("root_symbol")
+                resolved_root = auto_root
+                resolution_source = "auto_chain_after_hint_mismatch"
+                resolution_meta = {
+                    "ok": True, "root_symbol": resolved_root,
+                    "source": resolution_source, "expiry": expiry,
+                    "root_hint_mismatch": True,
+                    "available_roots": v.get("available_roots") or [],
+                }
         else:
             resolution_meta = self.resolve_root_for(underlying, expiry)
             if not resolution_meta.get("ok"):

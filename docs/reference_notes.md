@@ -712,3 +712,147 @@ back to `mock` with a warning. Selecting `tastytrade` without
 | `src/providers/quotes/factory.py` | Provider selection precedence + instantiation. |
 | `src/providers/quotes/tastytrade_provider.py` | Reference implementation — composes a probe client, applies validation, attaches root metadata. |
 | `tests/test_phase4_tastytrade_provider.py` | Test patterns — fake probe, `MockTransport` not required for happy path. |
+
+---
+
+## 11. Phase 4.1 audit metadata + target-DTE plumbing
+
+Phase 4.1 is an observability + plumbing pass. No scoring weights changed,
+no execution paths added. Defaults are byte-identical to Phase 4.
+
+### 11.1 Expiry selection (`src/utils/expiry.py`)
+
+`pick_target_expiry(now_et, target_dte, *, mode, allow_after_hours_roll,
+available_expiries, after_hours_cutoff_et='16:00', explicit_expiry=None)`
+returns a frozen `ExpiryDecision(expiry, source, reason, root_hint,
+days_out)`.
+
+Algorithm:
+
+1. **Explicit override** — when `explicit_expiry` is set, short-circuits
+   with `source='explicit'`.
+2. **Anchor** — defaults to today; if `target_dte=0` AND
+   `allow_after_hours_roll=True` AND now ≥ `after_hours_cutoff_et`, advance
+   the anchor by one day (`source='after_hours_roll'` if it later matches a
+   chain expiry).
+3. **Compute target date** under DTE mode:
+   - `trading_days`: anchor advanced N trading days (skips weekends + NYSE
+     holidays 2025-2027).
+   - `calendar_days`: anchor + N calendar days (no skip).
+4. **Match against available_expiries**:
+   - In list → `source='target_dte_match'` (or `today` for N=0)
+   - Not in list → pick nearest FORWARD expiry → `source='fallback_only_available'`
+   - No forward expiry at all → `expiry=None`, `source='fallback'`,
+     `reason='no_forward_expiry'`. Scanner emits NO_TRADE (clean, no traceback).
+5. **root_hint heuristic** — `'SPXW'` when target is within 7 calendar days
+   of today, else `None`. The actual root resolution happens at the broker
+   layer (`tasty_probe.validate_root_hint` or `resolve_root_for`).
+
+`DTE_MODE` env / `--dte-mode` flag / `scanner.expiry.dte_mode` YAML choose
+between `calendar_days` and `trading_days`. Trading_days respects the
+hardcoded `us_market_holidays(year)` set — **annual review needed** for
+year 2028 and beyond (`_SUPPORTED_YEARS = frozenset({2025, 2026, 2027})`).
+The function raises `ValueError` if called for an unsupported year, so
+drift cannot happen silently.
+
+### 11.2 Risk rejection structured fields
+
+Each cap filter (`_f_planned_trade_loss_within_cap`,
+`_f_theoretical_trade_loss_within_cap`) stamps these onto `Candidate.meta`
+regardless of pass/fail outcome (so audit always sees the numbers it
+compared):
+
+```python
+c.meta['risk_rejections'] = {
+    'planned_loss_cap': {
+        'type':         'planned_loss_cap',
+        'risk_dollars': 1400.0,                # value compared
+        'cap_dollars':  1000.0,                # cap (None when no cap configured)
+        'stop_variant': 'BASELINE_CASH_SETTLE',
+        'contracts':    1,
+        'passed':       False,                 # explicit pass/fail
+        'reason':       'planned stop risk $1400 > cap $1000 ...',
+    },
+    'theoretical_loss_cap': { ... },           # mirrors structure
+}
+
+# Scalar mirrors
+c.meta['planned_stop_risk_dollars']     = 1400.0
+c.meta['planned_stop_risk_cap_dollars'] = 1000.0
+c.meta['planned_stop_risk_passed']      = False
+c.meta['theoretical_loss_dollars']      = 280.0
+c.meta['theoretical_loss_cap_dollars']  = 3000.0
+c.meta['theoretical_loss_passed']       = True
+c.meta['risk_rejection_type']           = 'planned_loss_cap'  # last failing cap, or None
+```
+
+The human-readable `c.rejection_reasons: list[str]` is **untouched** — the
+existing 'planned stop risk $X > cap $Y' string is still appended. Phase 4.1
+is purely additive.
+
+### 11.3 Quote quality bucket
+
+`compute_readiness(...)` classifies each candidate's quote into one of:
+
+| Bucket | Rule |
+|---|---|
+| `invalid`   | Either leg has `validation_passed=False` (validator wins) |
+| `unknown`   | No leg-width data AND no validation result (mock chain default) |
+| `good`      | worst-leg bid-ask abs ≤ **$0.10** |
+| `acceptable`| worst-leg bid-ask abs ≤ **$0.20** |
+| `poor`      | worst-leg bid-ask abs ≤ **$0.50** |
+| `wide`      | worst-leg bid-ask abs >  $0.50 |
+
+The bucket is **distinct from** the existing `bid_ask_quality` score component
+(`_bid_ask_quality_score` in `candidates.py`). That scorer uses an absolute
+$0.20 cap and clips to 0.0 when the worst leg exceeds it. Phase 4.1 keeps the
+scorer unchanged (no scoring weight changes); the bucket makes the legibility
+of the cap visible alongside.
+
+A `quote_invalid:<reason>` blocker enters `selector_blockers` only when bucket
+is `invalid` — the other widths still pass `candidate_passes_quote_filters`
+so wide-but-quoted SPX setups stay eligible for selector consideration in
+Phase 5.
+
+### 11.4 Selector readiness flags
+
+`compute_readiness(...)` returns four `candidate_passes_*` boolean flags
+plus a composite `selector_eligible_base`:
+
+| Flag | True when |
+|---|---|
+| `candidate_passes_score_threshold` | `c.score >= threshold` |
+| `candidate_passes_score_edge`      | `c.score_edge >= MIN_SCORE_EDGE` |
+| `candidate_passes_trade_filters`   | No shape-filter rejection reasons in `c.rejection_reasons` |
+| `candidate_passes_risk_filters`    | No entry in `c.meta['risk_rejections']` with `passed=False` |
+| `candidate_passes_quote_filters`   | `quote_quality_bucket != 'invalid'` |
+| `selector_eligible_base`           | score_threshold AND trade AND risk AND quote (NOT edge — Phase 5 may add) |
+| `candidate_is_marginal`            | score >= threshold AND edge < MIN_SCORE_EDGE |
+
+`selector_blockers` is a list of human-readable strings —
+`'score_below_threshold(score=0.50<thr=0.60)'`,
+`'score_below_min_edge(edge=+0.0013<min=0.02)'`,
+`'risk_rejected:planned_loss_cap'`, `'quote_invalid:validation_failed'`,
+`'trade_filter:credit below floor 0.50'`. Phase 5 selector code can sort,
+group, or filter on these.
+
+### 11.5 Env vars + CLI flags + YAML knobs added
+
+| Source | Name | Default | Notes |
+|---|---|---|---|
+| Env | `TARGET_DTE` | `0` | days-to-expiry; CLI `--target-dte` wins |
+| Env | `DTE_MODE` | `trading_days` | `calendar_days` or `trading_days` |
+| Env | `ALLOW_AFTER_HOURS_EXPIRY_ROLL` | `false` | roll one day past after_hours_cutoff_et |
+| Env | `MIN_SCORE_EDGE` | `0.02` | flags `marginal_score=True` but doesn't gate decisions |
+| Env | `STRICT_ROOT_HINT` | `false` | tasty_probe explicit root mismatch → hard fail |
+| CLI | `--target-dte 0\|1\|2` | (from env) | scanner only |
+| CLI | `--dte-mode calendar_days\|trading_days` | (from env) | scanner only |
+| CLI | `--allow-after-hours-roll` | (from env) | scanner only |
+| CLI | `--print-candidates` | False | per-candidate stdout audit blocks |
+| YAML | `scanner.expiry.target_dte` | `0` | overridden by env / CLI |
+| YAML | `scanner.expiry.dte_mode` | `trading_days` | overridden by env / CLI |
+| YAML | `scanner.expiry.allow_after_hours_roll` | `false` | overridden by env / CLI |
+| YAML | `scanner.expiry.after_hours_cutoff_et` | `"16:00"` | HH:MM ET |
+
+Precedence: CLI > env > YAML > default. Defaults match today's behavior so
+no operator action is required.

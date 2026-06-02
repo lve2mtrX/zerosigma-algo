@@ -602,6 +602,104 @@ The Streamlit cockpit gains a Quote-Provider selector in the sidebar, a
 column (`✓ pass` / `✗ fail` / `—`), and per-leg pass/reason metrics inside
 each candidate's expander.
 
+##### Phase 4.1 — audit metadata + target-DTE plumbing
+
+Phase 4.1 is purely additive: defaults are byte-identical to Phase 4. The
+goal is to surface enough audit data for a future selector module (Phase 5)
+without changing scoring weights or the TRADE / NO_TRADE decision branches.
+
+**Quote validation vs `bid_ask_quality`.** The Phase 4 validator
+(`QuoteValidation`) rejects quotes for crossed market / zero bid / wide
+absolute spread / wide pct / staleness; results land on
+`OptionQuote.validation_passed` + each candidate's `short/long/quote_validation_passed`
+CSV columns. Separately, the strategy's existing scoring component
+`bid_ask_quality` (computed by `_bid_ask_quality_score` in
+`vertical_wing/candidates.py`) uses an absolute $0.20 cap and clips to 0.0
+when the worst leg exceeds it. Phase 4.1 adds a `quote_quality_bucket`
+column (`good` / `acceptable` / `poor` / `wide` / `invalid` / `unknown`)
+that classifies the worst-leg width on $0.10 / $0.20 / $0.50 boundaries
+AND respects validator failure. **A wide-but-valid quote can score 0.0 on
+`bid_ask_quality` and still appear as `acceptable` or `poor` in the
+bucket**, giving the operator a legible per-candidate quality label even
+when the scorer's cap clips. (Phase 4.2 will switch the scorer to a
+relative-cap; Phase 4.1 just makes today's behavior legible.)
+
+**Score edge + marginal trades.** Set `MIN_SCORE_EDGE` env var (default
+`0.02`) to define the score-above-threshold margin you consider non-
+marginal. Three new columns:
+
+- `score_edge` = `score - threshold` (signed)
+- `score_edge_passed` = `score_edge >= MIN_SCORE_EDGE`
+- `marginal_score` = `score >= threshold` AND NOT `score_edge_passed`
+
+A live tick where score=0.6013 and threshold=0.60 stamps `score_edge=0.0013`,
+`score_edge_passed=False`, `marginal_score=True`. Phase 4.1 does NOT
+change the decision branch — the candidate still gets selected if it's
+the best one. Phase 5 selector will decide whether to gate marginal
+trades.
+
+**Structured risk rejection.** Both risk-cap filters
+(`_f_planned_trade_loss_within_cap`, `_f_theoretical_trade_loss_within_cap`)
+now stamp structured fields on `Candidate.meta['risk_rejections']` keyed
+by cap name. New CSV columns: `risk_rejection_type` (`planned_loss_cap` /
+`theoretical_loss_cap` / `None`), `planned_stop_risk_dollars`,
+`planned_stop_risk_cap_dollars`, `planned_stop_risk_pct`,
+`planned_stop_risk_passed`, `theoretical_loss_cap_dollars`,
+`theoretical_loss_passed`, `risk_rejection_reason`. The existing
+human-readable `rejection_reasons` list is **untouched** — Phase 4.1 is
+additive.
+
+**Per-candidate audit print.** New scanner flag:
+
+```powershell
+python -m scripts.run_scanner --quote-provider mock --dry-run --print-candidates
+```
+
+Prints one block per candidate, grouped Identity / Risk / Score / Quote /
+Selector, with one `key=value` per line. No truncation of
+`score_breakdown_json` or `selector_blockers`. Designed for live-tick
+audit when CSV columns are too wide for terminal review. NEVER prints
+tokens, Authorization headers, or credentials (asserted in tests).
+
+**Target-DTE expiry selection.** Three new knobs let the scanner request
+a future expiry instead of always today's:
+
+```powershell
+# CLI
+python -m scripts.run_scanner --target-dte 1 --dte-mode trading_days
+
+# env (.env)
+TARGET_DTE=0
+DTE_MODE=trading_days                  # or calendar_days
+ALLOW_AFTER_HOURS_EXPIRY_ROLL=false    # roll +1 day past 16:00 ET when target_dte=0
+
+# YAML (config/scanner.yaml)
+scanner:
+  expiry:
+    target_dte: 0
+    dte_mode: trading_days
+    allow_after_hours_roll: false
+    after_hours_cutoff_et: "16:00"
+```
+
+Precedence: CLI > env > YAML > default. **Default `target_dte=0` keeps
+behavior byte-identical to Phase 4**, so existing operators see no
+change. SPX/SPXW root auto-resolution (Phase 3.1) still works for
+`target_dte=1` and `target_dte=2` — the new `tasty_probe.validate_root_hint`
+guard catches a stale explicit hint before it OCC-builds against a wrong
+root. When the chain has no forward expiry beyond the target, the scanner
+returns NO_TRADE cleanly — no traceback.
+
+New decision-log fields (in `snapshot_summary`): `target_dte`, `dte_mode`,
+`selected_expiry`, `expiry_selection_source`, `expiry_selection_reason`,
+`expiry_root_symbol`, `expiry_days_out`, `available_expiries_count`, plus
+an `expiry_override: {from, to, source, reason, root_hint,
+structure_expiry_matches_quote_expiry}` block when the chosen expiry
+differs from `structure.expiry`.
+
+See `docs/reference_notes.md §11` for the full algorithm + holiday list
+(hardcoded 2025-2027 — annual review needed).
+
 ##### What's still missing under `public_only`
 
 | Field | Still None under public_only? | How to populate |

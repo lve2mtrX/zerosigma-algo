@@ -86,6 +86,18 @@ class Candidate:
     weak_components: list[str] = field(default_factory=list)
     rejection_type: RejectionType | None = None
 
+    # Phase 4.1 — score-edge observability (no decision impact)
+    #   score_edge        = score - threshold              (signed)
+    #   score_edge_passed = score_edge >= MIN_SCORE_EDGE   (Phase 5 will use)
+    #   marginal_score    = score >= threshold AND score_edge < MIN_SCORE_EDGE
+    #
+    # Phase 5 will widen `RejectionType` to include a "marginal_edge" literal;
+    # for now, these stay as additive Candidate fields and the decision branch
+    # is UNTOUCHED — observability only.
+    score_edge: float | None = None
+    score_edge_passed: bool | None = None
+    marginal_score: bool | None = None
+
     # arbitrary strategy-specific context
     meta: dict[str, Any] = field(default_factory=dict)
 

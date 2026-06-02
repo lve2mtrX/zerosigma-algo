@@ -52,6 +52,7 @@ from src.risk.limits import (  # noqa: E402
     planned_loss_dollars,
     theoretical_max_loss_dollars,
 )
+from src.selector.readiness import compute_readiness  # noqa: E402
 from src.strategies.registry import load_strategies  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
 from src.utils.time import now_et  # noqa: E402
@@ -518,6 +519,23 @@ else:
                 quote_badge = "✓ pass"
             else:
                 quote_badge = "✗ fail"
+            # Phase 4.1 — readiness fields for table + expander
+            import os as _os_inline
+            try:
+                _mse = float(_os_inline.getenv("MIN_SCORE_EDGE", "0.02"))
+            except (TypeError, ValueError):
+                _mse = 0.02
+            readiness = compute_readiness(
+                c,
+                session=session,
+                threshold=(c.score_threshold or session.no_trade_score_threshold or 0.60),
+                min_score_edge=_mse,
+                target_dte=0,
+                available_expiries=([structure.expiry] if structure.expiry else None),
+                today_et=now_et().date(),
+            )
+            c.meta["_readiness"] = dict(readiness)
+
             rows.append({
                 "side":        c.side,
                 "short K":     c.short_strike,
@@ -535,6 +553,11 @@ else:
                 "score":       round(c.score, 2),
                 "gap":         (round(c.score_gap_to_threshold, 3)
                                 if c.score_gap_to_threshold is not None else None),
+                # Phase 4.1 — score-edge, quote bucket, risk-type
+                "edge":        (round(c.score_edge, 4)
+                                if isinstance(c.score_edge, (int, float)) else None),
+                "bucket":      readiness["quote_quality_bucket"],
+                "risk_type":   readiness["risk_rejection_type"] or "—",
                 "rejection":   c.rejection_type or ("rejected" if c.rejected else None),
                 "weak":        "; ".join(c.weak_components),
                 "rejection_reasons": "; ".join(c.rejection_reasons),
@@ -614,6 +637,37 @@ else:
                             ("✓ pass" if passed else f"✗ {reason or 'fail'}")
                         )
                         col.metric(f"{label} quote", badge, qtime or "")
+
+                # ── Phase 4.1 — Selector readiness ──
+                rd = c.meta.get("_readiness") or {}
+                if rd:
+                    st.caption(
+                        "Phase 4.1: `score_edge` (score − threshold), "
+                        "`quote_quality_bucket` (good/acceptable/poor/wide/invalid), "
+                        "`risk_rejection_type` (planned/theoretical cap), "
+                        "`selector_blockers` (eligibility audit)."
+                    )
+                    sc = st.columns(4)
+                    sc[0].metric(
+                        "Score edge",
+                        f"{c.score_edge:+.4f}" if isinstance(c.score_edge, (int, float)) else "—",
+                        "marginal" if c.marginal_score else (
+                            "passed" if c.score_edge_passed else "below"
+                        ),
+                    )
+                    sc[1].metric("Quote bucket",     rd.get("quote_quality_bucket") or "—")
+                    sc[2].metric("Risk type",        rd.get("risk_rejection_type") or "—")
+                    sc[3].metric(
+                        "Eligible (base)",
+                        "yes" if rd.get("selector_eligible_base") else "no",
+                        rd.get("selector_readiness_note") or "",
+                    )
+                    blockers = rd.get("selector_blockers") or []
+                    if blockers:
+                        st.markdown(
+                            "**Selector blockers:** "
+                            + ", ".join(f"`{b}`" for b in blockers)
+                        )
                 st.json(c.score_breakdown, expanded=False)
 
     decision = strat.select(candidates, params)

@@ -70,42 +70,119 @@ def _resolve_dollar_cap(
     return min(caps) if caps else None
 
 
+def _stamp_risk_rejection(
+    c: Candidate,
+    *,
+    type_: str,
+    risk_dollars: float,
+    cap: float | None,
+    passed: bool,
+    reason: str | None,
+    stop_variant: str | None,
+    contracts: int,
+) -> None:
+    """Phase 4.1 — stamp structured risk-rejection fields onto Candidate.meta.
+
+    The dict ALWAYS records 'passed' explicitly, so downstream consumers
+    (readiness, CSV, Streamlit) must consult `passed` rather than treating
+    key presence as failure. The scalar `risk_rejection_type` is the most
+    recent FAILED cap (or None when both caps passed).
+
+    Per-cap detail under c.meta['risk_rejections'][type_]:
+        {type, risk_dollars, cap_dollars, stop_variant, contracts,
+         passed, reason}
+    Scalar mirrors set on c.meta:
+        - planned_stop_risk_dollars / planned_stop_risk_cap_dollars /
+          planned_stop_risk_passed             (for type_='planned_loss_cap')
+        - theoretical_loss_dollars / theoretical_loss_cap_dollars /
+          theoretical_loss_passed              (for type_='theoretical_loss_cap')
+        - risk_rejection_type                  (= last failing type or None)
+    """
+    risk_rejections = c.meta.setdefault("risk_rejections", {})
+    risk_rejections[type_] = {
+        "type":         type_,
+        "risk_dollars": float(risk_dollars),
+        "cap_dollars":  (float(cap) if cap is not None else None),
+        "stop_variant": stop_variant,
+        "contracts":    int(contracts),
+        "passed":       bool(passed),
+        "reason":       reason,
+    }
+    if type_ == "planned_loss_cap":
+        c.meta["planned_stop_risk_dollars"]     = float(risk_dollars)
+        c.meta["planned_stop_risk_cap_dollars"] = (float(cap) if cap is not None else None)
+        c.meta["planned_stop_risk_passed"]      = bool(passed)
+    elif type_ == "theoretical_loss_cap":
+        c.meta["theoretical_loss_dollars"]      = float(risk_dollars)
+        c.meta["theoretical_loss_cap_dollars"]  = (float(cap) if cap is not None else None)
+        c.meta["theoretical_loss_passed"]       = bool(passed)
+    # Scalar `risk_rejection_type` = most-recent failing cap, or None if
+    # everything passed so far. Both passes => None; one fails => name it.
+    failed = [k for k, v in risk_rejections.items() if v.get("passed") is False]
+    c.meta["risk_rejection_type"] = failed[-1] if failed else None
+
+
 def _f_planned_trade_loss_within_cap(c: Candidate, p: dict[str, Any]) -> tuple[bool, str]:
     """Primary 'can I take this?' gate. Uses planned stop risk under the active stop variant."""
+    contracts = int(p.get("contracts_per_trade", 1))
+    stop = str(p.get("stop_variant", "BASELINE_CASH_SETTLE"))
     cap = _resolve_dollar_cap(
         p.get("max_planned_trade_loss_percent"),
         p.get("max_planned_trade_loss_dollars"),
         float(p.get("account_balance", 0)),
     )
-    if cap is None:
-        return (True, "")  # no cap configured → pass
-    contracts = int(p.get("contracts_per_trade", 1))
-    stop = str(p.get("stop_variant", "BASELINE_CASH_SETTLE"))
     risk_dollars = planned_loss_dollars(c.credit, c.max_risk, stop, contracts)
-    return (
-        risk_dollars <= cap,
-        (
-            f"planned stop risk ${risk_dollars:.0f} > cap ${cap:.0f} "
-            f"({stop}, {contracts} contracts)"
-        ),
+    if cap is None:
+        # No cap configured → pass. Still stamp the structured fields so
+        # readiness / CSV can observe the planned risk number even when no
+        # cap is in force.
+        _stamp_risk_rejection(
+            c, type_="planned_loss_cap",
+            risk_dollars=risk_dollars, cap=None, passed=True, reason=None,
+            stop_variant=stop, contracts=contracts,
+        )
+        return (True, "")
+    passed = risk_dollars <= cap
+    reason = (
+        None if passed else
+        f"planned stop risk ${risk_dollars:.0f} > cap ${cap:.0f} "
+        f"({stop}, {contracts} contracts)"
     )
+    _stamp_risk_rejection(
+        c, type_="planned_loss_cap",
+        risk_dollars=risk_dollars, cap=cap, passed=passed, reason=reason,
+        stop_variant=stop, contracts=contracts,
+    )
+    return (passed, reason or "")
 
 
 def _f_theoretical_trade_loss_within_cap(c: Candidate, p: dict[str, Any]) -> tuple[bool, str]:
     """Hard ceiling on the full defined-risk loss (spread fully ITM, no stop fires)."""
+    contracts = int(p.get("contracts_per_trade", 1))
     cap = _resolve_dollar_cap(
         p.get("max_theoretical_trade_loss_percent"),
         p.get("max_theoretical_trade_loss_dollars"),
         float(p.get("account_balance", 0)),
     )
-    if cap is None:
-        return (True, "")
-    contracts = int(p.get("contracts_per_trade", 1))
     risk_dollars = theoretical_max_loss_dollars(c.max_risk, contracts)
-    return (
-        risk_dollars <= cap,
-        f"theoretical max loss ${risk_dollars:.0f} > cap ${cap:.0f} ({contracts} contracts)",
+    if cap is None:
+        _stamp_risk_rejection(
+            c, type_="theoretical_loss_cap",
+            risk_dollars=risk_dollars, cap=None, passed=True, reason=None,
+            stop_variant=None, contracts=contracts,
+        )
+        return (True, "")
+    passed = risk_dollars <= cap
+    reason = (
+        None if passed else
+        f"theoretical max loss ${risk_dollars:.0f} > cap ${cap:.0f} ({contracts} contracts)"
     )
+    _stamp_risk_rejection(
+        c, type_="theoretical_loss_cap",
+        risk_dollars=risk_dollars, cap=cap, passed=passed, reason=reason,
+        stop_variant=None, contracts=contracts,
+    )
+    return (passed, reason or "")
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -45,3 +45,13 @@ scanner:
     fetch_prev_wings: true
     fetch_ddoi_history: true
     fetch_es_factor: true
+
+  # Phase 4.1 — Target-DTE expiry selection. Default keeps today's behavior
+  # (target_dte=0 = today). CLI > env > YAML > default. After-hours roll
+  # advances by ONE day when target_dte=0 AND past after_hours_cutoff_et.
+  # See src/utils/expiry.py and docs/reference_notes.md.
+  expiry:
+    target_dte: 0
+    dte_mode: trading_days          # calendar_days | trading_days
+    allow_after_hours_roll: false
+    after_hours_cutoff_et: "16:00"   # ET; default = market close

@@ -1307,3 +1307,151 @@ remains structure-only.
 - `python -m scripts.run_scanner --quote-provider mock --dry-run` →
   ran end-to-end; log line shows `quote_provider=mock quote_root=-`;
   no regression vs. previous scanner behavior.
+
+---
+
+## 2026-06-01 (Phase 4.1) — audit metadata cleanup + target-DTE plumbing
+
+**Live Tasty result that triggered Phase 4.1**: with `TastytradeQuoteProvider`
+wired (Phase 4), one tick produced two candidates:
+
+- `CALL_CREDIT 7610/7615 credit 0.95 score 0.6013` — *selected*, but the
+  score only edged threshold by 0.0013. Weak components included
+  `bid_ask_quality=0.00` despite the validator passing both legs (the abs-
+  dollar 0.20 cap on `_bid_ask_quality_score` clipped a slightly-wider quote
+  to 0).
+- `PUT_CREDIT 7575/7570 credit 2.20 score 0.8259` — would have been selected,
+  but the planned-stop-risk filter rejected it ($1400 > $1000 cap).
+
+Conclusion: provider works, risk guard works, audit metadata needs cleanup
+before adding selector modes. Phase 4.1 is observability + plumbing only —
+no scoring weight changes, no execution.
+
+### What landed (additive only — no existing schema changed)
+
+**1) `Candidate` (in `src/strategies/base.py`)** — three new optional fields:
+   - `score_edge` (signed `score - threshold`)
+   - `score_edge_passed` (`score_edge >= MIN_SCORE_EDGE`)
+   - `marginal_score` (`score >= threshold` AND `score_edge < MIN_SCORE_EDGE`)
+
+   Decision branches in `VerticalWingV1.select()` are UNTOUCHED — observability
+   only. Phase 5 will widen `RejectionType` to include `marginal_edge`.
+
+**2) `Candidate.meta` extras stamped by candidate-builders and risk filters**:
+   - `spread_bid`, `spread_ask`, `spread_mid`, `spread_width`,
+     `spread_width_pct_of_mid`, `worst_leg_bid_ask_abs`,
+     `worst_leg_bid_ask_pct_of_mid`
+   - `risk_rejections{}` — keyed by `'planned_loss_cap' | 'theoretical_loss_cap'`
+     with sub-fields `type, risk_dollars, cap_dollars, stop_variant, contracts,
+     passed, reason`
+   - Scalar mirrors: `risk_rejection_type`, `planned_stop_risk_dollars`,
+     `planned_stop_risk_cap_dollars`, `planned_stop_risk_passed`,
+     `theoretical_loss_dollars`, `theoretical_loss_cap_dollars`,
+     `theoretical_loss_passed`
+
+   The human-readable `c.rejection_reasons: list[str]` is UNTOUCHED — Phase 4.1
+   is additive.
+
+**3) New `src/selector/readiness.py`** — pure `compute_readiness(c, *, session,
+   threshold, min_score_edge, target_dte, available_expiries, today_et, ...)`.
+   Returns a FLAT dict suitable for `row.update(...)` with:
+   - bucketed quote quality (`good | acceptable | poor | wide | invalid | unknown`)
+   - four per-bucket `candidate_passes_*` flags + composite
+     `selector_eligible_base`
+   - `selector_blockers` list ("score_below_threshold", "score_below_min_edge",
+     "risk_rejected:planned_loss_cap", "quote_invalid:...", "trade_filter:...")
+   - `target_dte`, `selected_expiry`, `candidate_dte`, `expiry_selection_reason`
+   - `planned_stop_risk_pct` (planned_stop_risk_dollars / session.starting_balance)
+
+   Called from BOTH `_candidate_row` (scanner) AND the Streamlit per-candidate
+   expander, so the two reflect the same view.
+
+**4) New `src/utils/expiry.py`** — pure module with `pick_target_expiry(...)`,
+   `is_trading_day`, `next_trading_day`, `add_trading_days`,
+   `us_market_holidays`. Hardcoded NYSE holiday list for 2025-2027. **REVIEW
+   ANNUALLY** in Nov-Dec — update the year-cap in `_SUPPORTED_YEARS` AND extend
+   the hardcoded dict.
+
+**5) Scanner CLI flags + plumbing (`scripts/run_scanner.py`)**:
+   - `--target-dte 0|1|2` (env `TARGET_DTE`, default 0)
+   - `--dte-mode calendar_days|trading_days` (env `DTE_MODE`, default trading_days)
+   - `--allow-after-hours-roll` (env `ALLOW_AFTER_HOURS_EXPIRY_ROLL`, default false)
+   - `--print-candidates` — per-candidate audit blocks to stdout, grouped
+     Identity / Risk / Score / Quote / Selector. NEVER prints tokens / Authorization
+     headers / credentials (tested).
+   - YAML: `scanner.expiry: {target_dte, dte_mode, allow_after_hours_roll,
+     after_hours_cutoff_et}`.
+   - Precedence: CLI > env > YAML > default.
+   - Decision-log `snapshot_summary` gains `target_dte`, `dte_mode`,
+     `selected_expiry`, `expiry_selection_source`, `expiry_selection_reason`,
+     `expiry_root_symbol`, `expiry_days_out`, `available_expiries_count`, plus an
+     `expiry_override: {from, to, source, reason, root_hint,
+     structure_expiry_matches_quote_expiry}` block when the chosen expiry
+     differs from `structure.expiry`.
+
+**6) `tasty_probe.validate_root_hint(underlying, root_hint, expiry)`** — pure
+   READ of the cached chain summary. Returns `ok=True` when the hint is a real
+   root in the chain AND the expiry is listed under it; `ok=False` with reason
+   `root_not_in_chain` / `expiry_not_in_root` / `chain_unavailable` plus a
+   fallback root suggestion. Wired into `get_option_quotes_for_strikes(...)`
+   when an explicit `root_symbol` is supplied:
+   - Default (lax) mode: an invalid hint AUTO-FALLS-BACK to the resolver's pick
+     with `root_resolution_source='auto_chain_after_hint_mismatch'`.
+   - `STRICT_ROOT_HINT=true` env: hard-fails with
+     `root_resolution_source='explicit_invalid'` and no fallback.
+   - `chain_unavailable` (transient network/auth failure) PRESERVES the
+     explicit hint — Phase 3.1 back-compat.
+
+**7) CSV — 22 new columns APPENDED at end of `_DEFAULT_RANKED_FIELDS`**.
+   Existing column indices preserved byte-for-byte. New columns: `score_edge,
+   score_edge_passed, marginal_score, spread_bid, spread_ask, spread_mid,
+   spread_width_pct_of_mid, worst_leg_bid_ask_abs, worst_leg_bid_ask_pct_of_mid,
+   quote_quality_bucket, quote_quality_reason, risk_rejection_type,
+   planned_stop_risk_dollars, planned_stop_risk_cap_dollars,
+   planned_stop_risk_pct, planned_stop_risk_passed,
+   theoretical_loss_cap_dollars, theoretical_loss_passed, risk_rejection_reason,
+   candidate_passes_score_threshold, candidate_passes_score_edge,
+   candidate_passes_trade_filters, candidate_passes_risk_filters,
+   candidate_passes_quote_filters, candidate_is_marginal,
+   selector_eligible_base, selector_blockers, selector_readiness_note,
+   target_dte, selected_expiry, candidate_dte, expiry_selection_reason`.
+
+**8) Streamlit** — per-candidate expander gains a "Selector readiness" 4-metric
+   row (Score edge / Quote bucket / Risk type / Eligible) + blockers list. Main
+   candidate table gains three columns (`edge`, `bucket`, `risk_type`).
+
+**9) `.env.example`** — adds `TARGET_DTE=0`, `DTE_MODE=trading_days`,
+   `ALLOW_AFTER_HOURS_EXPIRY_ROLL=false`, `MIN_SCORE_EDGE=0.02`,
+   `STRICT_ROOT_HINT=false`. Defaults match today's behavior — no operator
+   action required to upgrade.
+
+### Phase 4.1 verification
+
+- **Pytest**: `272 passed in 8.98s` (was 198, +74 new).
+- **Ruff**: `All checks passed!`
+- **Mock smoke**: `python -m scripts.run_scanner --quote-provider mock
+  --structure-provider zerosigma_api --dry-run` runs cleanly with target_dte=0;
+  `--print-candidates` smoke confirms audit blocks have all five groups + new
+  fields; no token / Authorization / credential leaks in stdout (tested).
+
+### Bug surfaced for Phase 4.2
+
+The `_bid_ask_quality_score` abs-dollar cap (default 0.20) clipped legitimate
+SPX wings at 0.0 under live Tasty quotes. Phase 4.1 documents this and adds
+the `quote_quality_bucket` so the legible bucket name shows up even when the
+old scorer clips. Phase 4.2 should switch the cap to a relative (% of mid)
+threshold — that's a calibration change, deliberately out of Phase 4.1 scope.
+
+### Flag for Phase 5
+
+The `RejectionType` literal should be widened to include `marginal_edge` so
+the existing `c.rejection_type` field can carry it without abuse of the
+`score_below_threshold` value. Phase 4.1 keeps it as a Candidate-side flag
+only (`marginal_score: bool | None`) to avoid touching the literal.
+
+### Flag for annual review
+
+`src/utils/expiry.py.us_market_holidays(year)` hardcodes 2025-2027 NYSE
+holidays. Update the dict + `_SUPPORTED_YEARS` annually each Nov-Dec; tests
+will fail loudly if `pick_target_expiry` is called for a year outside the
+supported range.

@@ -43,7 +43,24 @@ def main() -> int:
                              "TASTY_* OAuth env vars — set up via scripts.probe_tastytrade first.")
     parser.add_argument("--dry-run",  action="store_true",
                         help="do not write decision_log / ranked_candidates")
+    # Phase 4.1 — target-DTE plumbing (default 0 = today, behavior unchanged)
+    parser.add_argument("--target-dte", dest="target_dte", type=int, default=None,
+                        help="target days-to-expiry: 0=today, 1=tomorrow, ... "
+                             "(default from TARGET_DTE env or scanner.expiry YAML or 0)")
+    parser.add_argument("--dte-mode", dest="dte_mode", default=None,
+                        choices=["calendar_days", "trading_days"],
+                        help="DTE counting mode (default from DTE_MODE env or "
+                             "scanner.expiry YAML or trading_days)")
+    parser.add_argument("--allow-after-hours-roll", dest="allow_after_hours_roll",
+                        action="store_true", default=None,
+                        help="if past after_hours_cutoff_et AND target_dte=0, roll to next day "
+                             "(default from ALLOW_AFTER_HOURS_EXPIRY_ROLL env or YAML or false)")
+    # Phase 4.1 — per-candidate audit print (no truncation)
+    parser.add_argument("--print-candidates", dest="print_candidates", action="store_true",
+                        help="print per-candidate audit blocks to stdout (Phase 4.1)")
     args = parser.parse_args()
+
+    import os as _os
 
     from src.app.session_state import SessionConfig
     from src.providers.quotes.factory import build_quote_provider
@@ -61,11 +78,50 @@ def main() -> int:
     )
     from src.strategies.registry import load_strategies
     from src.utils.config import load_config
+    from src.utils.expiry import ExpiryDecision, pick_target_expiry
     from src.utils.logging import get_logger
     from src.utils.time import now_et
 
     log = get_logger("scanner")
     cfg = load_config(REPO_ROOT)
+
+    # ── Phase 4.1 — resolve target_dte knobs (CLI > env > YAML > default) ──
+    expiry_cfg = (cfg.scanner.get("expiry") or {}) if isinstance(cfg.scanner, dict) else {}
+
+    def _env_bool(name: str, default: bool) -> bool:
+        v = _os.environ.get(name)
+        if v is None or v == "":
+            return default
+        return v.strip().lower() in {"true", "1", "yes", "on"}
+
+    if args.target_dte is not None:
+        target_dte = int(args.target_dte)
+    else:
+        env_td = _os.environ.get("TARGET_DTE")
+        if env_td not in (None, ""):
+            try:
+                target_dte = int(env_td)
+            except ValueError:
+                target_dte = int(expiry_cfg.get("target_dte", 0))
+        else:
+            target_dte = int(expiry_cfg.get("target_dte", 0))
+
+    if args.dte_mode is not None:
+        dte_mode = args.dte_mode
+    else:
+        dte_mode = _os.environ.get("DTE_MODE") or expiry_cfg.get("dte_mode") or "trading_days"
+    if dte_mode not in ("calendar_days", "trading_days"):
+        dte_mode = "trading_days"
+
+    if args.allow_after_hours_roll is not None:
+        allow_ah_roll = bool(args.allow_after_hours_roll)
+    else:
+        allow_ah_roll = _env_bool(
+            "ALLOW_AFTER_HOURS_EXPIRY_ROLL",
+            bool(expiry_cfg.get("allow_after_hours_roll", False)),
+        )
+
+    after_hours_cutoff_et = str(expiry_cfg.get("after_hours_cutoff_et", "16:00"))
 
     profile_name = args.profile or cfg.active_risk_profile
     profile = load_profile(cfg.risk_profiles, profile_name)
@@ -104,6 +160,41 @@ def main() -> int:
         structure_provider = StubStructureProvider()
         resolved_structure_name = "stub"
         structure = structure_provider.get_snapshot(symbol)
+
+    # ── Phase 4.1 — discover available expiries from the broker chain when
+    # possible. For tasty: probe.get_option_chain_summary. For mock/null/
+    # stub providers: fall back to [structure.expiry] (single-element). The
+    # pick_target_expiry call below will short-circuit to structure.expiry
+    # at target_dte=0 for byte-identical default behavior.
+    available_expiries: list[str] = []
+    if resolved_quote_name == "tastytrade" and hasattr(quote_provider, "_probe"):
+        try:
+            summary = quote_provider._probe.get_option_chain_summary(symbol)  # type: ignore[attr-defined]
+            if summary.get("ok"):
+                ae: set[str] = set()
+                for r in (summary.get("roots") or []):
+                    for e in (r.get("expirations") or []):
+                        if isinstance(e, str):
+                            ae.add(e)
+                available_expiries = sorted(ae)
+        except Exception as exc:                # never fail the tick on probe issues
+            log.warning("probe.get_option_chain_summary failed: %s — falling back",
+                        type(exc).__name__)
+    if not available_expiries and structure.expiry:
+        available_expiries = [structure.expiry]
+
+    # Decide which expiry to actually request.
+    decision_now = now_et()
+    expiry_decision: ExpiryDecision = pick_target_expiry(
+        decision_now,
+        target_dte,
+        mode=dte_mode,
+        allow_after_hours_roll=allow_ah_roll,
+        available_expiries=available_expiries,
+        after_hours_cutoff_et=after_hours_cutoff_et,
+    )
+    eff_expiry = expiry_decision.expiry or structure.expiry
+
     # Build a QuoteRequest from the structure so synthesis providers
     # (the mock) center their chain on real ZS levels rather than the
     # hardcoded 5800 default.
@@ -111,14 +202,18 @@ def main() -> int:
     spot_hint, spot_hint_source = _pick_spot_hint(structure, required_strikes)
     quote_request = QuoteRequest(
         symbol=symbol,
-        expiry=structure.expiry,
+        expiry=eff_expiry,
         spot_hint=spot_hint,
         required_strikes=tuple(required_strikes),
         spot_hint_source=spot_hint_source,
     )
-    chain = quote_provider.get_option_chain(symbol, expiry=structure.expiry, request=quote_request)
+    chain = quote_provider.get_option_chain(symbol, expiry=eff_expiry, request=quote_request)
     if chain is None:
-        log.error("QuoteProvider returned no chain for %s — aborting tick.", symbol)
+        log.error(
+            "QuoteProvider returned no chain for %s @ %s (target_dte=%d, src=%s) "
+            "— aborting tick.",
+            symbol, eff_expiry, target_dte, expiry_decision.source,
+        )
         return 3
     quote_provider.get_spot(symbol)  # heartbeat
     quote_status = quote_provider.status()
@@ -166,9 +261,17 @@ def main() -> int:
         )
 
         for c in candidates:
-            ranked_rows.append(_candidate_row(sid, c, session, ts, decision.decision, chain=chain))
+            row = _candidate_row(
+                sid, c, session, ts, decision.decision, chain=chain,
+                target_dte=target_dte,
+                available_expiries=available_expiries,
+                expiry_selection_reason=expiry_decision.source,
+            )
+            ranked_rows.append(row)
+            if args.print_candidates:
+                _print_candidate_audit(row, c, chain)
 
-        snapshot_summary = {
+        snapshot_summary: dict = {
             "structure_provider": structure.source,
             "structure_ts":       structure.quote_ts.isoformat(),
             "quote_provider":     chain.provider_name,
@@ -194,7 +297,25 @@ def main() -> int:
             "resolved_quote_provider":       resolved_quote_name,
             "quote_chain_root":              chain.resolved_root_symbol,
             "quote_root_resolution_source":  chain.root_resolution_source,
+            # Phase 4.1 — target-DTE plumbing audit
+            "target_dte":                    target_dte,
+            "dte_mode":                      dte_mode,
+            "selected_expiry":               eff_expiry,
+            "expiry_selection_source":       expiry_decision.source,
+            "expiry_selection_reason":       expiry_decision.reason,
+            "expiry_root_symbol":            expiry_decision.root_hint,
+            "expiry_days_out":               expiry_decision.days_out,
+            "available_expiries_count":      len(available_expiries),
         }
+        if structure.expiry and eff_expiry and eff_expiry != structure.expiry:
+            snapshot_summary["expiry_override"] = {
+                "from":                              structure.expiry,
+                "to":                                eff_expiry,
+                "source":                            expiry_decision.source,
+                "reason":                            expiry_decision.reason,
+                "root_hint":                         expiry_decision.root_hint,
+                "structure_expiry_matches_quote_expiry": False,
+            }
 
         if not args.dry_run:
             log_decision(output_root, decision, snapshot_summary, ts)
@@ -260,17 +381,42 @@ _DEFAULT_RANKED_FIELDS = [
     "short_validation_passed", "short_rejection_reason",
     "long_validation_passed",  "long_rejection_reason",
     "quote_validation_passed", "quote_rejection_reason",
+    # ── Phase 4.1 — score-edge observability ─────────────────────────────
+    "score_edge", "score_edge_passed", "marginal_score",
+    # Phase 4.1 — spread bid/ask/mid + width metrics
+    "spread_bid", "spread_ask", "spread_mid", "spread_width_pct_of_mid",
+    "worst_leg_bid_ask_abs", "worst_leg_bid_ask_pct_of_mid",
+    "quote_quality_bucket", "quote_quality_reason",
+    # Phase 4.1 — structured risk-rejection fields
+    "risk_rejection_type",
+    "planned_stop_risk_dollars", "planned_stop_risk_cap_dollars",
+    "planned_stop_risk_pct", "planned_stop_risk_passed",
+    "theoretical_loss_cap_dollars", "theoretical_loss_passed",
+    "risk_rejection_reason",
+    # Phase 4.1 — selector readiness flags
+    "candidate_passes_score_threshold", "candidate_passes_score_edge",
+    "candidate_passes_trade_filters", "candidate_passes_risk_filters",
+    "candidate_passes_quote_filters", "candidate_is_marginal",
+    "selector_eligible_base", "selector_blockers", "selector_readiness_note",
+    # Phase 4.1 — target-DTE plumbing
+    "target_dte", "selected_expiry", "candidate_dte", "expiry_selection_reason",
 ]  # used only when no candidate rows exist — keep in sync with _candidate_row()
 
 
 def _candidate_row(
     strategy_id: str, c, session, ts: datetime, decision_str: str,
     chain=None,                                  # type: ignore[no-untyped-def]
+    *,
+    target_dte: int = 0,
+    available_expiries: list[str] | None = None,
+    expiry_selection_reason: str | None = None,
 ) -> dict:
     import json as _json
+    import os as _os
     from datetime import datetime as _dt
 
     from src.risk.limits import planned_loss_dollars, theoretical_max_loss_dollars
+    from src.selector.readiness import compute_readiness
 
     short = c.meta.get("short_leg") or {}
     long_ = c.meta.get("long_leg")  or {}
@@ -370,6 +516,77 @@ def _candidate_row(
         "quote_validation_passed":      overall_passed,
         "quote_rejection_reason":       combined_reason,
     })
+
+    # ── Phase 4.1 — score-edge + spread + risk-rejection + readiness ──
+    try:
+        min_score_edge = float(_os.getenv("MIN_SCORE_EDGE", "0.02"))
+    except (TypeError, ValueError):
+        min_score_edge = 0.02
+    row["score_edge"] = (
+        round(c.score_edge, 4) if isinstance(c.score_edge, (int, float)) else None
+    )
+    row["score_edge_passed"] = c.score_edge_passed
+    row["marginal_score"]    = c.marginal_score
+    # Spread bid/ask/mid + width metrics
+    sb = c.meta.get("spread_bid")
+    sa = c.meta.get("spread_ask")
+    sm = c.meta.get("spread_mid")
+    swp = c.meta.get("spread_width_pct_of_mid")
+    wla = c.meta.get("worst_leg_bid_ask_abs")
+    wlp = c.meta.get("worst_leg_bid_ask_pct_of_mid")
+    row["spread_bid"]                = (round(sb, 4) if isinstance(sb, (int, float)) else None)
+    row["spread_ask"]                = (round(sa, 4) if isinstance(sa, (int, float)) else None)
+    row["spread_mid"]                = (round(sm, 4) if isinstance(sm, (int, float)) else None)
+    row["spread_width_pct_of_mid"]   = (round(swp, 4) if isinstance(swp, (int, float)) else None)
+    row["worst_leg_bid_ask_abs"]     = (round(wla, 4) if isinstance(wla, (int, float)) else None)
+    row["worst_leg_bid_ask_pct_of_mid"] = (round(wlp, 4) if isinstance(wlp, (int, float)) else None)
+    # Selector readiness (also stamps quote_quality_bucket / risk_rejection_type)
+    readiness = compute_readiness(
+        c,
+        session=session,
+        threshold=(c.score_threshold or 0.60),
+        min_score_edge=min_score_edge,
+        target_dte=target_dte,
+        available_expiries=available_expiries,
+        today_et=ts.date(),
+        expiry_selection_reason=expiry_selection_reason,
+    )
+    # Stamp readiness onto candidate.meta too, so the Streamlit per-candidate
+    # expander can read the same values without re-deriving.
+    c.meta["_readiness"] = dict(readiness)
+    row["quote_quality_bucket"]        = readiness["quote_quality_bucket"]
+    row["quote_quality_reason"]        = readiness["quote_quality_reason"]
+    row["risk_rejection_type"]         = readiness["risk_rejection_type"]
+    psr = c.meta.get("planned_stop_risk_dollars")
+    psrc = c.meta.get("planned_stop_risk_cap_dollars")
+    psr_passed = c.meta.get("planned_stop_risk_passed")
+    tld = c.meta.get("theoretical_loss_cap_dollars")
+    tlp = c.meta.get("theoretical_loss_passed")
+    row["planned_stop_risk_dollars"]    = (round(psr, 2) if isinstance(psr, (int, float)) else None)
+    row["planned_stop_risk_cap_dollars"]= (round(psrc, 2) if isinstance(psrc, (int, float)) else None)
+    row["planned_stop_risk_pct"]        = (
+        round(readiness["planned_stop_risk_pct"], 4)
+        if readiness["planned_stop_risk_pct"] is not None else None
+    )
+    row["planned_stop_risk_passed"]     = psr_passed
+    row["theoretical_loss_cap_dollars"] = (round(tld, 2) if isinstance(tld, (int, float)) else None)
+    row["theoretical_loss_passed"]      = tlp
+    row["risk_rejection_reason"]        = readiness["risk_rejection_reason"]
+    # Selector flags + base
+    row["candidate_passes_score_threshold"] = readiness["candidate_passes_score_threshold"]
+    row["candidate_passes_score_edge"]      = readiness["candidate_passes_score_edge"]
+    row["candidate_passes_trade_filters"]   = readiness["candidate_passes_trade_filters"]
+    row["candidate_passes_risk_filters"]    = readiness["candidate_passes_risk_filters"]
+    row["candidate_passes_quote_filters"]   = readiness["candidate_passes_quote_filters"]
+    row["candidate_is_marginal"]            = readiness["candidate_is_marginal"]
+    row["selector_eligible_base"]           = readiness["selector_eligible_base"]
+    row["selector_blockers"]                = "; ".join(readiness["selector_blockers"])
+    row["selector_readiness_note"]          = readiness["selector_readiness_note"]
+    # Target-DTE plumbing
+    row["target_dte"]               = readiness["target_dte"]
+    row["selected_expiry"]          = readiness["selected_expiry"]
+    row["candidate_dte"]            = readiness["candidate_dte"]
+    row["expiry_selection_reason"]  = readiness["expiry_selection_reason"]
     return row
 
 
@@ -405,6 +622,74 @@ def _pick_spot_hint(structure, required_strikes: list[float]) -> tuple[float | N
         xs = sorted(required_strikes)
         return (xs[len(xs) // 2], "structure_midpoint")
     return (None, "mock_default")
+
+
+def _print_candidate_audit(row: dict, c, chain=None) -> None:  # type: ignore[no-untyped-def]
+    """Phase 4.1 — per-candidate audit block to stdout. No truncation.
+
+    Grouped: Identity / Risk / Score / Quote / Selector. ONE key=value per
+    line so the operator can search visually without column truncation.
+    Output is BUILT from the same row dict the CSV writer uses + the
+    candidate's meta — there is no path here that leaks env vars, tokens,
+    Authorization headers, or the raw HTTP response.
+    """
+    out = print
+    side = row.get("side") or "—"
+    sk = row.get("short_strike")
+    lk = row.get("long_strike")
+    header = f"=== {side} {sk}/{lk} === decision={row.get('decision')}  ts={row.get('ts')}"
+    out(header)
+
+    # Identity
+    out("--- identity ---")
+    for k in ("strategy_id", "symbol" if "symbol" in row else "side", "selected_expiry",
+              "target_dte", "candidate_dte", "expiry_selection_reason",
+              "quote_chain_root", "quote_root_resolution_source"):
+        v = row.get(k) if k in row else getattr(c, k, None)
+        out(f"  {k}={v!r}")
+
+    # Risk
+    out("--- risk ---")
+    for k in ("rejected", "rejection_reasons",
+              "risk_rejection_type", "risk_rejection_reason",
+              "planned_loss_dollars", "planned_stop_risk_dollars",
+              "planned_stop_risk_cap_dollars", "planned_stop_risk_pct",
+              "planned_stop_risk_passed",
+              "theoretical_max_loss_dollars", "theoretical_loss_cap_dollars",
+              "theoretical_loss_passed"):
+        out(f"  {k}={row.get(k)!r}")
+
+    # Score
+    out("--- score ---")
+    for k in ("score", "final_score", "no_trade_threshold",
+              "score_gap_to_threshold", "score_edge", "score_edge_passed",
+              "marginal_score", "weak_components", "score_breakdown_json"):
+        out(f"  {k}={row.get(k)!r}")
+
+    # Quote
+    out("--- quote ---")
+    for k in ("quote_provider", "quote_timestamp", "quote_age_seconds",
+              "bid_ask_quality", "quote_quality_bucket", "quote_quality_reason",
+              "spread_bid", "spread_ask", "spread_mid",
+              "spread_width", "spread_width_pct_of_mid",
+              "worst_leg_bid_ask_abs", "worst_leg_bid_ask_pct_of_mid",
+              "short_bid", "short_mid", "short_ask",
+              "long_bid", "long_mid", "long_ask",
+              "short_validation_passed", "short_rejection_reason",
+              "long_validation_passed", "long_rejection_reason",
+              "quote_validation_passed", "quote_rejection_reason"):
+        out(f"  {k}={row.get(k)!r}")
+
+    # Selector
+    out("--- selector ---")
+    for k in ("candidate_passes_score_threshold", "candidate_passes_score_edge",
+              "candidate_passes_trade_filters", "candidate_passes_risk_filters",
+              "candidate_passes_quote_filters", "candidate_is_marginal",
+              "selector_eligible_base", "selector_blockers",
+              "selector_readiness_note"):
+        out(f"  {k}={row.get(k)!r}")
+
+    out("---")
 
 
 def _refine_decision_explanation(

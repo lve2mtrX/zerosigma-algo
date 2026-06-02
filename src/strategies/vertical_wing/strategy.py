@@ -7,6 +7,7 @@ provider's internals.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from src.providers.quotes.types import OptionChainSnapshot
@@ -120,6 +121,13 @@ class VerticalWingV1:
         threshold = float(merged.get("no_trade_score_threshold", 0.60))
         side_priority = merged.get("side_priority", ["CALL_CREDIT", "PUT_CREDIT"])
 
+        # Phase 4.1 — observability-only score-edge threshold. Read once.
+        # Phase 5 will gate selection on this; here we only stamp the fields.
+        try:
+            min_score_edge = float(os.getenv("MIN_SCORE_EDGE", "0.02"))
+        except (TypeError, ValueError):
+            min_score_edge = 0.02
+
         # ── annotate EVERY candidate with observability fields ──
         # This runs before the no-survivors / below-threshold branches so
         # the decision log carries weak_components / score_threshold /
@@ -131,6 +139,11 @@ class VerticalWingV1:
             # Mirror the threshold into the breakdown dict for CSV/JSONL.
             c.score_breakdown["no_trade_threshold"] = threshold
             c.score_breakdown["score_gap_to_threshold"] = c.score_gap_to_threshold
+            # Phase 4.1 — score-edge observability (no decision impact)
+            edge = float(c.score) - threshold
+            c.score_edge = edge
+            c.score_edge_passed = edge >= min_score_edge
+            c.marginal_score = (c.score >= threshold) and (edge < min_score_edge)
             if c.rejected:
                 c.rejection_type = "filter_rejected"
             # other branches set "selected" / "score_below_threshold" below
