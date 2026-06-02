@@ -85,6 +85,32 @@ def _redact_account(account_number: str | None) -> str:
     return "****" + s[-4:] if len(s) >= 4 else "****"
 
 
+def _build_occ_option_symbol(
+    root: str,
+    expiry: str,
+    strike: float,
+    right: str,
+) -> str:
+    """Build an OCC 21-char option symbol.
+
+    Format: ROOT(6, space-padded) YYMMDD R STRIKE(8, milli-dollars)
+    Example: SPXW  260620C00050000 → SPXW + 260620 + C + 00050000
+    """
+    parts = expiry.split("-")
+    if len(parts) != 3 or len(parts[0]) != 4:
+        raise ValueError(f"expiry must be YYYY-MM-DD, got {expiry!r}")
+    yymmdd = f"{parts[0][2:]}{parts[1]}{parts[2]}"
+    r = right.upper().strip()
+    if r not in ("C", "P"):
+        raise ValueError(f"right must be C or P, got {right!r}")
+    root_padded = root.upper().strip().ljust(6, " ")
+    # OCC strike is integer milli-dollars (8 digits), padded with zeros.
+    strike_int = round(float(strike) * 1000)
+    if strike_int < 0 or strike_int > 99999999:
+        raise ValueError(f"strike {strike} outside OCC encodable range")
+    return f"{root_padded}{yymmdd}{r}{strike_int:08d}"
+
+
 def _parse_scopes(scopes_raw: str | None) -> list[str]:
     """Normalize a scopes string into a list of lowercase scope names.
 
@@ -182,23 +208,57 @@ class TastyProbeConfig:
     def trade_scope_present(self) -> bool:
         return TRADE_SCOPE_NAME in (self.scopes or [])
 
-    def missing_fields(self) -> list[str]:
-        """Human-readable list of which credential blocks aren't filled in."""
+    def usable_auth_modes(self) -> list[str]:
+        """Which auth modes are FULLY configured right now."""
         out: list[str] = []
-        if not self.has_oauth():
-            for name, val in (
-                ("TASTY_CLIENT_ID", self.client_id),
-                ("TASTY_CLIENT_SECRET", self.client_secret),
-                ("TASTY_REFRESH_TOKEN", self.refresh_token),
-            ):
-                if not val:
-                    out.append(name)
-        if not self.has_legacy_session():
-            if not self.username:
-                out.append("TASTY_USERNAME")
-            if not self.password:
-                out.append("TASTY_PASSWORD")
+        if self.has_oauth():
+            out.append("oauth")
+        if self.has_legacy_session():
+            out.append("legacy_session")
         return out
+
+    def oauth_missing_fields(self) -> list[str]:
+        out: list[str] = []
+        for name, val in (
+            ("TASTY_CLIENT_ID",     self.client_id),
+            ("TASTY_CLIENT_SECRET", self.client_secret),
+            ("TASTY_REFRESH_TOKEN", self.refresh_token),
+        ):
+            if not val:
+                out.append(name)
+        return out
+
+    def legacy_missing_fields(self) -> list[str]:
+        out: list[str] = []
+        if not self.username:
+            out.append("TASTY_USERNAME")
+        if not self.password:
+            out.append("TASTY_PASSWORD")
+        return out
+
+    def missing_fields(self) -> dict[str, Any]:
+        """Per-mode breakdown of which credential blocks aren't filled.
+
+        Phase 3.1 fix: when at least one auth mode is complete, the
+        TOP-LEVEL `missing_fields` key (used by config_summary) is empty.
+        Per-mode lists still surface so the user can see what's left if
+        they wanted to set up the other mode too.
+
+        Returns:
+            {
+              oauth_missing_fields:  [...],
+              legacy_missing_fields: [...],
+              usable_auth_modes:     ['oauth', 'legacy_session'],
+              fully_configured:      bool,
+            }
+        """
+        usable = self.usable_auth_modes()
+        return {
+            "oauth_missing_fields":  self.oauth_missing_fields(),
+            "legacy_missing_fields": self.legacy_missing_fields(),
+            "usable_auth_modes":     usable,
+            "fully_configured":      bool(usable),
+        }
 
     def __repr__(self) -> str:           # never echo secrets
         return (
@@ -342,11 +402,29 @@ class TastyProbeClient:
         """Sanitized config dump — for the CLI `--config` subcommand.
 
         Returns ONLY whether each credential field is present, never the
-        value. Trade scope + safety-gate state always surface."""
+        value. Trade scope + safety-gate state always surface.
+
+        Phase 3.1: per-mode missing_fields. Top-level `missing_fields` is
+        empty when at least one auth mode is fully configured (back-compat:
+        old callers that just `len(out["missing_fields"]) == 0`-test will
+        report 'configured' as long as either OAuth OR legacy is complete).
+        """
+        mf = self._cfg.missing_fields()
         return {
             "provider":                "tasty_probe",
             "configured":              self._cfg.is_configured(),
             "auth_mode":               self._cfg.auth_mode(),
+            "usable_auth_modes":       mf["usable_auth_modes"],
+            "missing_fields":          [] if mf["fully_configured"] else (
+                # Show whichever mode the user appears to be trying to set
+                # up (whichever has FEWER missing fields). When neither is
+                # touched at all, include both lists.
+                mf["oauth_missing_fields"]
+                if len(mf["oauth_missing_fields"]) <= len(mf["legacy_missing_fields"])
+                else mf["legacy_missing_fields"]
+            ),
+            "oauth_missing_fields":    mf["oauth_missing_fields"],
+            "legacy_missing_fields":   mf["legacy_missing_fields"],
             "env":                     self._cfg.env,
             "base_url":                self._cfg.resolved_base_url(),
             "redirect_uri":            self._cfg.redirect_uri,   # safe — not a secret
@@ -372,7 +450,6 @@ class TastyProbeClient:
             "use_dxlink":              self._cfg.use_dxlink,
             "timeout_seconds":         self._cfg.timeout_seconds,
             "verify_ssl":              self._cfg.verify_ssl,
-            "missing_fields":          self._cfg.missing_fields(),
         }
 
     # ── auth ─────────────────────────────────────────────────────────
@@ -595,7 +672,8 @@ class TastyProbeClient:
                 roots.append({
                     "root_symbol":      root_symbol,
                     "expirations_count": len(exp_dates),
-                    "expirations_sample": exp_dates[:5],
+                    "expirations":      list(exp_dates),   # FULL list — needed by resolve_root_for
+                    "expirations_sample": exp_dates[:5],   # back-compat (was the only field before 3.1)
                     "strike_count":      len(sample_strikes),
                     "sample_strikes":    sample,
                 })
@@ -608,6 +686,169 @@ class TastyProbeClient:
                 "supports_spx":  any((r.get("root_symbol") == "SPX")  for r in roots),
                 "has_0dte_today": has_0dte,
             }
+
+    # ── Phase 3.1: root resolution ───────────────────────────────────
+
+    def resolve_root_for(
+        self,
+        underlying: str,
+        expiry: str,
+    ) -> dict[str, Any]:
+        """Pick the correct OPRA root for an `underlying` + `expiry` pair.
+
+        Returns a sanitized dict (NEVER raises on a missing chain):
+            {ok: True,  root_symbol: 'SPXW',
+             source:  'auto_chain' | 'direct_match',
+             available_roots: ['SPX', 'SPXW'],
+             expiry: '2026-06-01'}
+            {ok: False, reason: ..., requested_symbol, requested_expiry,
+             available_roots, sample_expirations_by_root}
+
+        Resolution rules:
+          - If `underlying` itself appears as a root with `expiry` listed
+            in its expirations → use it (source='direct_match').
+          - Else walk all roots in the chain; pick the first whose
+            expirations include `expiry`. SPXW is preferred over SPX
+            when both list the same expiry (SPXW is the daily/PM-settled
+            root the algo wants for 0DTE work).
+          - Else return ok=False with diagnostics.
+        """
+        sym = (underlying or "").upper().strip()
+        if not sym:
+            return {"ok": False, "reason": "empty underlying"}
+        chain = self.get_option_chain_summary(sym)
+        if not chain.get("ok"):
+            return {
+                "ok":               False,
+                "reason":           "chain_unavailable",
+                "requested_symbol": sym,
+                "requested_expiry": expiry,
+                "http_status":      chain.get("http_status"),
+            }
+        roots = chain.get("roots") or []
+        available = [r.get("root_symbol") for r in roots if r.get("root_symbol")]
+
+        # Direct match: caller asked for SPXW and SPXW lists the expiry.
+        for r in roots:
+            if r.get("root_symbol") == sym and expiry in (r.get("expirations") or []):
+                return {
+                    "ok":              True,
+                    "root_symbol":     sym,
+                    "source":          "direct_match",
+                    "available_roots": available,
+                    "expiry":          expiry,
+                }
+
+        # Auto-resolve: pick the first root whose expirations include `expiry`.
+        # SPXW wins over SPX when both list the same day (the daily/PM
+        # settlement is what 0DTE Vertical Wingy targets).
+        matches = [
+            r.get("root_symbol") for r in roots
+            if expiry in (r.get("expirations") or [])
+        ]
+        if matches:
+            picked = "SPXW" if "SPXW" in matches else matches[0]
+            return {
+                "ok":              True,
+                "root_symbol":     picked,
+                "source":          "auto_chain",
+                "available_roots": available,
+                "expiry":          expiry,
+                "matched_roots":   matches,
+            }
+
+        # No matching expiry — sanitized error with sample expirations
+        # per root so the caller can see what they SHOULD have asked for.
+        sample_by_root = {
+            r.get("root_symbol"): (r.get("expirations") or [])[:8]
+            for r in roots
+        }
+        return {
+            "ok":               False,
+            "reason":           "expiry_not_in_chain",
+            "requested_symbol": sym,
+            "requested_expiry": expiry,
+            "available_roots":  available,
+            "sample_expirations_by_root": sample_by_root,
+        }
+
+    # ── Phase 3.1: quote lookup with auto root resolution ────────────
+
+    def get_option_quotes_for_strikes(
+        self,
+        underlying: str,
+        expiry: str,
+        strikes: list[float],
+        right: str,
+        *,
+        root_symbol: str | None = None,
+    ) -> dict[str, Any]:
+        """High-level wrapper that auto-resolves SPX vs SPXW.
+
+        - If `root_symbol` is supplied → use it directly
+          (`root_resolution_source = 'explicit'`).
+        - Else if `underlying` already names a root the chain advertises
+          for `expiry` → use it (`source = 'direct_symbol'`).
+        - Else look up the chain and pick the right root, preferring SPXW
+          when ambiguous (`source = 'auto_chain'`).
+        - On unresolved expiry → return a sanitized error with samples
+          per available root; **no traceback, no silent guess**.
+
+        Output ALWAYS includes:
+            requested_underlying_symbol, resolved_root_symbol,
+            root_resolution_source, requested_symbols,
+            quote_count, quotes
+        """
+        if not self._token:
+            return {"ok": False, "reason": "not_authenticated"}
+
+        # 1. resolve root
+        if root_symbol:
+            resolved_root = root_symbol.upper().strip()
+            resolution_source = "explicit"
+            resolution_meta: dict[str, Any] = {
+                "ok": True, "root_symbol": resolved_root, "source": "explicit",
+                "expiry": expiry,
+            }
+        else:
+            resolution_meta = self.resolve_root_for(underlying, expiry)
+            if not resolution_meta.get("ok"):
+                # Clean sanitized error — propagate diagnostics.
+                return {
+                    "ok":                          False,
+                    "requested_underlying_symbol": (underlying or "").upper(),
+                    "requested_expiry":            expiry,
+                    "resolved_root_symbol":        None,
+                    "root_resolution_source":      "unresolved",
+                    "reason":                      resolution_meta.get("reason"),
+                    "available_roots":             resolution_meta.get("available_roots") or [],
+                    "sample_expirations_by_root":  resolution_meta.get(
+                        "sample_expirations_by_root") or {},
+                    "requested_symbols":           [],
+                    "quote_count":                 0,
+                    "quotes":                      [],
+                }
+            resolved_root = resolution_meta["root_symbol"]
+            resolution_source = resolution_meta.get("source") or "auto_chain"
+
+        # 2. build OCC symbols against the resolved root
+        occ_symbols = [
+            _build_occ_option_symbol(resolved_root, expiry, k, right)
+            for k in strikes
+        ]
+
+        # 3. fetch quotes
+        quote_result = self.get_option_quotes(occ_symbols)
+
+        # 4. annotate with resolution metadata
+        quote_result.update({
+            "requested_underlying_symbol": (underlying or "").upper(),
+            "resolved_root_symbol":        resolved_root,
+            "root_resolution_source":      resolution_source,
+            "available_roots":             resolution_meta.get("available_roots") or [],
+            "requested_symbols":           occ_symbols,
+        })
+        return quote_result
 
     # ── quotes ───────────────────────────────────────────────────────
 
@@ -689,11 +930,26 @@ class TastyProbeClient:
 
     # ── capabilities summary ─────────────────────────────────────────
 
-    def capabilities_summary(self, symbol: str = "SPX") -> dict[str, Any]:
+    def capabilities_summary(
+        self,
+        symbol: str = "SPX",
+        *,
+        capability_expiry: str | None = None,
+        capability_strikes: list[float] | None = None,
+        capability_right: str = "C",
+        root_symbol: str | None = None,
+    ) -> dict[str, Any]:
         """Run a sequence of read-only probes + report a capability matrix.
 
         Each individual sub-probe is non-fatal — if `/option-chains` fails
         it surfaces as `has_chain=False`, the probe doesn't abort.
+
+        Optional Phase 3.1 args trigger a REAL quote probe:
+          capability_expiry / capability_strikes / capability_right
+        When all three are supplied, `has_quotes` becomes True/False
+        (was always 'unknown_…' before) and the matrix adds:
+          quote_probe_count, quote_probe_resolved_root_symbol,
+          quote_probe_http_status, quote_probe_error.
         """
         caps: dict[str, Any] = {
             "has_auth":                  False,
@@ -721,18 +977,32 @@ class TastyProbeClient:
         caps["chain_supports_spx"]  = chain.get("supports_spx")
         caps["chain_has_0dte_today"] = chain.get("has_0dte_today")
 
-        # Probe quotes against a tiny sample only if we got a chain.
+        # Probe quotes against a tiny sample. Default behavior unchanged:
+        # report 'unknown' and tell the user to use the explicit --quotes
+        # subcommand. NEW (Phase 3.1): if the caller supplied capability
+        # quote args, run a REAL quote probe with auto-resolved root.
         if caps["has_chain"]:
-            roots = chain.get("roots") or []
-            sample_syms: list[str] = []
-            for root_entry in roots:
-                for s in root_entry.get("sample_strikes") or []:
-                    sample_syms.append(f"{root_entry.get('root_symbol')}_{s}")  # placeholder
-            # The placeholder above isn't a real OCC symbol; without a full
-            # walk of the chain we can't synthesize one safely. Skip the
-            # quote probe at the capabilities level — the user runs the
-            # explicit `--quotes` subcommand with real strikes.
-            caps["has_quotes"] = "unknown_via_capabilities_use_quotes_subcmd"
+            if (
+                capability_expiry
+                and capability_strikes
+                and capability_right
+            ):
+                qp = self.get_option_quotes_for_strikes(
+                    symbol,
+                    capability_expiry,
+                    list(capability_strikes),
+                    capability_right,
+                    root_symbol=root_symbol,
+                )
+                caps["has_quotes"] = bool(qp.get("ok") and qp.get("quote_count", 0) > 0)
+                caps["quote_probe_count"]                  = qp.get("quote_count", 0)
+                caps["quote_probe_resolved_root_symbol"]   = qp.get("resolved_root_symbol")
+                caps["quote_probe_root_resolution_source"] = qp.get("root_resolution_source")
+                caps["quote_probe_http_status"]            = qp.get("http_status")
+                if not qp.get("ok"):
+                    caps["quote_probe_error"] = qp.get("reason") or "unknown"
+            else:
+                caps["has_quotes"] = "unknown_via_capabilities_use_quotes_subcmd"
 
         if self._cfg.use_dxlink:
             tok = self.get_dxlink_token()

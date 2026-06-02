@@ -1054,3 +1054,158 @@ explanatory comments grouping into:
    --json | Out-File phase3_capabilities.json` — the capability matrix
    decides what Phase 4 looks like (`TastytradeQuoteProvider` shape,
    DXLink integration scope, etc.).
+
+---
+
+## 2026-06-01 (Phase 3.1) — root auto-resolution + capability quote probe + missing_fields fix
+
+**Driver — Dan's live probe results against production**:
+
+- OAuth auth: ✅ success
+- `--accounts`: ✅ returns 2 accounts (safely redacted to `****1234` etc.)
+- `--chain --symbol SPX`: ✅ returns both SPX (monthlies) AND SPXW (weeklies + 0DTE)
+- `--quotes --symbol SPX --expiry 2026-06-01 --strikes 7550,7570,7600 --right C` → **`quote_count: 0`**
+- `--quotes --symbol SPXW --expiry 2026-06-01 --strikes 7550,7570,7600 --right C` → **`quote_count: 6`**
+- Execution: still blocked by `TASTY_ENABLE_ORDER_SUBMISSION=false`,
+  `execution_blocked_by_safety_gate=true`, `probe_exposes_submit_path=false`
+
+**Conclusion**: Tasty is viable as the quote provider — the only thing
+missing was that the probe blindly stuffed `--symbol` into the OCC
+symbol root, so `--symbol SPX` for a 0DTE produced `SPX  ...` OCC
+symbols that match nothing (SPX has no 0DTE — those are all SPXW).
+
+### Fix: `resolve_root_for(underlying, expiry)`
+
+New method on `TastyProbeClient` that walks the chain payload, builds
+a `{root → [expirations]}` map, and picks the right root. Rules:
+
+1. **Direct match** — caller said `--symbol SPXW` AND the chain confirms
+   the expiry is in SPXW. Source: `direct_match`. No second chain lookup.
+2. **Auto-resolve** — caller said `--symbol SPX`, the chain has both
+   SPX and SPXW roots, and the expiry is in one of them. Source:
+   `auto_chain`. **SPXW preferred** when both list the same date.
+3. **Unresolved** — expiry doesn't appear under any root. Returns a
+   sanitized error with `available_roots` + `sample_expirations_by_root`
+   (first 8 per root) so the user can see what they SHOULD have asked
+   for. No traceback. No silent guess.
+
+### Fix: `get_option_quotes_for_strikes(...)` high-level method
+
+New convenience method that:
+1. Auto-resolves (via `resolve_root_for`) OR honors explicit
+   `root_symbol=` kwarg.
+2. Builds OCC symbols against the resolved root via the new
+   `_build_occ_option_symbol(root, expiry, strike, right)` helper
+   (extracted from `scripts/probe_tastytrade.py` so module + CLI share it).
+3. Calls `get_option_quotes(...)` with the right symbols.
+4. Annotates the response with `requested_underlying_symbol`,
+   `resolved_root_symbol`, `root_resolution_source`, `available_roots`.
+
+The low-level `get_option_quotes(equity_option_symbols)` is unchanged —
+power users who already have OCC symbols still hit it directly.
+
+### CLI additions
+
+- `--root-symbol SPX|SPXW|RUT|NDX|XSP` — explicit root override.
+  When supplied, skips the chain lookup entirely (faster, deterministic).
+  When omitted, the probe auto-resolves.
+- `--capability-expiry YYYY-MM-DD`, `--capability-strikes K1,K2,...`,
+  `--capability-right C|P` — when ALL THREE are supplied to
+  `--capabilities`, the probe runs a real quote probe and reports
+  `has_quotes: true|false` with `quote_probe_count`,
+  `quote_probe_resolved_root_symbol`, `quote_probe_root_resolution_source`,
+  `quote_probe_http_status`. Default behavior (no quote-probe args) is
+  the legacy `has_quotes: 'unknown_via_capabilities_use_quotes_subcmd'`.
+
+### Cosmetic fix: `--config` no longer reports legacy as missing under OAuth
+
+`TastyProbeConfig.missing_fields()` was a flat list — both auth modes'
+missing fields merged. So Dan's OAuth-complete `.env` still reported
+`TASTY_USERNAME` and `TASTY_PASSWORD` as "missing." Phase 3.1 returns:
+
+```jsonc
+{
+  "oauth_missing_fields":  [],                   // empty when OAuth complete
+  "legacy_missing_fields": ["TASTY_USERNAME", "TASTY_PASSWORD"],
+  "usable_auth_modes":     ["oauth"],            // empty when neither complete
+  "fully_configured":      true,
+}
+```
+
+`config_summary()` exposes:
+
+- `missing_fields` (top-level) — empty when ANY mode is complete;
+  otherwise the SHORTER of the two missing lists (so the user sees
+  which mode they're closer to completing).
+- `oauth_missing_fields` + `legacy_missing_fields` — always present
+  for full diagnostic visibility.
+- `usable_auth_modes` — new top-level key.
+
+### 23 new tests in `tests/test_phase3p1_root_resolution.py`
+
+| Category | Tests |
+|---|---|
+| `resolve_root_for` | SPX-daily→SPXW, SPX-monthly→SPX, direct-match-SPXW, unresolved-expiry-clean-error, chain-unavailable-clean-error |
+| `get_option_quotes_for_strikes` | auto-resolve SPX→SPXW for 0DTE (Dan's actual failure mode), explicit root override, unresolved-expiry-sanitized, output schema has all required keys |
+| `capabilities_summary` | optional quote-probe args set `has_quotes=True` + `quote_probe_*` keys; legacy behavior preserved when args omitted |
+| `missing_fields` | OAuth-complete suppresses legacy at top-level; legacy-complete suppresses OAuth at top-level; partial-OAuth shows shorter list at top-level + per-mode breakdowns |
+| CLI | `--root-symbol` flows through to OCC symbol on the wire; auto-resolve works without `--root-symbol`; `--capability-{expiry,strikes,right}` triggers real quote probe |
+| Safety gate | Phase 3 safety guarantees unchanged after Phase 3.1 — `submit_*` still raise `SafetyGateError`, `execution_blocked_by_safety_gate` still True |
+| OCC builder | parametrized math, rejects bad inputs |
+
+Plus 2 legacy tests in `test_phase3_tasty_probe.py` updated for the new
+`missing_fields` shape (cleared their assertion-on-flat-list to match
+the per-mode dict).
+
+Total: **165/165 passing** (was 142, +23 new). Ruff clean.
+
+### Also added to `.gitignore`
+
+```
+# Phase 3 probe — user-generated capability matrix dumps
+phase*_capabilities.json
+phase*_*.json
+tasty_probe_*.json
+```
+
+So Dan's `phase3_tasty_capabilities.json` (and any future probe output)
+doesn't surface as untracked in `git status`.
+
+### Still NOT done
+
+- No production `TastytradeQuoteProvider` — still deferred until Dan
+  reviews the Phase 3.1 capability matrix.
+- No DXLink WebSocket — token-only check via `/api-quote-tokens` still
+  the only DXLink-aware code.
+- No scanner wiring — `MockQuoteProvider` is still the scanner's only
+  quote source.
+- No order submission paths — `submit_order` / `submit_complex_order`
+  still raise `SafetyGateError`.
+- No `--dry-run-vertical` flag — `/orders/dry-run` is documented as
+  safe but stays behind a future explicit opt-in.
+
+### Next step
+
+1. Dan re-runs the failed quote command:
+   ```powershell
+   python -m scripts.probe_tastytrade --quotes --symbol SPX `
+       --expiry 2026-06-01 --strikes 7550,7570,7600,7605 --right C
+   ```
+   Expected output: `resolved_root_symbol: SPXW`,
+   `root_resolution_source: auto_chain`, `quote_count: 4`.
+
+2. Dan runs the full capability matrix with the quote probe:
+   ```powershell
+   python -m scripts.probe_tastytrade --capabilities --symbol SPX `
+       --capability-expiry 2026-06-01 `
+       --capability-strikes 7550,7570,7600 `
+       --capability-right C --json | Out-File phase3p1_capabilities.json
+   ```
+
+3. If `quote_probe_count > 0` AND `has_dxlink` is True → Phase 4 is
+   "design the TastytradeQuoteProvider class shape." If `has_dxlink`
+   is False but REST quotes work → Phase 4 is "REST-only first, DXLink
+   later" — slower polling but ships sooner.
+
+4. Validate quote freshness during RTH (the after-hours probe may
+   return EOD-stale values that look fine but aren't actionable).

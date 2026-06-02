@@ -453,8 +453,55 @@ python -m scripts.probe_tastytrade --capabilities --symbol SPX --json
 | `--auth-only` | Tasty creds are valid. Uses OAuth refresh flow when all 3 OAuth fields are set; falls back to legacy `/sessions` otherwise. |
 | `--accounts` | The authenticated user owns at least one account; lists redacted ids. |
 | `--chain` | `/option-chains/SPX/nested` returns expirations + strikes; reports whether SPX and/or SPXW roots are present and whether today is a 0DTE expiry. |
-| `--quotes` | `/market-data/by-type` returns bid/ask/mid/mark for OCC symbols built from `--strikes`. |
-| `--capabilities` | All of the above + a `has_streaming_token` check via `/api-quote-tokens` (when `TASTY_USE_DXLINK=true`). Outputs a capability matrix that includes `trade_scope_present`, `order_submission_enabled`, `execution_blocked_by_safety_gate`, `has_dxlink`, `has_certification_or_sandbox`. |
+| `--quotes` | `/market-data/by-type` returns bid/ask/mid/mark for OCC symbols built from `--strikes`. **Phase 3.1**: auto-resolves SPX vs SPXW root from the chain so `--symbol SPX --expiry <0DTE>` works without manually picking SPXW. Pass `--root-symbol SPXW` to override. |
+| `--capabilities` | All of the above + a `has_streaming_token` check via `/api-quote-tokens` (when `TASTY_USE_DXLINK=true`). Outputs a capability matrix that includes `trade_scope_present`, `order_submission_enabled`, `execution_blocked_by_safety_gate`, `has_dxlink`, `has_certification_or_sandbox`. **Phase 3.1**: optionally runs a real quote probe when `--capability-expiry` + `--capability-strikes` (+ `--capability-right`) are supplied — `has_quotes` becomes True/False with `quote_probe_count`, `quote_probe_resolved_root_symbol`, `quote_probe_http_status`. |
+
+##### SPX vs SPXW (root auto-resolution)
+
+Tastytrade's chain payload for `SPX` includes **two** roots:
+
+- `SPX` — AM-settled, 3rd-Friday monthlies only.
+- `SPXW` — PM-settled, **all** weeklies + 0DTE.
+
+When the probe gets `--symbol SPX --expiry <date>`, it walks the chain
+and picks the right root automatically:
+
+| Expiry exists under | Resolved root | `root_resolution_source` |
+|---|---|---|
+| `SPXW` only (most weekdays, including 0DTE) | `SPXW` | `auto_chain` |
+| `SPX` only (3rd Friday monthlies) | `SPX` | `auto_chain` |
+| Both | `SPXW` (preferred — daily/PM-settled) | `auto_chain` |
+| Caller passes `--root-symbol SPXW` | `SPXW` (no chain lookup) | `explicit` |
+| Caller passes `--symbol SPXW` directly and chain confirms | `SPXW` | `direct_match` |
+| Neither root lists the expiry | `None` | `unresolved` — error includes `sample_expirations_by_root` so the user can see what's available |
+
+The preferred command on 0DTE:
+
+```powershell
+python -m scripts.probe_tastytrade --quotes --symbol SPX --expiry 2026-06-01 `
+    --strikes 7550,7560,7570,7580,7590,7600 --right C
+# resolved_root_symbol: SPXW
+# root_resolution_source: auto_chain
+# quote_count: 6
+```
+
+Explicit override (skips the chain lookup — useful when you already know the root):
+
+```powershell
+python -m scripts.probe_tastytrade --quotes --symbol SPX --root-symbol SPXW `
+    --expiry 2026-06-01 --strikes 7550,7560,7570,7580,7590,7600 --right C
+# root_resolution_source: explicit
+```
+
+##### A note on after-hours quote freshness
+
+When the probe is run after RTH close, Tasty's REST quote
+(`/market-data/by-type`) may report values that match the official
+EOD close — the `updated-at` timestamp will reflect last trade, not
+"now." Quote freshness should be re-validated during an RTH session
+before any decision logic depends on it. The probe doesn't try to
+distinguish stale-but-EOD-correct from genuinely-stale yet — that's a
+Phase 4 concern when the production `TastytradeQuoteProvider` lands.
 
 **What the probe explicitly does NOT do**:
 

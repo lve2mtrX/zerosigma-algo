@@ -61,3 +61,8 @@ logs/
 # OS / misc
 *.bak
 *.tmp
+
+# Phase 3 probe — user-generated capability matrix dumps
+phase*_capabilities.json
+phase*_*.json
+tasty_probe_*.json

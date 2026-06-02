@@ -454,7 +454,11 @@ def test_cli_help_renders_without_credentials(capsys, monkeypatch):
 
 
 def test_cli_unconfigured_returns_zero_and_warns(capsys, monkeypatch):
-    for v in ("TASTY_USERNAME", "TASTY_PASSWORD"):
+    # Clear EVERY TASTY_* env var (OAuth + legacy) so the developer's
+    # local .env doesn't accidentally configure the probe.
+    for v in ("TASTY_USERNAME", "TASTY_PASSWORD",
+              "TASTY_CLIENT_ID", "TASTY_CLIENT_SECRET", "TASTY_REFRESH_TOKEN",
+              "TASTY_ACCOUNT_NUMBER", "TASTY_SCOPES"):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setattr("src.utils.config.load_dotenv", lambda *a, **k: False)
     monkeypatch.setattr(sys, "argv", ["scripts.probe_tastytrade", "--auth-only"])
@@ -462,8 +466,9 @@ def test_cli_unconfigured_returns_zero_and_warns(capsys, monkeypatch):
     rc = cli.main()
     assert rc == 0
     out = capsys.readouterr().out
-    assert "TASTY_USERNAME"   in out
-    assert "TASTY_PASSWORD"   in out
+    # Warning message references the credential blocks the user can set
+    # (still mentions both auth modes by name)
+    assert ("TASTY_USERNAME" in out) or ("TASTY_CLIENT_ID" in out)
     assert "Traceback"        not in out
 
 
@@ -802,15 +807,17 @@ def test_cli_config_with_partial_creds_lists_missing_fields(monkeypatch, capsys)
     assert rc == 0
     out = capsys.readouterr().out
     parsed = json.loads(out)
+    # Phase 3.1: top-level missing_fields shows the SHORTER mode list
+    # (OAuth is just one field away). Legacy still surfaces in per-mode.
     assert "TASTY_REFRESH_TOKEN" in parsed["missing_fields"]
-    assert "TASTY_USERNAME"      in parsed["missing_fields"]
+    assert "TASTY_REFRESH_TOKEN" in parsed["oauth_missing_fields"]
+    assert "TASTY_USERNAME"      in parsed["legacy_missing_fields"]
+    assert "TASTY_PASSWORD"      in parsed["legacy_missing_fields"]
+    assert parsed["usable_auth_modes"] == []     # neither mode complete
     assert parsed["trade_scope_present"] is True
     assert parsed["execution_blocked_by_safety_gate"] is True
-    # client_id is set but its VALUE never appears
+    # Secret values never appear (client_secret 'def' must not be echoed)
     text = json.dumps(parsed)
-    assert "abc" not in text or ("abc" in text and text.count("abc") <= 1)
-    # The point: even if the literal letter 'd' appears in JSON keys (it
-    # does — "client_secret"), the SECRET value 'def' must not be there.
     assert '"def"' not in text
 
 

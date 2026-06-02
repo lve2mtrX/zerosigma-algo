@@ -504,7 +504,7 @@ is present + `dxlink-url` is reachable in URL form. **Do NOT open the
 WebSocket** in the smoke probe — that's a deeper integration for the
 production QuoteProvider.
 
-### SPX vs SPXW
+### SPX vs SPXW — root resolution rule
 
 Two **separate underlyings** on the Tasty API even though both appear
 under `/option-chains/SPX/nested`:
@@ -513,6 +513,14 @@ under `/option-chains/SPX/nested`:
 |---|---|---|---|
 | `SPX` | AM | Monthly only (3rd Friday) | Cash-settled, exercise at open. |
 | `SPXW` | PM | Weeklies + 0DTE (Mon-Wed-Fri intraday) | The one VW v1 targets. |
+
+**Practical rule (locked by Phase 3.1 probe behavior)**: any daily /
+weekly / 0DTE SPX expiration uses the **SPXW** root, not SPX. Sending
+`SPX  YYMMDDCKKKKKKKK` for those dates returns 0 quotes; the OCC
+symbol must carry `SPXW` (padded to 6 chars: `SPXW  `). The 3rd-Friday
+monthly is the only date you'd legitimately encode as `SPX  `. When
+both AM and PM listings expire the same day, **prefer SPXW** — that's
+what `TastyProbeClient.resolve_root_for(...)` does automatically.
 
 On a date when both AM and PM listings expire (e.g. 3rd-Friday monthly
 PLUS the same-day weekly), **both appear in the same expiration bucket**

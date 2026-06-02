@@ -125,22 +125,39 @@ def cmd_quotes(
     expiry: str,
     strikes: list[float],
     right: str,
+    root_symbol: str | None,
     as_json: bool,
 ) -> int:
     auth = probe.login()
     if not auth.get("auth_success"):
         _print({"mode": "quotes", **auth}, as_json)
         return 0
-    occ_syms = [_build_occ_symbol(symbol, expiry, k, right) for k in strikes]
-    out = probe.get_option_quotes(occ_syms)
+    # Phase 3.1: the high-level method auto-resolves SPX→SPXW when needed.
+    out = probe.get_option_quotes_for_strikes(
+        symbol, expiry, strikes, right, root_symbol=root_symbol,
+    )
     out["mode"] = "quotes"
-    out["requested_symbols"] = occ_syms
     _print(out, as_json)
     return 0 if out.get("ok") else 1
 
 
-def cmd_capabilities(probe, symbol: str, as_json: bool) -> int:  # type: ignore[no-untyped-def]
-    caps = probe.capabilities_summary(symbol)
+def cmd_capabilities(                                            # type: ignore[no-untyped-def]
+    probe,
+    symbol: str,
+    as_json: bool,
+    *,
+    capability_expiry: str | None = None,
+    capability_strikes: list[float] | None = None,
+    capability_right: str = "C",
+    root_symbol: str | None = None,
+) -> int:
+    caps = probe.capabilities_summary(
+        symbol,
+        capability_expiry=capability_expiry,
+        capability_strikes=capability_strikes,
+        capability_right=capability_right,
+        root_symbol=root_symbol,
+    )
     caps["mode"] = "capabilities"
     _print(caps, as_json)
     return 0
@@ -201,6 +218,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--strikes", default="",    help="Comma-separated strikes (for --quotes)")
     parser.add_argument("--right",   default="C", choices=("C", "P"),
                         help="Option right for --quotes (default: C)")
+    parser.add_argument("--root-symbol", dest="root_symbol", default=None,
+                        choices=("SPX", "SPXW", "RUT", "NDX", "XSP"),
+                        help="Phase 3.1: explicit option root override. When omitted, "
+                             "the probe auto-resolves SPX vs SPXW from the chain — "
+                             "preferring SPXW for daily/weekly/0DTE expirations.")
+
+    # --capabilities optional quote-probe knobs (Phase 3.1)
+    parser.add_argument("--capability-expiry",  dest="capability_expiry",  default=None,
+                        help="With --capabilities: run a real quote probe at this expiry "
+                             "(YYYY-MM-DD). Requires --capability-strikes.")
+    parser.add_argument("--capability-strikes", dest="capability_strikes", default=None,
+                        help="With --capabilities: comma-separated strikes for the quote probe.")
+    parser.add_argument("--capability-right",   dest="capability_right", default="C",
+                        choices=("C", "P"),
+                        help="With --capabilities: option right for the quote probe (default: C).")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of text")
     args = parser.parse_args(argv)
 
@@ -250,10 +282,27 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return cmd_quotes(
             probe, symbol=args.symbol, expiry=args.expiry,
-            strikes=strike_list, right=args.right, as_json=args.json,
+            strikes=strike_list, right=args.right,
+            root_symbol=args.root_symbol,
+            as_json=args.json,
         )
     if args.capabilities:
-        return cmd_capabilities(probe, args.symbol, args.json)
+        cap_strikes: list[float] | None = None
+        if args.capability_strikes:
+            try:
+                cap_strikes = [
+                    float(s.strip()) for s in args.capability_strikes.split(",") if s.strip()
+                ]
+            except ValueError as exc:
+                print(f"ERROR: bad --capability-strikes value ({exc})", file=sys.stderr)
+                return 2
+        return cmd_capabilities(
+            probe, args.symbol, args.json,
+            capability_expiry=args.capability_expiry,
+            capability_strikes=cap_strikes,
+            capability_right=args.capability_right,
+            root_symbol=args.root_symbol,
+        )
 
     # No mode picked — print sanitized status. Useful CI sanity check.
     return cmd_status_only(probe, args.json)
