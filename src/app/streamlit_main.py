@@ -26,6 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.app.session_state import SessionConfig  # noqa: E402
+from src.config.strategy_profiles import list_profiles as list_run_profiles  # noqa: E402
 from src.paper.account import PaperAccount  # noqa: E402
 from src.paper.manual_tracker import (  # noqa: E402
     append_equity_point,
@@ -181,16 +182,43 @@ with st.sidebar:
     )
     st.caption(f"Execution mode:     `{CFG.providers.execution_active}`")
 
+    # Phase 6 — saved run-profile selector (read/display + prefill the daily
+    # selector default). SELECTION/CONFIG ONLY — no execution. Picking a profile
+    # prefills the daily-selector dropdown below; full prefill of every control
+    # is a Phase 6.1 nicety.
+    _prof_results = [r for r in list_run_profiles() if r.ok and r.profile]
+    _prof_options = ["(none)"] + [r.profile.profile_id for r in _prof_results]
+    chosen_profile_id = st.selectbox(
+        "Run profile (Phase 6)",
+        options=_prof_options,
+        index=0,
+        help="Saved strategy run-profiles (profiles/*.yaml). Read-only here — "
+             "the scanner CLI applies a profile via --profile. Selecting one "
+             "prefills the daily-selector default below.",
+    )
+    _active_profile = next(
+        (r.profile for r in _prof_results if r.profile.profile_id == chosen_profile_id),
+        None,
+    )
+    if _active_profile is not None:
+        st.caption(
+            f"`{_active_profile.profile_id}` — {_active_profile.profile_name}  ·  "
+            f"selector=`{_active_profile.daily_selector}`  ·  dte={_active_profile.target_dte}  ·  "
+            f"hash `{_active_profile.profile_hash()}`"
+        )
+
     # Phase 5 — daily trade selector mode (SELECTION ONLY; no execution).
     _sel_yaml = (
         (CFG.scanner.get("selector") or {}).get("daily_trade_selector")
         if isinstance(CFG.scanner, dict) else None
     ) or DEFAULT_SELECTOR_MODE
+    # Prefill from the chosen run-profile when one is selected (Phase 6).
+    _sel_default = _active_profile.daily_selector if _active_profile else _sel_yaml
     chosen_selector = st.selectbox(
         "Daily selector",
         options=list(SELECTOR_MODES),
-        index=(list(SELECTOR_MODES).index(_sel_yaml)
-               if _sel_yaml in SELECTOR_MODES else 0),
+        index=(list(SELECTOR_MODES).index(_sel_default)
+               if _sel_default in SELECTOR_MODES else 0),
         help="Chooses AT MOST ONE candidate from the generated set. Selection "
              "only — never executes or submits. score_best_valid = highest-score "
              "eligible (default).",

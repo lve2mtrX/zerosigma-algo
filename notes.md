@@ -1664,3 +1664,54 @@ fully prescriptive, so the discover/design synthesis added fragility without
 value. Full suite **351 passed**, ruff clean.
 
 **Next:** strategy-config persistence / forward runner (Phase 5.x) — NOT execution.
+
+---
+
+## 2026-06-02 — Phase 6: strategy config persistence + run profiles
+
+Save named, versioned run-profiles and run the scanner from one instead of long
+CLI strings. **Config/persistence only — no execution, no orders, no forward loop.**
+
+**New:** `src/config/strategy_profiles.py` (`StrategyProfile` dataclass +
+`validate_profile_dict` → clean error strings + `load_profile_file` (never raises)
++ deterministic `profile_hash`). `scripts/manage_profiles.py`
+(`--list/--show/--validate/--validate-all/--copy/--create-template`, `--force`).
+`profiles/` with 4 committed examples (all `enabled: false`, `stub`+`mock`, no
+secrets): score_best_1dte, call_only_1dte, best_credit_1dte, no_trade.
+
+**Scanner `--profile <id|path>`:** applies profile values as defaults.
+**Precedence: CLI > profile > env > YAML/default** — pre-filling profile values
+onto `args` (for CLI-backed knobs) + injecting into the SelectorConfig build (for
+the non-CLI selector knobs), so CLI flags still win.
+
+**Flag rename:** `--profile` now = strategy run-profile; the former risk flag is
+`--risk-profile`. Back-compat: a `--profile` value matching a known risk-profile
+name is treated as the risk profile (logged). Risk precedence: `--risk-profile`
+> run_profile.risk_profile > back-compat > YAML active. (No test used the old
+`--profile`, so the rename is safe; README updated.)
+
+**profile_hash:** sha256 of profile content EXCLUDING `created_at`/`updated_at`/
+`profile_path` (so cosmetic re-saves don't churn it; config changes do). Stamped
++ `profile_id/name/version/path/loaded` + `config_source_summary` into
+`ranked_candidates.csv` (7 columns APPENDED at the tail), the `decision_log.jsonl`
+snapshot (+ `pre/post_selector_decision` already there), and scan logs — so a
+future backtest/forward run can prove which exact profile produced a signal.
+
+**Streamlit:** read-only run-profile dropdown that prefills the daily-selector
+default (full control prefill deferred to Phase 6.1).
+
+**Tests:** `tests/test_phase6_profiles.py` (schema/validation/enum/type/secrets,
+hash determinism + timestamp-exclusion, example-profile validity/safety, CLI
+list/validate-all/show/copy/create-template + overwrite-guard) and
+`tests/test_phase6_scanner_profile.py` (profile loads values, CLI overrides
+profile, profile metadata in CSV+JSONL, unknown profile → clean rc=5, risk
+back-compat, no-profile default unchanged). `test_phase4p1_csv_columns.py`
+extended additively for the 7 Phase 6 tail columns. Full suite **376 passed**,
+ruff clean.
+
+**Process note:** workflows failed twice on Phase 5 (this codebase) on the
+StructuredOutput crash; Phase 5 + 6 were done via direct implementation, which is
+more reliable for prescriptive specs. Phase 6 also avoided a non-obvious
+`--profile` flag collision a workflow agent might have missed.
+
+**Next:** forward runner / start-stop local paper monitoring (Phase 6.x) — NOT execution.

@@ -904,8 +904,79 @@ python -m scripts.run_scanner --structure-provider zerosigma_api `
 ```
 
 The default `score_best_valid` matches prior behavior (the highest-score
-eligible candidate is chosen) while now stamping explicit selector fields. The
-**next phase is strategy-config persistence / a forward runner — NOT execution.**
+eligible candidate is chosen) while now stamping explicit selector fields.
+
+##### Phase 6 — strategy run-profiles (CONFIG / PERSISTENCE ONLY — no execution)
+
+Save a named, versioned bundle of scanner/selector settings as a YAML file and
+run the scanner from it instead of a long flag string. **This is configuration
+persistence only — no execution, no orders, no forward runner loop.** Profiles
+reference providers by NAME; **secrets stay in `.env`, never in a profile.**
+
+Profiles live in `profiles/` (committed example profiles, all `enabled: false`,
+`stub` structure + `mock` quotes):
+
+```
+profiles/vertical_wing_score_best_1dte.yaml   # score_best_valid, 1DTE
+profiles/vertical_wing_call_only_1dte.yaml    # call_credit_only, puts off
+profiles/vertical_wing_best_credit_1dte.yaml  # best_credit_valid, min credit 0.50
+profiles/vertical_wing_no_trade.yaml          # observe-only (no_trade)
+```
+
+**Schema** (`src/config/strategy_profiles.py`, versioned + validated): required —
+`profile_id, profile_name, version, enabled, strategy_id, strategy_type, symbol,
+structure_provider, quote_provider, target_dte, strict_target_dte, daily_selector,
+max_trades_per_day, allow_call_credit, allow_put_credit,
+require_selector_eligible_base, require_quote_validation, require_score_edge,
+min_selector_score, min_selector_credit, min_selector_distance_from_spot,
+max_selector_distance_from_spot, risk_profile, notes, created_at, updated_at`;
+optional strategy params (loaded, not all wired this phase) — `wing_threshold,
+spread_width, entry_window_start, entry_window_end, no_trade_score_threshold,
+min_credit, max_planned_stop_risk_dollars, max_theoretical_loss_dollars`. Enums
+(`structure_provider`, `quote_provider`, `daily_selector`) are validated;
+`execution_mode`/secret keys are **rejected**.
+
+**Manage profiles** (`scripts/manage_profiles.py` — config only, no execution):
+
+```powershell
+python -m scripts.manage_profiles --list
+python -m scripts.manage_profiles --show vertical_wing_score_best_1dte
+python -m scripts.manage_profiles --validate vertical_wing_score_best_1dte
+python -m scripts.manage_profiles --validate-all
+python -m scripts.manage_profiles --copy SRC_ID NEW_ID [--force]
+python -m scripts.manage_profiles --create-template NEW_ID [--force]
+```
+`--copy` / `--create-template` refuse to overwrite an existing file without `--force`.
+
+**Run the scanner from a profile** (`--profile <id|path>`):
+
+```powershell
+python -m scripts.run_scanner --profile vertical_wing_score_best_1dte --print-candidates
+python -m scripts.run_scanner --profile profiles/vertical_wing_call_only_1dte.yaml --quote-provider mock --print-candidates
+python -m scripts.run_scanner --profile vertical_wing_best_credit_1dte --quote-provider tastytrade --print-candidates
+```
+
+**Precedence: `CLI > profile > env > YAML/default`.** A `--profile` value supplies
+defaults for every scanner knob it carries; any explicit CLI flag still wins (e.g.
+the third command overrides the profile's `mock` with `tastytrade`).
+
+> **Flag rename:** `--profile` now selects a *strategy run-profile* (Phase 6). The
+> former risk-profile flag is **`--risk-profile`**. For back-compat, a `--profile`
+> value that isn't a strategy profile but matches a known risk-profile name is
+> still treated as the risk profile (with a log note). Risk-profile precedence:
+> `--risk-profile` > the run-profile's `risk_profile` field > back-compat > YAML active.
+
+**Run-profile hash.** Each profile has a deterministic `profile_hash` (sha256 of
+the profile content, **excluding** `created_at`/`updated_at`/`profile_path` so
+cosmetic re-saves don't churn it). The hash + `profile_id`/`profile_name`/
+`profile_version`/`profile_path`/`profile_loaded`/`config_source_summary` are
+stamped into `ranked_candidates.csv`, the `decision_log.jsonl` snapshot, and the
+scan logs — so a later backtest/forward run can prove which exact profile produced
+a signal. The Streamlit sidebar shows a read-only run-profile selector that
+prefills the daily-selector default.
+
+This run-profile layer **feeds the next phase: a forward (start/stop) local
+paper-monitoring runner — still NOT execution.**
 
 ##### What's still missing under `public_only`
 

@@ -64,6 +64,13 @@ PHASE_5_APPENDED = (
     "selector_conflict_detected", "selector_no_trade_reason",
 )
 
+# Phase 6 APPENDED at the TAIL (after every Phase 5 column) — run-profile
+# provenance stamped onto each row by the scanner. Order is load-bearing.
+PHASE_6_APPENDED = (
+    "profile_id", "profile_name", "profile_version", "profile_path",
+    "profile_loaded", "profile_hash", "config_source_summary",
+)
+
 
 def test_default_ranked_fields_keeps_phase_le_4_tail_intact():
     """Every Phase ≤4 column appears in _DEFAULT_RANKED_FIELDS BEFORE the
@@ -226,8 +233,24 @@ def test_existing_phase_le_4_column_indices_preserved():
     # confirm everything after is a Phase 4.1 OR Phase 4.2 appended column.
     # (Phase 4.2 tacked six more columns at the tail; allow BOTH tuples.)
     qrr = fields.index("quote_rejection_reason")
-    allowed = set(PHASE_4P1_APPENDED) | set(PHASE_4P2_APPENDED) | set(PHASE_5_APPENDED)
+    allowed = (set(PHASE_4P1_APPENDED) | set(PHASE_4P2_APPENDED)
+               | set(PHASE_5_APPENDED) | set(PHASE_6_APPENDED))
     for col in fields[qrr + 1:]:
         assert col in allowed, (
             f"unexpected column {col!r} appended after quote_rejection_reason"
         )
+
+
+def test_default_ranked_fields_contains_all_phase6_columns():
+    fields = set(rs._DEFAULT_RANKED_FIELDS)
+    for col in PHASE_6_APPENDED:
+        assert col in fields, f"missing Phase 6 column {col!r}"
+
+
+def test_phase6_columns_appended_at_tail_after_phase5():
+    fields = list(rs._DEFAULT_RANKED_FIELDS)
+    last_phase5_idx = max(fields.index(c) for c in PHASE_5_APPENDED)
+    first_phase6_idx = min(fields.index(c) for c in PHASE_6_APPENDED)
+    assert last_phase5_idx < first_phase6_idx, (
+        "Phase 6 columns must APPEND after every Phase 5 column"
+    )

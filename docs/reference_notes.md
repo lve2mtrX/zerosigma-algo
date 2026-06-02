@@ -1070,3 +1070,48 @@ REQUIRE_SELECTOR_ELIGIBLE_BASE, REQUIRE_QUOTE_VALIDATION, REQUIRE_SCORE_EDGE,
 NO_TRADE_ON_SELECTOR_CONFLICT, MIN_SELECTOR_SCORE, MIN_SELECTOR_CREDIT,
 MIN_SELECTOR_DISTANCE_FROM_SPOT, MAX_SELECTOR_DISTANCE_FROM_SPOT,
 LOWEST_BREACH_RISK_{DISTANCE,CREDIT,RISK}_WEIGHT.
+
+---
+
+## 14. Phase 6 — strategy run-profiles (config persistence)
+
+CONFIG ONLY — no execution. Module: `src/config/strategy_profiles.py` (stdlib +
+PyYAML; imports `SELECTOR_MODES` for enum validation). Storage: `profiles/*.yaml`.
+
+### Schema (versioned)
+
+Required: profile_id, profile_name, version, enabled, strategy_id, strategy_type,
+symbol, structure_provider, quote_provider, target_dte, strict_target_dte,
+daily_selector, max_trades_per_day, allow_call_credit, allow_put_credit,
+require_selector_eligible_base, require_quote_validation, require_score_edge,
+min_selector_score, min_selector_credit, min_selector_distance_from_spot,
+max_selector_distance_from_spot, risk_profile, notes, created_at, updated_at.
+(The four `*_selector_*` numerics may be null = no filter.)
+Optional strategy params (loaded, not all wired this phase): wing_threshold,
+spread_width, entry_window_start, entry_window_end, no_trade_score_threshold,
+min_credit, max_planned_stop_risk_dollars, max_theoretical_loss_dollars.
+
+Enums validated: structure_provider ∈ {stub, zerosigma_api}; quote_provider ∈
+{mock, null, tastytrade}; daily_selector ∈ SELECTOR_MODES. `validate_profile_dict`
+also REJECTS `execution_mode` and secret-bearing keys (refresh_token,
+client_secret, password, …) — profiles must never carry execution intent or secrets.
+
+### profile_hash
+
+`sha256(json.dumps(content, sort_keys=True))[:16]` over the profile dict MINUS
+`{created_at, updated_at, profile_path}` (the `_HASH_EXCLUDE` set). Rationale:
+timestamps + file location are volatile; everything else (id, name, notes, version,
+every config knob) is part of the profile's identity. Deterministic across loads;
+changes iff a non-timestamp field changes.
+
+### Scanner precedence (CLI > profile > env > YAML > default)
+
+`run_scanner` loads the profile right after `load_config`, then PRE-FILLS `args`
+for CLI-backed knobs (only when the user didn't pass them) so the existing per-knob
+resolution naturally yields profile > env > YAML; the non-CLI selector knobs
+(`require_selector_eligible_base`, `require_quote_validation`,
+`min/max_selector_distance_from_spot`) consult the profile directly in the
+SelectorConfig build. `--profile` = strategy run-profile (id or path);
+`--risk-profile` = the former risk-profile flag. Risk precedence: `--risk-profile`
+> run_profile.risk_profile > `--profile`-as-risk back-compat > YAML active_profile.
+Unknown `--profile` (not a strategy profile, not a known risk name) → clean exit 5.

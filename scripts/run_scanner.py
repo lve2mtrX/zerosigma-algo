@@ -47,8 +47,17 @@ QUOTE_AGE_CLOCK_SKEW_TOLERANCE_SECONDS = _quote_age_clock_skew_tolerance_seconds
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="ZerσSigma algo scanner — one-shot tick")
+    # Phase 6 — --profile selects a STRATEGY RUN-PROFILE (id or path) whose values
+    # become scanner defaults (CLI flags still override). Back-compat: if the value
+    # is not a strategy profile but matches a known RISK profile name, it is treated
+    # as the risk profile (with a log note). Use --risk-profile for the explicit
+    # risk profile (the former meaning of --profile).
     parser.add_argument("--profile", default=None,
-                        help="risk profile name (defaults to active_profile in YAML)")
+                        help="strategy run-profile id or path (profiles/<id>.yaml). "
+                             "Phase 6. CLI flags override profile values.")
+    parser.add_argument("--risk-profile", dest="risk_profile", default=None,
+                        help="risk profile name (defaults to the run-profile's risk_profile, "
+                             "then active_profile in YAML)")
     parser.add_argument("--strategy", default=None,
                         help="restrict to one strategy_id (default: all enabled)")
     parser.add_argument("--symbol",   default=None, help="symbol to scan (default: SPX)")
@@ -143,7 +152,91 @@ def main() -> int:
     log = get_logger("scanner")
     cfg = load_config(REPO_ROOT)
 
-    # ── Phase 4.1 — resolve target_dte knobs (CLI > env > YAML > default) ──
+    # ── Phase 6 — load a strategy RUN-PROFILE (config persistence only) ──
+    # --profile <id|path> supplies scanner defaults; CLI flags still override
+    # (precedence CLI > profile > env > YAML/default). Back-compat: a --profile
+    # value that isn't a strategy profile but IS a known risk-profile name is
+    # treated as the risk profile. CONFIG ONLY — no execution, no orders.
+    from src.config.strategy_profiles import load_profile_file as _load_run_profile
+
+    # Knobs the user EXPLICITLY set on the CLI (snapshot BEFORE profile pre-fill)
+    # — drives config_source_summary and the CLI > profile precedence.
+    _cli_knobs = (
+        "target_dte", "strict_target_dte", "daily_selector", "max_trades_per_day",
+        "allow_call_credit", "allow_put_credit", "require_score_edge",
+        "structure_provider", "quote_provider", "symbol",
+        "min_selector_score", "min_selector_credit", "dte_mode",
+    )
+    cli_overrides = [k for k in _cli_knobs if getattr(args, k, None) is not None]
+
+    run_profile = None
+    profile_loaded = False
+    profile_validation_passed: bool | None = None
+    profile_path: str | None = None
+    risk_fallback_name: str | None = None
+    if args.profile:
+        _res = _load_run_profile(args.profile)
+        if _res.ok:
+            run_profile = _res.profile
+            profile_loaded = True
+            profile_validation_passed = True
+            profile_path = _res.path
+        elif args.profile in (cfg.risk_profiles or {}):
+            risk_fallback_name = args.profile
+            log.info("--profile %r is not a strategy run-profile; treating it as a "
+                     "risk profile (back-compat). Use --risk-profile to be explicit.",
+                     args.profile)
+        else:
+            profile_validation_passed = False
+            log.error("--profile %r could not be loaded as a strategy run-profile:", args.profile)
+            for _e in _res.errors:
+                log.error("  - %s", _e)
+            return 5
+
+    # Apply profile values as DEFAULTS for any CLI-backed knob the user did NOT
+    # set (so CLI > profile). Pre-filling onto `args` lets the existing per-knob
+    # resolution naturally yield profile > env > YAML.
+    if run_profile is not None:
+        for _k in ("target_dte", "strict_target_dte", "daily_selector",
+                   "max_trades_per_day", "allow_call_credit", "allow_put_credit",
+                   "require_score_edge", "structure_provider", "quote_provider",
+                   "symbol", "min_selector_score", "min_selector_credit"):
+            if getattr(args, _k, None) is None:
+                _pv = getattr(run_profile, _k, None)
+                if _pv is not None:
+                    setattr(args, _k, _pv)
+
+    # Risk profile precedence: --risk-profile > run_profile.risk_profile >
+    # --profile-as-risk back-compat > YAML active_profile.
+    if args.risk_profile:
+        risk_profile_name = args.risk_profile
+    elif run_profile is not None and run_profile.risk_profile:
+        risk_profile_name = run_profile.risk_profile
+    elif risk_fallback_name:
+        risk_profile_name = risk_fallback_name
+    else:
+        risk_profile_name = cfg.active_risk_profile
+
+    _profile_hash = run_profile.profile_hash() if run_profile is not None else None
+    config_source_summary = (
+        (f"profile={run_profile.profile_id}(hash {_profile_hash})"
+         if run_profile is not None else "profile=none")
+        + (f" cli_overrides={cli_overrides}" if cli_overrides else " cli_overrides=[]")
+    )
+    profile_meta = {
+        "profile_id":      (run_profile.profile_id if run_profile else None),
+        "profile_name":    (run_profile.profile_name if run_profile else None),
+        "profile_version": (run_profile.version if run_profile else None),
+        "profile_path":    profile_path,
+        "profile_loaded":  profile_loaded,
+        "profile_hash":    _profile_hash,
+        "config_source_summary": config_source_summary,
+    }
+    log.info("run-profile: id=%s name=%s path=%s loaded=%s validation_passed=%s hash=%s",
+             profile_meta["profile_id"], profile_meta["profile_name"], profile_path,
+             profile_loaded, profile_validation_passed, _profile_hash)
+
+    # ── Phase 4.1 — resolve target_dte knobs (CLI > profile > env > YAML > default) ──
     expiry_cfg = (cfg.scanner.get("expiry") or {}) if isinstance(cfg.scanner, dict) else {}
 
     def _env_bool(name: str, default: bool) -> bool:
@@ -255,13 +348,16 @@ def main() -> int:
         max_trades_per_day=max_trades_per_day,
         allow_call_credit=allow_call_credit,
         allow_put_credit=allow_put_credit,
-        require_selector_eligible_base=_env_bool(
-            "REQUIRE_SELECTOR_ELIGIBLE_BASE",
-            bool(selector_cfg_yaml.get("require_selector_eligible_base", True)),
+        # Phase 6: these have no CLI flag, so profile (when loaded) beats env/YAML.
+        require_selector_eligible_base=(
+            run_profile.require_selector_eligible_base if run_profile is not None
+            else _env_bool("REQUIRE_SELECTOR_ELIGIBLE_BASE",
+                           bool(selector_cfg_yaml.get("require_selector_eligible_base", True)))
         ),
-        require_quote_validation=_env_bool(
-            "REQUIRE_QUOTE_VALIDATION",
-            bool(selector_cfg_yaml.get("require_quote_validation", True)),
+        require_quote_validation=(
+            run_profile.require_quote_validation if run_profile is not None
+            else _env_bool("REQUIRE_QUOTE_VALIDATION",
+                           bool(selector_cfg_yaml.get("require_quote_validation", True)))
         ),
         require_score_edge=require_score_edge,
         no_trade_on_selector_conflict=_env_bool(
@@ -276,16 +372,24 @@ def main() -> int:
             float(args.min_selector_credit) if args.min_selector_credit is not None
             else _env_float_opt("MIN_SELECTOR_CREDIT", "min_selector_credit")
         ),
-        min_selector_distance_from_spot=_env_float_opt(
-            "MIN_SELECTOR_DISTANCE_FROM_SPOT", "min_selector_distance_from_spot"),
-        max_selector_distance_from_spot=_env_float_opt(
-            "MAX_SELECTOR_DISTANCE_FROM_SPOT", "max_selector_distance_from_spot"),
+        min_selector_distance_from_spot=(
+            run_profile.min_selector_distance_from_spot
+            if (run_profile is not None and run_profile.min_selector_distance_from_spot is not None)
+            else _env_float_opt("MIN_SELECTOR_DISTANCE_FROM_SPOT", "min_selector_distance_from_spot")
+        ),
+        max_selector_distance_from_spot=(
+            run_profile.max_selector_distance_from_spot
+            if (run_profile is not None and run_profile.max_selector_distance_from_spot is not None)
+            else _env_float_opt("MAX_SELECTOR_DISTANCE_FROM_SPOT", "max_selector_distance_from_spot")
+        ),
         lowest_breach_risk_distance_weight=_env_float("LOWEST_BREACH_RISK_DISTANCE_WEIGHT", 1.0),
         lowest_breach_risk_credit_weight=_env_float("LOWEST_BREACH_RISK_CREDIT_WEIGHT", 0.25),
         lowest_breach_risk_risk_weight=_env_float("LOWEST_BREACH_RISK_RISK_WEIGHT", 1.0),
     )
 
-    profile_name = args.profile or cfg.active_risk_profile
+    # Phase 6 — risk profile resolved earlier (risk_profile_name): --risk-profile
+    # > run_profile.risk_profile > --profile-as-risk back-compat > YAML active.
+    profile_name = risk_profile_name
     profile = load_profile(cfg.risk_profiles, profile_name)
     session = SessionConfig.from_profile(profile)
 
@@ -398,6 +502,7 @@ def main() -> int:
             quote_request_skipped_reason="strict_target_dte_unavailable",
             selector_blockers=["strict_target_dte_unavailable"],
             selector_config=selector_config,
+            profile_meta=profile_meta,
         )
     if not required_strikes:
         return _emit_skipped_quote_no_trade(
@@ -409,6 +514,7 @@ def main() -> int:
             quote_request_skipped_reason="no_required_strikes",
             selector_blockers=["no_required_strikes", "insufficient_structure"],
             selector_config=selector_config,
+            profile_meta=profile_meta,
         )
 
     chain = quote_provider.get_option_chain(symbol, expiry=eff_expiry, request=quote_request)
@@ -566,6 +672,14 @@ def main() -> int:
             "max_trades_per_day":         sel_result.max_trades_per_day,
             "selector_conflict_detected": sel_result.selector_conflict_detected,
             "selector_no_trade_reason":   sel_result.selector_no_trade_reason,
+            # Phase 6 — run-profile provenance (same for every row this tick)
+            "profile_id":            profile_meta["profile_id"],
+            "profile_name":          profile_meta["profile_name"],
+            "profile_version":       profile_meta["profile_version"],
+            "profile_path":          profile_meta["profile_path"],
+            "profile_loaded":        profile_meta["profile_loaded"],
+            "profile_hash":          profile_meta["profile_hash"],
+            "config_source_summary": profile_meta["config_source_summary"],
         })
 
     post_selector_decision = "NO_TRADE"
@@ -592,6 +706,14 @@ def main() -> int:
             "pre_selector_decision":      decision.decision,
             "post_selector_decision":     post_selector_decision,
             "selector_result":            _selector_result_summary(sel_result, ranked_rows),
+            # Phase 6 — run-profile provenance
+            "profile_id":            profile_meta["profile_id"],
+            "profile_name":          profile_meta["profile_name"],
+            "profile_version":       profile_meta["profile_version"],
+            "profile_path":          profile_meta["profile_path"],
+            "profile_loaded":        profile_meta["profile_loaded"],
+            "profile_hash":          profile_meta["profile_hash"],
+            "config_source_summary": profile_meta["config_source_summary"],
         })
         if not args.dry_run:
             log_decision(output_root, decision, snapshot_summary, ts)
@@ -693,7 +815,10 @@ _DEFAULT_RANKED_FIELDS = [
     "selector_score_components", "selector_tiebreaker", "side_allowed_by_config",
     "selector_config_summary", "max_trades_per_day",
     "selector_conflict_detected", "selector_no_trade_reason",
-]  # used only when no candidate rows exist — keep in sync with _candidate_row() + selector stamping
+    # ── Phase 6 — run-profile provenance columns, APPENDED at the TAIL ──
+    "profile_id", "profile_name", "profile_version", "profile_path",
+    "profile_loaded", "profile_hash", "config_source_summary",
+]  # used only when no candidate rows exist — keep in sync with _candidate_row() + selector/profile stamping
 
 
 def _candidate_row(
@@ -1166,6 +1291,7 @@ def _emit_skipped_quote_no_trade(
     quote_request_skipped_reason: str,
     selector_blockers: list,
     selector_config=None,                         # type: ignore[no-untyped-def]
+    profile_meta: dict | None = None,
 ) -> int:
     """Phase 4.2.1 — emit a clean NO_TRADE WITHOUT calling the quote provider.
 
@@ -1266,6 +1392,14 @@ def _emit_skipped_quote_no_trade(
         "selected_trade":                False,
         "post_selector_decision":        "NO_TRADE",
         "selector_no_trade_reason":      f"quote_request_skipped:{quote_request_skipped_reason}",
+        # ── Phase 6 — run-profile provenance (None when no profile loaded) ──
+        "profile_id":            (profile_meta or {}).get("profile_id"),
+        "profile_name":          (profile_meta or {}).get("profile_name"),
+        "profile_version":       (profile_meta or {}).get("profile_version"),
+        "profile_path":          (profile_meta or {}).get("profile_path"),
+        "profile_loaded":        (profile_meta or {}).get("profile_loaded", False),
+        "profile_hash":          (profile_meta or {}).get("profile_hash"),
+        "config_source_summary": (profile_meta or {}).get("config_source_summary"),
     }
 
     if not args.dry_run:

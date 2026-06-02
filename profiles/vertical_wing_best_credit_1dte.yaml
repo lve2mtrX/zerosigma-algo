@@ -1,0 +1,38 @@
+# ZerσSigma Algo — example run profile (Phase 6). SAFE: stub structure + mock
+# quotes, no credentials, no execution. `enabled: false` until you opt in.
+# Run (live override): python -m scripts.run_scanner --profile vertical_wing_best_credit_1dte --quote-provider tastytrade --print-candidates
+#   (the --quote-provider flag OVERRIDES this profile's mock default — CLI > profile)
+profile_id: vertical_wing_best_credit_1dte
+profile_name: Vertical Wing — best-credit, 1DTE
+version: 1
+enabled: false
+strategy_id: vertical_wing_v1
+strategy_type: vertical_credit_spread
+symbol: SPX
+structure_provider: stub
+quote_provider: mock
+target_dte: 1
+strict_target_dte: false
+daily_selector: best_credit_valid
+max_trades_per_day: 1
+allow_call_credit: true
+allow_put_credit: true
+require_selector_eligible_base: true
+require_quote_validation: true
+require_score_edge: false
+min_selector_score: null
+min_selector_credit: 0.50
+min_selector_distance_from_spot: null
+max_selector_distance_from_spot: null
+risk_profile: aggressive_paper_10k
+notes: "Pick the highest-credit eligible candidate at 1DTE (min credit 0.50). Mock quotes by default; pass --quote-provider tastytrade for live."
+created_at: "2026-06-02T00:00:00+00:00"
+updated_at: "2026-06-02T00:00:00+00:00"
+wing_threshold: null
+spread_width: null
+entry_window_start: null
+entry_window_end: null
+no_trade_score_threshold: null
+min_credit: null
+max_planned_stop_risk_dollars: null
+max_theoretical_loss_dollars: null
