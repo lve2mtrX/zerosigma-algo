@@ -45,7 +45,10 @@ def _quote_age_clock_skew_tolerance_seconds() -> float:
 QUOTE_AGE_CLOCK_SKEW_TOLERANCE_SECONDS = _quote_age_clock_skew_tolerance_seconds()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    # Phase 7 — `argv` lets the forward runner invoke the SAME scanner code path
+    # in-process (run_forward.py) without duplicating logic. argv=None preserves
+    # the existing CLI behavior exactly (argparse reads sys.argv).
     parser = argparse.ArgumentParser(description="ZerσSigma algo scanner — one-shot tick")
     # Phase 6 — --profile selects a STRATEGY RUN-PROFILE (id or path) whose values
     # become scanner defaults (CLI flags still override). Back-compat: if the value
@@ -118,7 +121,7 @@ def main() -> int:
                         help="minimum score for selection eligibility")
     parser.add_argument("--min-selector-credit", dest="min_selector_credit", type=float, default=None,
                         help="minimum credit for selection eligibility")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     import os as _os
 

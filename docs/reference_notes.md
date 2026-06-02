@@ -1115,3 +1115,41 @@ SelectorConfig build. `--profile` = strategy run-profile (id or path);
 `--risk-profile` = the former risk-profile flag. Risk precedence: `--risk-profile`
 > run_profile.risk_profile > `--profile`-as-risk back-compat > YAML active_profile.
 Unknown `--profile` (not a strategy profile, not a known risk name) → clean exit 5.
+
+---
+
+## 15. Phase 7 — forward runner (local paper monitoring)
+
+MONITORING + LOCAL LEDGER ONLY — no execution/orders/preview. `scripts/run_forward.py`.
+
+### No duplicated scanner logic
+`scripts/run_scanner.py::main` gained `main(argv=None)` + `parse_args(argv)` (the
+ONLY scanner change; argv=None preserves the exact CLI). The forward runner calls
+`run_scanner.main([...])` IN-PROCESS with `OUTPUT_DIR` pointed at
+`{run_dir}/scanner`, then reads that tick's result from the scanner's own files:
+- `scanner/latest/decision_log.jsonl` — lines APPENDED; read `[pre_count:]` to get
+  THIS tick's decision record(s); `snapshot_summary` carries
+  pre/post_selector_decision, selected_trade, selector_no_trade_reason, profile_*.
+- `scanner/latest/ranked_candidates.csv` — OVERWRITTEN each tick (snapshot); rows
+  with `selected_trade==True` become signal rows.
+
+### Ledger layout
+`outputs/forward/runs/{run_id}/` (run_id = `{YYYYMMDD_HHMMSS}_{profile_id}`):
+run_manifest.json, tick_log.jsonl, signal_log.jsonl, selected_trades.csv,
+no_trade_log.jsonl, heartbeat.json, scanner/. Mirror → `outputs/forward/latest/`
+(manifest + heartbeat). `.gitignore`: `outputs/forward/*` (+ `!.../.gitkeep`).
+
+### Manifest status lifecycle
+`running` → `completed` (max_ticks / --once) | `stopped` (KeyboardInterrupt, exit 0)
+| `error` (scanner rc≠0 or tick exception, exit nonzero) | `dry_run` (--dry-run,
+no scan). Always carries `no_execution=true`, `execution_mode=disabled_local_monitoring`.
+
+### Ledger duplicate-signal identity (NOT execution dedup)
+`profile_hash | symbol | selected_expiry | side | short_strike | long_strike |
+target_dte | trade_date`. Repeat within a run → not re-appended; tick flagged
+`duplicate_selected_signal=true`.
+
+### Market-hours guard
+`_is_rth(dt)` (pure): weekday AND 09:30 ≤ ET ≤ 16:00. `--market-hours-only` skips
+scanning outside RTH (`status=skipped_market_closed`). Default off (deterministic
+tests). No holiday calendar this phase (Phase 7.x).

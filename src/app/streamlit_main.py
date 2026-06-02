@@ -929,6 +929,68 @@ if paper_account.equity_curve:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Forward runs (Phase 7) — READ-ONLY monitoring view. No start/stop here.
+# ──────────────────────────────────────────────────────────────────────
+
+st.header("Forward runs (monitoring)")
+st.caption(
+    "Read-only view of the local forward runner "
+    "(`python -m scripts.run_forward --profile <id>`). Monitoring + local ledger "
+    "only — **no execution, no broker orders.** Start/stop controls are a future "
+    "phase (7.1)."
+)
+_fwd_latest = OUTPUT_ROOT / "forward" / "latest"
+_fwd_manifest = _fwd_latest / "run_manifest.json"
+if not _fwd_manifest.is_file():
+    st.info("No forward runs yet. Run `python -m scripts.run_forward --profile "
+            "vertical_wing_score_best_1dte --once` to create one.")
+else:
+    import json as _fjson
+    try:
+        _man = _fjson.loads(_fwd_manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        _man = {}
+    _hb_path = _fwd_latest / "heartbeat.json"
+    _hb = {}
+    if _hb_path.is_file():
+        try:
+            _hb = _fjson.loads(_hb_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _hb = {}
+    fcols = st.columns(4)
+    fcols[0].metric("Latest run", _man.get("run_id", "—"))
+    fcols[1].metric("Status", _man.get("status", "—"))
+    fcols[2].metric("Profile", _man.get("profile_id", "—"))
+    fcols[3].metric("Selector", _man.get("daily_selector", "—"))
+    st.caption(
+        f"profile_hash `{_man.get('profile_hash', '—')}`  ·  "
+        f"quotes=`{_man.get('quote_provider', '—')}`  ·  "
+        f"target_dte={_man.get('target_dte', '—')}  ·  "
+        f"no_execution={_man.get('no_execution', True)}  ·  "
+        f"started={_man.get('started_at', '—')}"
+    )
+    if _hb:
+        st.caption(
+            f"heartbeat: tick {_hb.get('tick_id', '—')} @ {_hb.get('latest_tick_time', '—')} · "
+            f"latest_decision={_hb.get('latest_decision', '—')} · "
+            f"selected_trade={_hb.get('selected_trade', False)}"
+        )
+    # Per-run selected / no-trade counts from the latest run's ledger (best-effort).
+    _run_id = _man.get("run_id")
+    if _run_id:
+        _rdir = OUTPUT_ROOT / "forward" / "runs" / _run_id
+        def _count_lines(p: Path) -> int:
+            try:
+                return sum(1 for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip())
+            except OSError:
+                return 0
+        n_sig = _count_lines(_rdir / "signal_log.jsonl")
+        n_no = _count_lines(_rdir / "no_trade_log.jsonl")
+        n_tick = _count_lines(_rdir / "tick_log.jsonl")
+        st.caption(f"ticks={n_tick} · selected_signals={n_sig} · no_trade_ticks={n_no}")
+
+
+# ──────────────────────────────────────────────────────────────────────
 # EOD
 # ──────────────────────────────────────────────────────────────────────
 

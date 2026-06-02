@@ -44,9 +44,11 @@ Thumbs.db
 outputs/latest/*
 outputs/runs/*
 outputs/daily/*
+outputs/forward/*
 !outputs/latest/.gitkeep
 !outputs/runs/.gitkeep
 !outputs/daily/.gitkeep
+!outputs/forward/.gitkeep
 
 # Local data caches
 data/

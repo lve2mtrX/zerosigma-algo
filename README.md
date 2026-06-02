@@ -978,6 +978,70 @@ prefills the daily-selector default.
 This run-profile layer **feeds the next phase: a forward (start/stop) local
 paper-monitoring runner — still NOT execution.**
 
+##### Phase 7 — forward runner (LOCAL PAPER MONITORING — no execution)
+
+`scripts/run_forward.py` repeatedly runs the **existing scanner** (it calls
+`scripts.run_scanner.main(...)` in-process — the *same* code path, no duplicated
+logic) from a saved Phase 6 run-profile and records each tick into a local
+ledger. **Monitoring + ledger only — it never places orders, submits paper
+orders, calls order preview, or executes anything. No broker call exists in this
+runner** (`no_execution: true`, `execution_mode: disabled_local_monitoring`).
+
+```powershell
+python -m scripts.run_forward --profile vertical_wing_score_best_1dte --dry-run
+python -m scripts.run_forward --profile vertical_wing_no_trade --once --interval-seconds 1
+python -m scripts.run_forward --profile vertical_wing_score_best_1dte --max-ticks 2 --interval-seconds 1
+python -m scripts.run_forward --profile vertical_wing_score_best_1dte --market-hours-only
+python -m scripts.run_forward --profile vertical_wing_score_best_1dte --output-dir outputs/forward
+```
+
+`--once` = exactly one tick; `--max-ticks N` stops after N; default interval 60s
+(`--interval-seconds 0` = no sleep); **Ctrl+C stops cleanly** (manifest →
+`stopped`, exit 0); `--dry-run` validates the profile + prints the planned config
+and writes a `dry_run` manifest **without scanning** (no tick/signal logs).
+Safe passthrough overrides: `--quote-provider`, `--structure-provider` (CLI beats
+the profile, same as the scanner). An unknown profile exits cleanly (`2`); a
+scanner failure is logged and sets manifest `status=error` (exit nonzero).
+
+**Ledger** (under `--output-dir`, default `outputs/forward/`, gitignored):
+
+```
+outputs/forward/runs/{run_id}/
+    run_manifest.json    # run_id, profile_{id,name,hash,path}, started/ended_at,
+                         #   status (running|stopped|error|completed|dry_run),
+                         #   interval_seconds, max_ticks, dry_run, providers,
+                         #   daily_selector, target_dte, no_execution=true,
+                         #   execution_mode=disabled_local_monitoring,
+                         #   git_commit, python_version, platform
+    tick_log.jsonl       # one line per tick: status, scanner_return_code,
+                         #   scanner_decision, pre/post_selector_decision,
+                         #   selected_trade, selected_candidate_summary,
+                         #   selector_no_trade_reason, duplicate_selected_signal,
+                         #   output_files, error
+    signal_log.jsonl     # one line per NEW selected trade (provenance + the
+                         #   ranked_candidates.csv trade/quote/risk fields)
+    selected_trades.csv  # same, CSV
+    no_trade_log.jsonl   # one line per no-selected-trade tick (reason + blockers)
+    heartbeat.json       # latest status / tick / decision / selected_trade
+    scanner/             # the scanner's own per-tick outputs (audit)
+outputs/forward/latest/  # mirror of the most recent run's manifest + heartbeat
+```
+
+**Duplicate-signal protection (ledger, not execution):** within one run, signal
+identity = `profile_hash + symbol + selected_expiry + side + short_strike +
+long_strike + target_dte + trade_date`. A repeat of the same identity is **not**
+appended again to `signal_log`/`selected_trades.csv`; the tick is still logged
+with `duplicate_selected_signal=true`.
+
+**Market-hours guard:** `--market-hours-only` skips scanning outside RTH
+(09:30–16:00 ET, weekdays — simple rule, no holiday calendar yet) and logs the
+tick with `status=skipped_market_closed`. Default off (deterministic tests).
+
+The Streamlit cockpit shows a **read-only** "Forward runs (monitoring)" section
+(latest manifest + heartbeat + counts); start/stop controls are deferred to Phase
+7.1. **The next phase is dashboard controls and/or a backtest adapter — NOT live
+execution.**
+
 ##### What's still missing under `public_only`
 
 | Field | Still None under public_only? | How to populate |

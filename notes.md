@@ -1715,3 +1715,55 @@ more reliable for prescriptive specs. Phase 6 also avoided a non-obvious
 `--profile` flag collision a workflow agent might have missed.
 
 **Next:** forward runner / start-stop local paper monitoring (Phase 6.x) — NOT execution.
+
+---
+
+## 2026-06-02 — Phase 7: forward runner / local paper monitoring
+
+`scripts/run_forward.py` repeatedly runs the EXISTING scanner from a saved Phase 6
+run-profile and records a local ledger. **Monitoring + ledger only — NO execution,
+NO broker/paper orders, NO order preview, NO position reconciliation, NO backtest
+adapter.** Manifest stamps `no_execution=true`,
+`execution_mode=disabled_local_monitoring`.
+
+**No duplicated scanner logic:** one-line refactor `run_scanner.main(argv=None)` +
+`parser.parse_args(argv)` (existing CLI byte-identical, argv=None → sys.argv). The
+forward runner calls `run_scanner.main([...])` IN-PROCESS pointed at a per-run
+scanner output dir, then reads that tick's `latest/decision_log.jsonl` (new lines
+since pre-count) + `latest/ranked_candidates.csv` (overwritten each tick) to
+capture the decision + selected rows. Same code path → consistent output fields.
+
+**Commands:** `--profile`, `--interval-seconds` (default 60; 0=no sleep),
+`--max-ticks N`, `--once`, `--dry-run`, `--market-hours-only`, `--output-dir`,
++ safe `--quote-provider`/`--structure-provider` passthrough.
+
+**Ledger** (`outputs/forward/runs/{run_id}/`, gitignored): run_manifest.json,
+tick_log.jsonl, signal_log.jsonl, selected_trades.csv, no_trade_log.jsonl,
+heartbeat.json, scanner/. Mirror at `outputs/forward/latest/`.
+
+**Choices documented:** (1) `--dry-run` writes a `dry_run` manifest + heartbeat but
+does NOT scan (no tick/signal logs). (2) Ledger duplicate protection: identity =
+profile_hash+symbol+selected_expiry+side+short_strike+long_strike+target_dte+
+trade_date — a repeat within a run is NOT re-appended to signal_log/selected_trades;
+the tick is still logged with `duplicate_selected_signal=true`. (3) Market-hours:
+simple RTH 09:30–16:00 ET weekday rule (no holiday calendar this phase); default off
+for deterministic tests; skipped ticks log `status=skipped_market_closed` and don't
+scan. (4) Ctrl+C → manifest `stopped`, exit 0. Scanner nonzero rc or a tick
+exception → tick `status=error`, manifest `error`, exit nonzero, run stops. Unknown
+profile → clean exit 2, no run folder.
+
+**Streamlit:** read-only "Forward runs (monitoring)" section (latest manifest +
+heartbeat + per-run counts). No start/stop buttons (Phase 7.1). `.gitignore` now
+ignores `outputs/forward/*` (+ `.gitkeep`).
+
+**Tests:** `tests/test_phase7_forward_runner.py` (13) — _is_rth pure, dry-run
+manifest-only, --once ledger, --max-ticks 2, selected→signal_log+csv,
+no-trade→no_trade_log, duplicate-not-appended, heartbeat each tick,
+market-hours skip, unknown-profile exit 2, scanner-failure→error, KeyboardInterrupt
+→stopped, and a no-execution-surface grep guard. Full suite **389 passed**, ruff clean.
+
+**Process note:** direct implementation again (workflows failed twice on Phase 5);
+the spec was prescriptive and the in-process `main(argv)` seam kept the patch small
++ behavior-preserving.
+
+**Next:** dashboard start/stop controls and/or a backtest adapter (Phase 7.x) — NOT execution.
