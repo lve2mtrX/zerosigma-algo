@@ -53,6 +53,17 @@ PHASE_4P2_APPENDED = (
     "strict_target_dte", "strict_target_dte_passed",
 )
 
+# Phase 5 APPENDED at the TAIL (after every Phase 4.2 column). The daily
+# selector stamps these onto each row post-hoc — order is load-bearing, they
+# must stay at the very end of _DEFAULT_RANKED_FIELDS.
+PHASE_5_APPENDED = (
+    "daily_selector_mode", "selected_trade", "selector_rank",
+    "selector_reason", "selector_rejection_reason", "selector_score",
+    "selector_score_components", "selector_tiebreaker", "side_allowed_by_config",
+    "selector_config_summary", "max_trades_per_day",
+    "selector_conflict_detected", "selector_no_trade_reason",
+)
+
 
 def test_default_ranked_fields_keeps_phase_le_4_tail_intact():
     """Every Phase ≤4 column appears in _DEFAULT_RANKED_FIELDS BEFORE the
@@ -76,6 +87,23 @@ def test_default_ranked_fields_contains_all_phase4p2_columns():
     fields = set(rs._DEFAULT_RANKED_FIELDS)
     for col in PHASE_4P2_APPENDED:
         assert col in fields, f"missing Phase 4.2 column {col!r}"
+
+
+def test_default_ranked_fields_contains_all_phase5_columns():
+    fields = set(rs._DEFAULT_RANKED_FIELDS)
+    for col in PHASE_5_APPENDED:
+        assert col in fields, f"missing Phase 5 column {col!r}"
+
+
+def test_phase5_columns_appended_at_tail_after_phase4p2():
+    """The Phase 5 selector columns APPEND after every Phase 4.2 column — tacked
+    onto the END of _DEFAULT_RANKED_FIELDS, never inserted mid-list."""
+    fields = list(rs._DEFAULT_RANKED_FIELDS)
+    last_phase4p2_idx = max(fields.index(c) for c in PHASE_4P2_APPENDED)
+    first_phase5_idx = min(fields.index(c) for c in PHASE_5_APPENDED)
+    assert last_phase4p2_idx < first_phase5_idx, (
+        "Phase 5 columns must APPEND after every Phase 4.2 column"
+    )
 
 
 def test_phase4p2_columns_appended_at_tail_after_phase4p1():
@@ -198,7 +226,7 @@ def test_existing_phase_le_4_column_indices_preserved():
     # confirm everything after is a Phase 4.1 OR Phase 4.2 appended column.
     # (Phase 4.2 tacked six more columns at the tail; allow BOTH tuples.)
     qrr = fields.index("quote_rejection_reason")
-    allowed = set(PHASE_4P1_APPENDED) | set(PHASE_4P2_APPENDED)
+    allowed = set(PHASE_4P1_APPENDED) | set(PHASE_4P2_APPENDED) | set(PHASE_5_APPENDED)
     for col in fields[qrr + 1:]:
         assert col in allowed, (
             f"unexpected column {col!r} appended after quote_rejection_reason"

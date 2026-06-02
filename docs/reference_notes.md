@@ -1008,3 +1008,65 @@ auto-rides the new fields because the scanner mirrors them onto
   PUT_CREDIT tradeable). All mids/volumes/OI and every other strike's width are
   UNCHANGED. (The design's original "no mock change needed" premise was wrong —
   it analyzed the short anchor legs, not the worst/long legs.)
+
+---
+
+## 13. Phase 5 — daily trade selector (selection layer)
+
+SELECTION ONLY — never executes/submits/previews. Lives in the PURE module
+`src/selector/daily_selector.py` (no `vertical_wing` import; operates on candidate
+ROW dicts + `SelectorConfig`, with `gamma_regime` passed as context). Runs in
+`scripts/run_scanner.py` ONCE per tick over the union of all strategies' rows,
+AFTER `compute_readiness` has stamped the rows, BEFORE the decision-log + CSV
+writes — so the selector result rides into both.
+
+### Modes + tie-breakers
+
+| Mode | Primary | Tie-breakers |
+|---|---|---|
+| score_best_valid (default) | max score | credit → \|distance\| |
+| best_credit_valid | max credit | score → \|distance\| |
+| closest_wing_valid | min \|distance_from_spot\| | score → credit |
+| farthest_wing_valid | max \|distance_from_spot\| | score → credit |
+| call_credit_only | max score among CALL_CREDIT (else NO_TRADE) | credit → \|distance\| |
+| put_credit_only | max score among PUT_CREDIT (else NO_TRADE) | credit → \|distance\| |
+| lowest_breach_risk_valid | max composite total | breach_total → score → \|distance\| |
+| regime_aligned_valid | max score when gamma_regime ∈ {positive,neutral} | credit → \|distance\| |
+| no_trade | — (always NO_TRADE) | — |
+
+`lowest_breach_risk_valid` composite (higher = safer, all components exposed in
+`selector_score_components`):
+```
+distance_component = distance_weight * |distance_from_spot|
+credit_component   = credit_weight   * credit
+risk_component     = -risk_weight     * (planned_stop_risk_pct * 100)   # missing pct → 0.0 + partial=true
+total              = distance_component + credit_component + risk_component
+```
+
+### Eligibility gate (shared by every *_valid + side-only mode)
+
+Excludes (each adds a selector blocker): `rejected`; `selector_eligible_base=false`
+(when `REQUIRE_SELECTOR_ELIGIBLE_BASE`); any `candidate_passes_{trade,risk,quote,
+score_threshold}=false`; `quote_validation_passed=false` / bucket `invalid` (when
+`REQUIRE_QUOTE_VALIDATION`); marginal / no-edge (when `REQUIRE_SCORE_EDGE`); side
+disabled (`side_disabled_by_config`); `MIN/MAX_SELECTOR_{SCORE,CREDIT,
+DISTANCE_FROM_SPOT}` (`selector_score_below_min`, `selector_credit_below_min`,
+`selector_distance_below_min`, `selector_distance_above_max`). Both sides off →
+NO_TRADE `no_sides_allowed`. Conflict (unbreakable tie at the selection boundary)
+→ NO_TRADE `selector_conflict` when `NO_TRADE_ON_SELECTOR_CONFLICT`.
+
+### Decision distinction
+
+`pre_selector_decision` = the strategy's own `select()` outcome (untouched).
+`post_selector_decision` = TRADE_CALL_CREDIT / TRADE_PUT_CREDIT / NO_TRADE derived
+from the selected row's side. `selected_trade` = per-row bool (≤ MAX_TRADES_PER_DAY
+true). All candidates are preserved — rejected/ineligible rows are never hidden.
+
+### Config precedence
+
+CLI > env > `config/scanner.yaml → scanner.selector` > default. Keys:
+DAILY_TRADE_SELECTOR, MAX_TRADES_PER_DAY, ALLOW_CALL_CREDIT, ALLOW_PUT_CREDIT,
+REQUIRE_SELECTOR_ELIGIBLE_BASE, REQUIRE_QUOTE_VALIDATION, REQUIRE_SCORE_EDGE,
+NO_TRADE_ON_SELECTOR_CONFLICT, MIN_SELECTOR_SCORE, MIN_SELECTOR_CREDIT,
+MIN_SELECTOR_DISTANCE_FROM_SPOT, MAX_SELECTOR_DISTANCE_FROM_SPOT,
+LOWEST_BREACH_RISK_{DISTANCE,CREDIT,RISK}_WEIGHT.

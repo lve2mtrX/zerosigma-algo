@@ -85,6 +85,30 @@ def main() -> int:
     # Phase 4.1 — per-candidate audit print (no truncation)
     parser.add_argument("--print-candidates", dest="print_candidates", action="store_true",
                         help="print per-candidate audit blocks to stdout (Phase 4.1)")
+    # ── Phase 5 — daily trade selector (SELECTION ONLY — no execution) ──
+    parser.add_argument("--daily-selector", dest="daily_selector", default=None,
+                        help="daily selector mode (default from DAILY_TRADE_SELECTOR env or "
+                             "scanner.selector YAML or 'score_best_valid'). One of: "
+                             "score_best_valid, best_credit_valid, closest_wing_valid, "
+                             "farthest_wing_valid, call_credit_only, put_credit_only, "
+                             "lowest_breach_risk_valid, regime_aligned_valid, no_trade")
+    parser.add_argument("--max-trades-per-day", dest="max_trades_per_day", type=int, default=None,
+                        help="max candidates marked selected_trade (default 1)")
+    parser.add_argument("--allow-call-credit", dest="allow_call_credit",
+                        action="store_true", default=None, help="allow CALL_CREDIT selections")
+    parser.add_argument("--no-allow-call-credit", dest="allow_call_credit",
+                        action="store_false", help="disallow CALL_CREDIT selections")
+    parser.add_argument("--allow-put-credit", dest="allow_put_credit",
+                        action="store_true", default=None, help="allow PUT_CREDIT selections")
+    parser.add_argument("--no-allow-put-credit", dest="allow_put_credit",
+                        action="store_false", help="disallow PUT_CREDIT selections")
+    parser.add_argument("--require-score-edge", dest="require_score_edge",
+                        action="store_true", default=None,
+                        help="exclude marginal / no-edge candidates from selection")
+    parser.add_argument("--min-selector-score", dest="min_selector_score", type=float, default=None,
+                        help="minimum score for selection eligibility")
+    parser.add_argument("--min-selector-credit", dest="min_selector_credit", type=float, default=None,
+                        help="minimum credit for selection eligibility")
     args = parser.parse_args()
 
     import os as _os
@@ -97,6 +121,13 @@ def main() -> int:
     from src.reporting.decision_log import log_decision, log_decision_to_file
     from src.risk.filters import apply_filters
     from src.risk.limits import load_profile
+    from src.selector.daily_selector import (
+        DEFAULT_SELECTOR_MODE,
+        SELECTOR_MODES,
+        SelectorConfig,
+        components_to_str,
+        select_daily_trade,
+    )
     from src.storage.csv_writer import append_csv_row, write_csv_snapshot
     from src.storage.paths import (
         decision_log_path,
@@ -158,6 +189,101 @@ def main() -> int:
         )
 
     after_hours_cutoff_et = str(expiry_cfg.get("after_hours_cutoff_et", "16:00"))
+
+    # ── Phase 5 — resolve daily-selector knobs (CLI > env > YAML > default) ──
+    selector_cfg_yaml = (
+        (cfg.scanner.get("selector") or {}) if isinstance(cfg.scanner, dict) else {}
+    )
+
+    def _env_float_opt(name: str, yaml_key: str):  # type: ignore[no-untyped-def]
+        """Optional float: env > YAML > None. Empty string ⇒ None (unset)."""
+        v = _os.environ.get(name)
+        if v is None:
+            v = selector_cfg_yaml.get(yaml_key)
+        if v in (None, ""):
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def _env_float(name: str, default: float) -> float:
+        v = _os.environ.get(name)
+        if v in (None, ""):
+            v = selector_cfg_yaml.get(name.lower())
+        try:
+            return float(v) if v not in (None, "") else default
+        except (TypeError, ValueError):
+            return default
+
+    if args.daily_selector is not None:
+        selector_mode = args.daily_selector.strip().lower()
+    else:
+        selector_mode = (
+            _os.environ.get("DAILY_TRADE_SELECTOR")
+            or selector_cfg_yaml.get("daily_trade_selector")
+            or DEFAULT_SELECTOR_MODE
+        ).strip().lower()
+    if selector_mode not in SELECTOR_MODES:
+        log.warning("unknown daily-selector mode %r; falling back to %s",
+                    selector_mode, DEFAULT_SELECTOR_MODE)
+        selector_mode = DEFAULT_SELECTOR_MODE
+
+    if args.max_trades_per_day is not None:
+        max_trades_per_day = int(args.max_trades_per_day)
+    else:
+        _mtpd = _os.environ.get("MAX_TRADES_PER_DAY") or selector_cfg_yaml.get("max_trades_per_day")
+        try:
+            max_trades_per_day = int(_mtpd) if _mtpd not in (None, "") else 1
+        except (TypeError, ValueError):
+            max_trades_per_day = 1
+
+    allow_call_credit = (
+        bool(args.allow_call_credit) if args.allow_call_credit is not None
+        else _env_bool("ALLOW_CALL_CREDIT", bool(selector_cfg_yaml.get("allow_call_credit", True)))
+    )
+    allow_put_credit = (
+        bool(args.allow_put_credit) if args.allow_put_credit is not None
+        else _env_bool("ALLOW_PUT_CREDIT", bool(selector_cfg_yaml.get("allow_put_credit", True)))
+    )
+    require_score_edge = (
+        bool(args.require_score_edge) if args.require_score_edge is not None
+        else _env_bool("REQUIRE_SCORE_EDGE", bool(selector_cfg_yaml.get("require_score_edge", False)))
+    )
+    selector_config = SelectorConfig(
+        mode=selector_mode,
+        max_trades_per_day=max_trades_per_day,
+        allow_call_credit=allow_call_credit,
+        allow_put_credit=allow_put_credit,
+        require_selector_eligible_base=_env_bool(
+            "REQUIRE_SELECTOR_ELIGIBLE_BASE",
+            bool(selector_cfg_yaml.get("require_selector_eligible_base", True)),
+        ),
+        require_quote_validation=_env_bool(
+            "REQUIRE_QUOTE_VALIDATION",
+            bool(selector_cfg_yaml.get("require_quote_validation", True)),
+        ),
+        require_score_edge=require_score_edge,
+        no_trade_on_selector_conflict=_env_bool(
+            "NO_TRADE_ON_SELECTOR_CONFLICT",
+            bool(selector_cfg_yaml.get("no_trade_on_selector_conflict", True)),
+        ),
+        min_selector_score=(
+            float(args.min_selector_score) if args.min_selector_score is not None
+            else _env_float_opt("MIN_SELECTOR_SCORE", "min_selector_score")
+        ),
+        min_selector_credit=(
+            float(args.min_selector_credit) if args.min_selector_credit is not None
+            else _env_float_opt("MIN_SELECTOR_CREDIT", "min_selector_credit")
+        ),
+        min_selector_distance_from_spot=_env_float_opt(
+            "MIN_SELECTOR_DISTANCE_FROM_SPOT", "min_selector_distance_from_spot"),
+        max_selector_distance_from_spot=_env_float_opt(
+            "MAX_SELECTOR_DISTANCE_FROM_SPOT", "max_selector_distance_from_spot"),
+        lowest_breach_risk_distance_weight=_env_float("LOWEST_BREACH_RISK_DISTANCE_WEIGHT", 1.0),
+        lowest_breach_risk_credit_weight=_env_float("LOWEST_BREACH_RISK_CREDIT_WEIGHT", 0.25),
+        lowest_breach_risk_risk_weight=_env_float("LOWEST_BREACH_RISK_RISK_WEIGHT", 1.0),
+    )
 
     profile_name = args.profile or cfg.active_risk_profile
     profile = load_profile(cfg.risk_profiles, profile_name)
@@ -271,6 +397,7 @@ def main() -> int:
             strict_target_dte_passed=strict_target_dte_passed,
             quote_request_skipped_reason="strict_target_dte_unavailable",
             selector_blockers=["strict_target_dte_unavailable"],
+            selector_config=selector_config,
         )
     if not required_strikes:
         return _emit_skipped_quote_no_trade(
@@ -281,6 +408,7 @@ def main() -> int:
             strict_target_dte_passed=strict_target_dte_passed,
             quote_request_skipped_reason="no_required_strikes",
             selector_blockers=["no_required_strikes", "insufficient_structure"],
+            selector_config=selector_config,
         )
 
     chain = quote_provider.get_option_chain(symbol, expiry=eff_expiry, request=quote_request)
@@ -322,6 +450,13 @@ def main() -> int:
     ranked_rows: list[dict] = []
     ts = now_et()
 
+    # ── per-strategy: generate → filter → score → select → build rows ──
+    # Phase 5: the daily selector runs ONCE per tick over the UNION of all
+    # strategies' rows (so MAX_TRADES_PER_DAY caps the tick, not each strategy).
+    # Decision-log writes + candidate prints are DEFERRED until after the
+    # selector has stamped its fields, so they can carry the selector result.
+    strat_records: list[dict] = []
+    row_candidates: list = []        # parallel to ranked_rows — Candidate per row
     for sid, strat in strategies.items():
         params = {**(strat.default_parameters or {}), **session.to_filter_params()}
         candidates = strat.generate_candidates(structure, chain, params)
@@ -339,10 +474,9 @@ def main() -> int:
             structure=structure,
         )
 
-        # Phase 4.2.1 — strict target-DTE is now enforced BEFORE the quote fetch
-        # (see the pre-fetch guard in main()): a strict-unavailable tick returns
-        # a clean NO_TRADE without ever reaching here, so this path always serves
-        # a real (non-suppressed) expiry. strict_target_dte_passed is True here.
+        # Phase 4.2.1 — strict target-DTE is enforced BEFORE the quote fetch
+        # (pre-fetch guard in main()): a strict-unavailable tick never reaches
+        # here, so this path always serves a real (non-suppressed) expiry.
         row_esr = expiry_decision.source
         for c in candidates:
             row = _candidate_row(
@@ -354,8 +488,7 @@ def main() -> int:
                 strict_target_dte_passed=strict_target_dte_passed,
             )
             ranked_rows.append(row)
-            if args.print_candidates:
-                _print_candidate_audit(row, c, chain)
+            row_candidates.append(c)
 
         snapshot_summary: dict = {
             "structure_provider": structure.source,
@@ -405,15 +538,73 @@ def main() -> int:
                 "root_hint":                         expiry_decision.root_hint,
                 "structure_expiry_matches_quote_expiry": False,
             }
+        strat_records.append({
+            "sid": sid, "decision": decision, "snapshot_summary": snapshot_summary,
+        })
 
+    # ── Phase 5 — daily trade selector (SELECTION ONLY — no execution) ──
+    # Runs once over the whole tick's rows; marks ≤ max_trades_per_day rows
+    # selected_trade=True; preserves every row; never mutates the strategy's
+    # own decision (pre_selector_decision).
+    sel_result = select_daily_trade(
+        ranked_rows, selector_config,
+        gamma_regime=structure.exposures.gamma_regime,
+    )
+    for i, row in enumerate(ranked_rows):
+        m = sel_result.per_row[i]
+        row.update({
+            "daily_selector_mode":        sel_result.daily_selector_mode,
+            "selected_trade":             m["selected_trade"],
+            "selector_rank":              m["selector_rank"],
+            "selector_reason":            m["selector_reason"],
+            "selector_rejection_reason":  sel_result.selector_rejection_reason,
+            "selector_score":             m["selector_score"],
+            "selector_score_components":  components_to_str(m["selector_score_components"]),
+            "selector_tiebreaker":        m["selector_tiebreaker"],
+            "side_allowed_by_config":     m["side_allowed_by_config"],
+            "selector_config_summary":    sel_result.selector_config_summary,
+            "max_trades_per_day":         sel_result.max_trades_per_day,
+            "selector_conflict_detected": sel_result.selector_conflict_detected,
+            "selector_no_trade_reason":   sel_result.selector_no_trade_reason,
+        })
+
+    post_selector_decision = "NO_TRADE"
+    if sel_result.selected_indices:
+        _sel_side = ranked_rows[sel_result.selected_indices[0]].get("side")
+        post_selector_decision = (
+            "TRADE_CALL_CREDIT" if _sel_side == "CALL_CREDIT"
+            else "TRADE_PUT_CREDIT" if _sel_side == "PUT_CREDIT"
+            else "TRADE"
+        )
+
+    # ── write decision logs (now augmented with the selector result) ──
+    for rec in strat_records:
+        decision = rec["decision"]
+        snapshot_summary = rec["snapshot_summary"]
+        snapshot_summary.update({
+            # Phase 5 — daily selector audit (rides into the JSONL record)
+            "daily_selector_mode":        sel_result.daily_selector_mode,
+            "max_trades_per_day":         sel_result.max_trades_per_day,
+            "selected_trade":             sel_result.selected_trade,
+            "selector_no_trade_reason":   sel_result.selector_no_trade_reason,
+            "selector_conflict_detected": sel_result.selector_conflict_detected,
+            "selector_config_summary":    sel_result.selector_config_summary,
+            "pre_selector_decision":      decision.decision,
+            "post_selector_decision":     post_selector_decision,
+            "selector_result":            _selector_result_summary(sel_result, ranked_rows),
+        })
         if not args.dry_run:
             log_decision(output_root, decision, snapshot_summary, ts)
             log_decision_to_file(
                 latest / "decision_log.jsonl", decision, snapshot_summary, ts,
             )
+        log.info("strategy=%s decision=%s post_selector=%s explanation=%s",
+                 rec["sid"], decision.decision, post_selector_decision, decision.explanation)
 
-        log.info("strategy=%s decision=%s explanation=%s",
-                 sid, decision.decision, decision.explanation)
+    if args.print_candidates:
+        for i, row in enumerate(ranked_rows):
+            _print_candidate_audit(row, row_candidates[i], chain)
+        _print_selector_summary(sel_result, ranked_rows)
 
     if not args.dry_run:
         run_path = ranked_candidates_path(output_root)
@@ -427,6 +618,9 @@ def main() -> int:
         log.info("decision logs at %s (status=%s)",
                  decision_log_path(output_root), quote_status.connected)
 
+    log.info("daily_selector=%s selected_trade=%s post_selector_decision=%s no_trade_reason=%s",
+             sel_result.daily_selector_mode, sel_result.selected_trade,
+             post_selector_decision, sel_result.selector_no_trade_reason)
     return 0
 
 
@@ -493,7 +687,13 @@ _DEFAULT_RANKED_FIELDS = [
     "bid_ask_quality_mode", "bid_ask_quality_reason",
     "quote_clock_skew_detected", "quote_clock_skew_seconds",
     "strict_target_dte", "strict_target_dte_passed",
-]  # used only when no candidate rows exist — keep in sync with _candidate_row()
+    # ── Phase 5 — daily selector columns, APPENDED at the TAIL ──
+    "daily_selector_mode", "selected_trade", "selector_rank",
+    "selector_reason", "selector_rejection_reason", "selector_score",
+    "selector_score_components", "selector_tiebreaker", "side_allowed_by_config",
+    "selector_config_summary", "max_trades_per_day",
+    "selector_conflict_detected", "selector_no_trade_reason",
+]  # used only when no candidate rows exist — keep in sync with _candidate_row() + selector stamping
 
 
 def _candidate_row(
@@ -812,7 +1012,7 @@ def _print_candidate_audit(row: dict, c, chain=None) -> None:  # type: ignore[no
               "quote_validation_passed", "quote_rejection_reason"):
         out(f"  {k}={row.get(k)!r}")
 
-    # Selector
+    # Selector readiness (Phase 4.1)
     out("--- selector ---")
     for k in ("candidate_passes_score_threshold", "candidate_passes_score_edge",
               "candidate_passes_trade_filters", "candidate_passes_risk_filters",
@@ -821,6 +1021,85 @@ def _print_candidate_audit(row: dict, c, chain=None) -> None:  # type: ignore[no
               "selector_readiness_note"):
         out(f"  {k}={row.get(k)!r}")
 
+    # Daily selector (Phase 5) — present once the selector has stamped the row.
+    if "daily_selector_mode" in row:
+        out("--- daily selector ---")
+        for k in ("daily_selector_mode", "selected_trade", "selector_rank",
+                  "selector_reason", "selector_rejection_reason", "selector_score",
+                  "selector_score_components", "selector_tiebreaker",
+                  "side_allowed_by_config", "max_trades_per_day",
+                  "selector_conflict_detected", "selector_no_trade_reason"):
+            out(f"  {k}={row.get(k)!r}")
+
+    out("---")
+
+
+def _selector_result_summary(sel_result, rows: list[dict]) -> dict:  # type: ignore[no-untyped-def]
+    """Phase 5 — JSON-serializable selector summary for the decision_log JSONL.
+
+    Includes the per-candidate selector metadata + the after-selector pick.
+    (The strategy's pre-selector pick rides in the record's existing
+    `selected_candidate` field; pre_selector_decision is added alongside.)
+    """
+    sel_idx = sel_result.selected_indices
+    after = None
+    if sel_idx:
+        r = rows[sel_idx[0]]
+        after = {
+            "side": r.get("side"), "short_strike": r.get("short_strike"),
+            "long_strike": r.get("long_strike"), "score": r.get("score"),
+            "credit": r.get("credit"), "selector_rank": r.get("selector_rank"),
+        }
+    return {
+        "mode": sel_result.daily_selector_mode,
+        "selected_trade": sel_result.selected_trade,
+        "selected_indices": list(sel_idx),
+        "max_trades_per_day": sel_result.max_trades_per_day,
+        "selector_rejection_reason": sel_result.selector_rejection_reason,
+        "selector_no_trade_reason": sel_result.selector_no_trade_reason,
+        "selector_conflict_detected": sel_result.selector_conflict_detected,
+        "config_summary": sel_result.selector_config_summary,
+        "selected_candidate_after_selector": after,
+        "candidates_with_selector_metadata": [
+            {
+                "index": i, "side": rows[i].get("side"),
+                "short_strike": rows[i].get("short_strike"),
+                "long_strike": rows[i].get("long_strike"),
+                "score": rows[i].get("score"), "credit": rows[i].get("credit"),
+                "selected_trade": m["selected_trade"],
+                "selector_rank": m["selector_rank"],
+                "selector_reason": m["selector_reason"],
+                "selector_score": m["selector_score"],
+                "selector_score_components": m["selector_score_components"],
+                "side_allowed_by_config": m["side_allowed_by_config"],
+                "selector_blockers": m["selector_blockers"],
+            }
+            for i, m in enumerate(sel_result.per_row)
+        ],
+    }
+
+
+def _print_selector_summary(sel_result, rows: list[dict]) -> None:  # type: ignore[no-untyped-def]
+    """Phase 5 — tick-level daily-selector block for --print-candidates."""
+    out = print
+    out("=== DAILY SELECTOR ===")
+    for k, v in (
+        ("daily_selector_mode", sel_result.daily_selector_mode),
+        ("selected_trade", sel_result.selected_trade),
+        ("max_trades_per_day", sel_result.max_trades_per_day),
+        ("selector_rejection_reason", sel_result.selector_rejection_reason),
+        ("selector_no_trade_reason", sel_result.selector_no_trade_reason),
+        ("selector_conflict_detected", sel_result.selector_conflict_detected),
+        ("selector_config_summary", sel_result.selector_config_summary),
+    ):
+        out(f"  {k}={v!r}")
+    if sel_result.selected_indices:
+        i = sel_result.selected_indices[0]
+        r = rows[i]
+        out(f"  selected: side={r.get('side')} "
+            f"{r.get('short_strike')}/{r.get('long_strike')} "
+            f"score={r.get('score')} credit={r.get('credit')} "
+            f"rank={sel_result.per_row[i]['selector_rank']}")
     out("---")
 
 
@@ -886,6 +1165,7 @@ def _emit_skipped_quote_no_trade(
     strict_target_dte_passed: bool,
     quote_request_skipped_reason: str,
     selector_blockers: list,
+    selector_config=None,                         # type: ignore[no-untyped-def]
 ) -> int:
     """Phase 4.2.1 — emit a clean NO_TRADE WITHOUT calling the quote provider.
 
@@ -980,6 +1260,12 @@ def _emit_skipped_quote_no_trade(
         "quote_request_skipped_reason":  quote_request_skipped_reason,
         "required_strikes_available":    bool(required_strikes),
         "selector_blockers":             list(selector_blockers),
+        # ── Phase 5 — selector is a NO_TRADE on a skipped tick (no candidates) ──
+        "daily_selector_mode":           getattr(selector_config, "mode", None),
+        "max_trades_per_day":            getattr(selector_config, "max_trades_per_day", None),
+        "selected_trade":                False,
+        "post_selector_decision":        "NO_TRADE",
+        "selector_no_trade_reason":      f"quote_request_skipped:{quote_request_skipped_reason}",
     }
 
     if not args.dry_run:

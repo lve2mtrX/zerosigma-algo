@@ -1605,3 +1605,62 @@ synthesize-then-zero-candidates; both NO_TRADE).
 fake Tasty-like provider — empty strikes → provider NOT called; strict → NOT
 called; normal → called with strikes; no whole-chain pull ever; mock also skips).
 Full suite **318 passed**, ruff clean. Mock smoke confirmed the clean skip path.
+
+---
+
+## 2026-06-02 — Phase 5: configurable daily trade selector (SELECTION ONLY)
+
+Added a daily trade selector that picks AT MOST ONE candidate (configurable via
+`MAX_TRADES_PER_DAY`, default 1) from the candidates a strategy already
+generated/scored/filtered. **No execution, no orders, no preview, no change to
+candidate generation / quote fetching / risk filters / scoring.**
+
+**New module:** `src/selector/daily_selector.py` — PURE (no I/O, no network, no
+`vertical_wing` import → `test_no_vw_leak` stays green). Operates on candidate
+ROW dicts (the same dicts the CSV writer uses, already carrying Phase 4.1
+readiness fields) + a `SelectorConfig`; `gamma_regime` passed as context.
+
+**Nine modes:** score_best_valid (default), best_credit_valid, closest_wing_valid,
+farthest_wing_valid, call_credit_only, put_credit_only, lowest_breach_risk_valid
+(transparent distance/risk/credit components; partial when planned_stop_risk_pct
+missing — no crash), regime_aligned_valid (positive/neutral → best eligible;
+negative → blocked; missing gamma_regime → insufficient_regime_data), no_trade.
+
+**Eligibility gate** (shared): never selects rejected / selector_eligible_base=false
+/ filter-failing candidates; REQUIRE_QUOTE_VALIDATION, REQUIRE_SCORE_EDGE, side
+filters (both off → no_sides_allowed), MIN/MAX score/credit/distance. Conflict
+detection: an unbreakable tie at the selection boundary → NO_TRADE when
+NO_TRADE_ON_SELECTOR_CONFLICT (default). NO_TRADE_ON_SELECTOR_CONFLICT,
+selector_conflict_detected surfaced.
+
+**Scanner wiring (`scripts/run_scanner.py`):** selector runs ONCE per tick over
+the union of all strategies' rows (so MAX_TRADES_PER_DAY caps the tick); decision
+logs + candidate prints are deferred until after selection. Preserves the
+strategy decision as `pre_selector_decision`; adds `post_selector_decision` +
+`selected_trade`. 13 CSV columns APPENDED at the tail (no reorder). Decision log
+gains `selector_result` (per-candidate metadata + after-selector pick) +
+pre/post_selector_decision. `--print-candidates` adds a `--- daily selector ---`
+block per candidate + a tick-level `=== DAILY SELECTOR ===` summary. The
+pre-fetch skip path stamps selector defaults (selected_trade=False,
+selector_no_trade_reason=quote_request_skipped:*).
+
+**Config:** `config/scanner.yaml → scanner.selector` + `.env.example`
+(DAILY_TRADE_SELECTOR, MAX_TRADES_PER_DAY, ALLOW_*, REQUIRE_*, MIN/MAX_SELECTOR_*,
+LOWEST_BREACH_RISK_*_WEIGHT). CLI: --daily-selector, --max-trades-per-day,
+--allow/--no-allow-{call,put}-credit, --require-score-edge, --min-selector-{score,credit}.
+Streamlit: selector-mode dropdown + `selected` column + selection caption.
+
+**Tests:** `tests/test_phase5_daily_selector.py` (26 pure unit tests — every mode,
+tie-breakers, eligibility gates, filters, conflict, regime, no_trade, invariants,
+no-vw-leak guard) + `tests/test_phase5_scanner_selector.py` (5 scanner-harness
+tests — CSV columns, ≤1 selected, decision-log metadata, print section, both-sides
+-disabled, --help). `tests/test_phase4p1_csv_columns.py` extended additively for
+the Phase 5 tail columns.
+
+**Process note:** the workflow approach failed twice on Phase 5 (a trivial `${ENV}`
+template-literal typo, then a recurring StructuredOutput formatting crash on the
+big synthesis agent after ~2h). Pivoted to direct implementation — the spec was
+fully prescriptive, so the discover/design synthesis added fragility without
+value. Full suite **351 passed**, ruff clean.
+
+**Next:** strategy-config persistence / forward runner (Phase 5.x) — NOT execution.

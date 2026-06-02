@@ -60,3 +60,28 @@ scanner:
     # fallback. CLI --strict-target-dte > STRICT_TARGET_DTE env > this > false.
     # Default false = today's lax fallback behavior.
     strict_target_dte: false
+
+  # Phase 5 — Daily trade selector. SELECTION ONLY (no execution). Chooses at
+  # most `max_trades_per_day` candidate(s) from the already-generated, scored,
+  # filtered candidates. CLI > env > YAML > default. See src/selector/
+  # daily_selector.py. Modes: score_best_valid | best_credit_valid |
+  # closest_wing_valid | farthest_wing_valid | call_credit_only |
+  # put_credit_only | lowest_breach_risk_valid | regime_aligned_valid | no_trade
+  selector:
+    daily_trade_selector: score_best_valid    # backward-safe default
+    max_trades_per_day: 1
+    allow_call_credit: true
+    allow_put_credit: true
+    require_selector_eligible_base: true
+    require_quote_validation: true
+    require_score_edge: false
+    no_trade_on_selector_conflict: true
+    # Optional thresholds — leave blank/omit for "no filter".
+    min_selector_score:
+    min_selector_credit:
+    min_selector_distance_from_spot:
+    max_selector_distance_from_spot:
+    # lowest_breach_risk_valid transparent composite weights.
+    lowest_breach_risk_distance_weight: 1.0
+    lowest_breach_risk_credit_weight: 0.25
+    lowest_breach_risk_risk_weight: 1.0

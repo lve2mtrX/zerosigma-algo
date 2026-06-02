@@ -52,6 +52,12 @@ from src.risk.limits import (  # noqa: E402
     planned_loss_dollars,
     theoretical_max_loss_dollars,
 )
+from src.selector.daily_selector import (  # noqa: E402
+    DEFAULT_SELECTOR_MODE,
+    SELECTOR_MODES,
+    SelectorConfig,
+    select_daily_trade,
+)
 from src.selector.readiness import compute_readiness  # noqa: E402
 from src.strategies.registry import load_strategies  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
@@ -174,6 +180,21 @@ with st.sidebar:
              "falls back to mock with a warning.",
     )
     st.caption(f"Execution mode:     `{CFG.providers.execution_active}`")
+
+    # Phase 5 — daily trade selector mode (SELECTION ONLY; no execution).
+    _sel_yaml = (
+        (CFG.scanner.get("selector") or {}).get("daily_trade_selector")
+        if isinstance(CFG.scanner, dict) else None
+    ) or DEFAULT_SELECTOR_MODE
+    chosen_selector = st.selectbox(
+        "Daily selector",
+        options=list(SELECTOR_MODES),
+        index=(list(SELECTOR_MODES).index(_sel_yaml)
+               if _sel_yaml in SELECTOR_MODES else 0),
+        help="Chooses AT MOST ONE candidate from the generated set. Selection "
+             "only — never executes or submits. score_best_valid = highest-score "
+             "eligible (default).",
+    )
 
 
 # Acquire snapshots — explicit separation of structure vs quotes.
@@ -568,7 +589,53 @@ else:
                 "weak":        "; ".join(c.weak_components),
                 "rejection_reasons": "; ".join(c.rejection_reasons),
             })
+
+        # ── Phase 5 — run the daily selector over the candidate rows ──
+        # SELECTION ONLY (no execution). Build selector-input rows from each
+        # candidate's readiness + core fields, pick ≤1, and surface it.
+        _sel_inputs = []
+        for c in candidates:
+            rd = c.meta.get("_readiness") or {}
+            _sel_inputs.append({
+                "side": c.side, "score": c.score, "credit": c.credit,
+                "distance_from_spot": c.distance_from_spot,
+                "short_strike": c.short_strike, "long_strike": c.long_strike,
+                "rejected": c.rejected,
+                "selector_eligible_base": rd.get("selector_eligible_base"),
+                "candidate_passes_trade_filters": rd.get("candidate_passes_trade_filters"),
+                "candidate_passes_risk_filters": rd.get("candidate_passes_risk_filters"),
+                "candidate_passes_quote_filters": rd.get("candidate_passes_quote_filters"),
+                "candidate_passes_score_threshold": rd.get("candidate_passes_score_threshold"),
+                "candidate_passes_score_edge": rd.get("candidate_passes_score_edge"),
+                "candidate_is_marginal": rd.get("candidate_is_marginal"),
+                "quote_validation_passed": (c.meta.get("short_leg") or {}).get("validation_passed"),
+                "quote_quality_bucket": rd.get("quote_quality_bucket"),
+                "planned_stop_risk_pct": rd.get("planned_stop_risk_pct"),
+            })
+        _sel = select_daily_trade(
+            _sel_inputs, SelectorConfig(mode=chosen_selector),
+            gamma_regime=structure.exposures.gamma_regime,
+        )
+        for i, row in enumerate(rows):
+            row["selected"] = "✅" if _sel.per_row[i]["selected_trade"] else ""
         st.dataframe(rows, use_container_width=True, hide_index=True)
+
+        # Selector result — compact, selection-only.
+        if _sel.selected_trade:
+            i = _sel.selected_indices[0]
+            sc = candidates[i]
+            st.success(
+                f"Daily selector (`{_sel.daily_selector_mode}`): selected "
+                f"{sc.side} {sc.short_strike}/{sc.long_strike} "
+                f"(score {sc.score:.3f}, credit {sc.credit:.2f}) — "
+                f"{_sel.per_row[i]['selector_reason']}"
+            )
+        else:
+            st.info(
+                f"Daily selector (`{_sel.daily_selector_mode}`): NO_TRADE — "
+                f"{_sel.selector_no_trade_reason or _sel.selector_rejection_reason or 'no eligible candidate'}"
+            )
+        st.caption("Selection only — the daily selector never executes or submits orders.")
 
         # Per-candidate score breakdown expanders (Phase 2.7 observability)
         st.caption("Click a candidate to inspect its full score breakdown.")

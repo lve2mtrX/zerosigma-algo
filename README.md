@@ -825,6 +825,88 @@ All mids/volumes/OI and every other strike's width are unchanged.
 See `docs/reference_notes.md §12` for the bid/ask config table, the
 clock-skew clamp rule, and the strict-DTE reason string.
 
+##### Phase 5 — daily trade selector (SELECTION ONLY — no execution)
+
+The **daily selector** chooses **at most one** candidate (configurable via
+`MAX_TRADES_PER_DAY`) from the candidates a strategy already generated, scored,
+and filtered. It is a layer *after* the strategy's own `select()` — it marks
+`selected_trade=true` on the chosen row and explains every decision. **It never
+executes, submits, previews, or places orders.** The strategy's decision is
+preserved as `pre_selector_decision`; the selector's outcome is
+`post_selector_decision`.
+
+Pure module: `src/selector/daily_selector.py` (operates on candidate row dicts;
+imports no strategy package).
+
+**Modes** (`DAILY_TRADE_SELECTOR` / `--daily-selector`):
+
+| Mode | Picks | Tie-breakers |
+|---|---|---|
+| `score_best_valid` *(default)* | highest score | credit → farthest distance |
+| `best_credit_valid` | highest credit | score → farthest distance |
+| `closest_wing_valid` | shortest distance-from-spot (riskier — not default) | score → credit |
+| `farthest_wing_valid` | greatest distance-from-spot | score → credit |
+| `call_credit_only` | best eligible CALL_CREDIT (else NO_TRADE) | score → credit |
+| `put_credit_only` | best eligible PUT_CREDIT (else NO_TRADE) | score → credit |
+| `lowest_breach_risk_valid` | transparent composite: farther + lower `planned_stop_risk_pct` + acceptable credit (emits `selector_score_components`) | — |
+| `regime_aligned_valid` | best eligible when `gamma_regime` ∈ {positive, neutral}; `negative` → blocked; missing → `insufficient_regime_data` | score → credit |
+| `no_trade` | nothing (always NO_TRADE) | — |
+
+**Eligibility** (all `*_valid` + side-only modes): never selects a `rejected`
+candidate; requires `selector_eligible_base` (default) and the
+`candidate_passes_{trade,risk,quote,score_threshold}` buckets; `REQUIRE_QUOTE_VALIDATION`
+excludes quote-invalid; `REQUIRE_SCORE_EDGE` excludes marginal/no-edge; the side
+filters (`ALLOW_CALL_CREDIT` / `ALLOW_PUT_CREDIT`; both false → `no_sides_allowed`)
+and the `MIN/MAX_SELECTOR_{SCORE,CREDIT,DISTANCE_FROM_SPOT}` thresholds apply.
+When nothing qualifies the selector returns **NO_TRADE** with a
+`selector_no_trade_reason` and keeps every candidate visible (it never hides
+rejected rows).
+
+**Config** (`config/scanner.yaml → scanner.selector`, env, or CLI; precedence
+CLI > env > YAML > default):
+
+```
+DAILY_TRADE_SELECTOR=score_best_valid   MAX_TRADES_PER_DAY=1
+ALLOW_CALL_CREDIT=true                  ALLOW_PUT_CREDIT=true
+REQUIRE_SELECTOR_ELIGIBLE_BASE=true     REQUIRE_QUOTE_VALIDATION=true
+REQUIRE_SCORE_EDGE=false                NO_TRADE_ON_SELECTOR_CONFLICT=true
+MIN_SELECTOR_SCORE=  MIN_SELECTOR_CREDIT=  MIN_SELECTOR_DISTANCE_FROM_SPOT=  MAX_SELECTOR_DISTANCE_FROM_SPOT=
+LOWEST_BREACH_RISK_{DISTANCE,CREDIT,RISK}_WEIGHT=1.0/0.25/1.0
+```
+
+CLI flags: `--daily-selector`, `--max-trades-per-day`,
+`--allow-call-credit`/`--no-allow-call-credit`,
+`--allow-put-credit`/`--no-allow-put-credit`, `--require-score-edge`,
+`--min-selector-score`, `--min-selector-credit`.
+
+New CSV columns (appended at the tail): `daily_selector_mode`, `selected_trade`,
+`selector_rank`, `selector_reason`, `selector_rejection_reason`, `selector_score`,
+`selector_score_components`, `selector_tiebreaker`, `side_allowed_by_config`,
+`selector_config_summary`, `max_trades_per_day`, `selector_conflict_detected`,
+`selector_no_trade_reason`. The decision log gains `daily_selector_mode`,
+`pre_selector_decision`, `post_selector_decision`, `selected_trade`, and a full
+`selector_result` (per-candidate metadata + after-selector pick).
+`--print-candidates` adds a `--- daily selector ---` block per candidate plus a
+tick-level `=== DAILY SELECTOR ===` summary. The Streamlit cockpit gains a
+selector-mode dropdown, a `selected` column, and a selection caption.
+
+**Example commands** (selection only — no orders):
+
+```powershell
+python -m scripts.run_scanner --structure-provider zerosigma_api `
+  --quote-provider mock --target-dte 1 --daily-selector score_best_valid --print-candidates
+
+python -m scripts.run_scanner --structure-provider zerosigma_api `
+  --quote-provider tastytrade --target-dte 1 --daily-selector best_credit_valid --print-candidates
+
+python -m scripts.run_scanner --structure-provider zerosigma_api `
+  --quote-provider tastytrade --target-dte 1 --daily-selector call_credit_only --print-candidates
+```
+
+The default `score_best_valid` matches prior behavior (the highest-score
+eligible candidate is chosen) while now stamping explicit selector fields. The
+**next phase is strategy-config persistence / a forward runner — NOT execution.**
+
 ##### What's still missing under `public_only`
 
 | Field | Still None under public_only? | How to populate |
