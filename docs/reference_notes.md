@@ -1288,3 +1288,39 @@ non_closed_status_in_closed_file. The report always carries
 broker_position_reconciliation: "deferred" — there is NO broker connection in this
 phase. PAPER_* lifecycle config is env / CLI / config/portfolio_profiles.yaml
 only; the Phase 6 profile schema is unchanged.
+
+## 19. Phase 9C — cockpit UI architecture (UI / profile-mgmt only, no execution)
+
+Streamlit re-skinned into a dark, branded, TABBED command-center. UI + profile CRUD
+only — no trading-logic / scanner / quote / risk / lifecycle changes, no broker
+execution.
+
+### Pure helper split (testable without a UI)
+- `src/app/ui_helpers.py` — stdlib only, ZERO project imports + ZERO
+  `import streamlit`. `brand_css()` returns a `<style>` string targeting STABLE
+  selectors (`.stApp`, `[data-testid="stMetric"]`, `.stTabs [data-baseweb="tab"]`)
+  so it survives Streamlit version bumps. Palette adapted (values only) from the
+  Dashboard `assets/zerosigma.css`: bg `#0b0f14`, accent `#00E5A8`, blue `#2d6cff`.
+- `src/app/profile_builder.py` — imports ONLY `strategy_profiles` (one-way; no
+  cycle because strategy_profiles imports nothing from `src.app`). `save_profile`
+  validates FIRST, then refuses an existing path unless `overwrite=True`, then
+  returns the deterministic `profile_hash`. Secrets/execution keys are rejected by
+  the existing `validate_profile_dict` — the builder surfaces, never suppresses.
+- `src/app/control_ui.py` — imports `src.forward.control`. Guards: `can_start`
+  refuses when active/pid_alive/transitional/stale; `start_runner` re-checks
+  status THEN calls `control.start` (so a 2nd live runner can't launch);
+  `stop_runner` is graceful-first (`force` only when explicitly passed). Tests
+  monkeypatch `control_ui.control.{status,start,stop,cleanup_stale,build_command}`.
+
+### render_*()-in-tabs pattern (the durable bit)
+Streamlit executes EVERY `with tab:` body on every rerun (the `with` only routes
+rendering, it does not gate or scope). So shared computation (providers, structure,
+chain, `quote_spot`, candidate context, `session`, `paper_account`) is done ONCE at
+MODULE LEVEL above the tabs, and each panel is a `render_*()` function that reads
+those module globals. The candidate/scoring/decision render logic is preserved
+verbatim inside `render_candidates()`. Sidebar selectors moved to a top
+`⚙ Controls & providers` expander (must stay ABOVE provider init, since it sets
+`chosen_structure`/`chosen_quote`/`chosen_selector`). `streamlit_main` imports +
+runs headless under pytest (`importlib.import_module`) — bare-mode ScriptRunContext
+warnings are expected and harmless. Forward Runner buttons call `control_ui` (real
+Phase 9A local process control); force-stop is gated behind an explicit checkbox.

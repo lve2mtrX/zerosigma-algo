@@ -1955,3 +1955,68 @@ behavior makes naive runner tests time-dependent → solved with `--no-exit-on-e
 **Next:** Phase 10 = historical / snapped-data backtest adapter (replay snapshots
 through the scanner + this paper lifecycle). Phase 11 = Tastytrade execution
 readiness / live (manual_confirm → broker_paper → live), still deferred.
+
+---
+
+## 2026-06-02 — Phase 9C: ZerσSigma Algo Cockpit UI refresh + Strategy Builder + safe controls
+
+UI / profile-management only. NO trading-logic change, NO broker execution, NO
+orders, NO order preview. Dan committed 9A+9B as `7574cfe` first, so 9C started on
+a clean main. (Workflow path again: a 3-agent parallel **understand** workflow
+mapped the 1153-line streamlit file + mined the Dashboard brand palette + pinned
+the profile/control APIs; then I authored the coupled UI directly; then a
+verification workflow.)
+
+**Brand palette** (adapted from the Dashboard `assets/zerosigma.css`, values only —
+no code copied): bg `#0b0f14`, panel `#141a22`, text `#e8e8e8`, muted `#a7b0bd`,
+line `#232a33`, accent-green `#00E5A8`, blue `#2d6cff`, IBM Plex fonts, 14px cards,
+subtle green glow on the active tab.
+
+**New modules:**
+- `src/app/ui_helpers.py` — PURE (stdlib only, no `import streamlit`): `BRAND`,
+  `brand_css()` (targets stable selectors `.stApp` / `[data-testid="stMetric"]` /
+  `.stTabs`), `pill`/`hero`/`brand_title`/`metric_card` (HTML strings, escaped),
+  `fmt_money`/`fmt_num`/`dash`/`pnl_kind`.
+- `src/app/profile_builder.py` — PURE, imports ONLY strategy_profiles (no cycle):
+  `PROFILE_FIELDS` metadata (by section), `new_template_dict` / `load_dict_for_edit`
+  / `clone_dict` / `build_profile_dict` (type-coerce form values onto a base) /
+  `validate_dict` / `hash_for` / `save_profile` (overwrite guard + returns hash) /
+  `list_summaries`.
+- `src/app/control_ui.py` — guards over the Phase 9A `control` module:
+  `status_view`, `can_start` (refuse if active/alive/transitional/stale),
+  `start_runner` (status-check THEN control.start — refuses a 2nd runner),
+  `stop_runner` (graceful; `force` only when asked), `cleanup`, `safe_command`.
+
+**streamlit_main.py refactor:** sidebar selectors → a top `⚙ Controls & providers`
+expander; shared computation (providers/structure/chain/candidate context) stays
+ABOVE the tabs; each panel became a `render_*()` function (candidate/scoring/
+decision render logic preserved VERBATIM) called inside `st.tabs([...6...])`. Hero
+banner + `LOCAL · NO BROKER EXECUTION` pill. Forward Runner tab gained real
+Start/Stop/Cleanup/Refresh buttons (force-stop behind an explicit checkbox).
+Portfolio tab gained a realized-P&L `st.bar_chart`. Manual desk + EOD + session
+debug + session-controls form all preserved, re-homed into tabs.
+
+**Tests:** `tests/test_phase9c_cockpit.py` (20) — streamlit imports clean +
+ast.parse; ui_helpers (css palette, pill/card/format, σ highlight); profile_builder
+(template valid, build+coerce, reject execution/secret keys, **refuse overwrite
+unless explicit**, save writes YAML + list_summaries sees it, reject invalid, clone
+round-trip); control_ui (status_view states, can_start guard, **start refuses 2nd
+live runner via mocked control.status**, happy-path calls control.start, requires
+profile, **stop writes graceful stop force=False**, cleanup/safe_command); and a
+no-execution grep over all 4 UI files. Full suite **460 passed**, ruff clean.
+
+**Gotchas:** (1) removed the now-unused `forward_control` import (replaced by
+`control_ui`). (2) a "No broker." caption tripped the no-exec grep → "No
+brokerage." (same 9A/9B fix). (3) `control_ui.cleanup(())` bug — passed an empty
+tuple as root → fixed to `cleanup()`. (4) re-homing sections into `render_*()`
+functions relies on Streamlit running ALL tab bodies each rerun, so module-level
+vars (structure/chain/quote_spot/session/paper_account) computed above the tabs are
+visible to every panel.
+
+**Live-validated:** `streamlit_main` imports + runs the full tabbed script headless
+on stub/mock (bare-mode ScriptRunContext warnings only); `manage_profiles
+--validate-all`, `control_forward status`, `review_forward --latest`,
+`review_portfolio_forward --latest` all green.
+
+**Next:** Phase 10 = historical / snapped-data backtest adapter. Phase 11 =
+Tastytrade execution readiness / live, still deferred.

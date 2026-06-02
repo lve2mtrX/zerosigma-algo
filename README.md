@@ -1253,6 +1253,59 @@ The Streamlit "Portfolio forward (paper lifecycle)" section surfaces the latest
 heartbeat, open/closed trade tables, the P&L summary, the event log, and the
 reconciliation report — **read-only, with no execution or broker controls.**
 
+##### Phase 9C — ZerσSigma Algo Cockpit UI refresh + Strategy Builder + safe controls
+
+Phase 9C re-skins the Streamlit app into a dark, ZerσSigma-branded **tabbed
+command-center** (no dominant sidebar), adds a full **Strategy Builder** (Phase 6
+profile CRUD) and **safe local runner controls** (start/stop/status buttons over
+the Phase 9A process controller). **UI / profile-management only — no trading-logic
+changes, no broker execution, no orders, no order preview.**
+
+**Launch the cockpit (Windows PowerShell):**
+
+```powershell
+streamlit run .\src\app\streamlit_main.py
+# or
+python -m streamlit run .\src\app\streamlit_main.py
+```
+
+**Layout** — the ex-sidebar selectors move to a top **⚙ Controls & providers**
+expander; everything else lives in six tabs:
+
+| Tab | Contents |
+|---|---|
+| 🛰 **Live Cockpit** | provider status · market/structure cards · ranked candidates + per-candidate breakdown · daily selector · decision |
+| 🧱 **Strategy Builder** | list/clone/create/edit/validate/save Phase 6 run-profiles |
+| ▶ **Forward Runner** | control status + **Start / Stop / Cleanup / Refresh** buttons · forward heartbeat/summary · signal/no-trade/tick tables |
+| 💼 **Portfolio Paper** | paper lifecycle review (open/closed/P&L/events/reconciliation + a realized-P&L bar chart) · manual paper desk + equity curve |
+| 🗒 **Logs / Review** | EOD summary · session-config debug |
+| ⚙ **Settings** | session risk overrides · read-only paper-lifecycle (`PAPER_*`) config |
+
+Styling lives in the **pure** `src/app/ui_helpers.py` (`brand_css()` + card/pill/
+format helpers; palette adapted from the Dashboard theme — dark `#0b0f14`,
+electric-green `#00E5A8`, blue `#2d6cff`). No new dependencies; charts use built-in
+`st.line_chart` / `st.bar_chart`.
+
+**Strategy Builder** (`src/app/profile_builder.py`, pure): browse a table of
+`profiles/*.yaml`; pick **New** (from a safe template), **Edit**, or **Clone**;
+edit every Phase 6 field grouped by section; **Validate & compute hash** surfaces
+the deterministic `profile_hash` (or the validation errors); **Save** writes
+`profiles/{profile_id}.yaml` but **refuses to overwrite** unless you tick
+*"overwrite existing profile"*. Validation rejects `execution_mode` + credential
+keys, so **no secrets or execution intent can enter a profile**. Paper-lifecycle
+knobs are intentionally **not** part of the Phase 6 schema — they show read-only
+under Settings (sourced from env / CLI / `config/portfolio_profiles.yaml`).
+
+**Safe runner controls** (`src/app/control_ui.py`, guards over the Phase 9A
+`control` module): the Forward Runner tab shows reconciled status + **Refresh /
+Start / Stop / Cleanup stale** buttons. **Start** uses the selected profile +
+interval / once / max-ticks / market-hours settings and **refuses to launch a
+second runner** when one is already active. **Stop** requests a *graceful* stop
+first; a separate **⚠ Force stop** checkbox (off by default) is required before a
+force-terminate of the stored PID. Every control surface is labeled **LOCAL
+MONITORING ONLY — NO BROKER EXECUTION**, and copy-paste terminal equivalents are
+shown alongside the buttons.
+
 ##### What's still missing under `public_only`
 
 | Field | Still None under public_only? | How to populate |
