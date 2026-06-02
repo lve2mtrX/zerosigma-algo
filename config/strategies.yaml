@@ -22,6 +22,19 @@ strategies:
       # PUT_CEILING_CALL_CREDIT + CALL_FLOOR_PUT_CREDIT shared knobs
       volume_threshold: 2000          # contracts at a strike to qualify as ceiling/floor
       spread_width: 5                 # points between short and long strike
+
+      # Phase 4.2 — relative-aware bid_ask_quality sub-score calibration.
+      # The SAME pct-of-mid cutoffs drive BOTH the score and quote_quality_bucket
+      # so they always agree. MODE 'relative' (default) scores on pct-of-mid;
+      # 'absolute' reuses the legacy 1-worst_abs/cap (set MAX_ABS_CAP=0.20 for
+      # legacy parity). This is the ONLY sanctioned scoring change in 4.2 — the
+      # 0.05 bid_ask_quality WEIGHT, all other weights, the no_trade threshold,
+      # and hard_filters.max_bid_ask_width are UNCHANGED.
+      BID_ASK_QUALITY_MODE: relative  # relative | absolute
+      BID_ASK_GOOD_PCT: 0.03          # worst-leg pct-of-mid <= 3%  -> score 1.0 / bucket good
+      BID_ASK_ACCEPTABLE_PCT: 0.07    # <= 7%  -> 0.8..0.6 / acceptable
+      BID_ASK_POOR_PCT: 0.15          # <= 15% -> 0.5..0.2 / poor; >15% -> 0.0 / wide
+      BID_ASK_MAX_ABS_CAP: 1.00       # absolute-mode (or pct=None) cap; 0.20 = legacy parity
       preferred_entry_windows:
         - "10:55-11:05"
         - "15:10-15:20"

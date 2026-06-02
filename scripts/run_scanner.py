@@ -18,12 +18,31 @@ No broker. No ZS API. No live execution.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+
+
+def _quote_age_clock_skew_tolerance_seconds() -> float:
+    """Phase 4.2 — env-overridable clock-skew tolerance (seconds).
+
+    Documents the within-tolerance vs beyond-tolerance distinction for a
+    NEGATIVE observed quote age (provider/scanner clock skew). BOTH branches
+    clamp the emitted `quote_age_seconds` to 0.0; the tolerance only labels
+    how large the skew was. Default 2.0.
+    """
+    raw = os.getenv("QUOTE_AGE_CLOCK_SKEW_TOLERANCE_SECONDS", "2.0")
+    try:
+        return float(raw) if raw else 2.0
+    except (TypeError, ValueError):
+        return 2.0
+
+
+QUOTE_AGE_CLOCK_SKEW_TOLERANCE_SECONDS = _quote_age_clock_skew_tolerance_seconds()
 
 
 def main() -> int:
@@ -55,6 +74,14 @@ def main() -> int:
                         action="store_true", default=None,
                         help="if past after_hours_cutoff_et AND target_dte=0, roll to next day "
                              "(default from ALLOW_AFTER_HOURS_EXPIRY_ROLL env or YAML or false)")
+    # Phase 4.2 — strict target-DTE: if the requested target_dte is not in the
+    # broker chain (only a fallback expiry is available), force NO_TRADE rather
+    # than silently trading the fallback. Default off = today's lax fallback.
+    parser.add_argument("--strict-target-dte", dest="strict_target_dte",
+                        action="store_true", default=None,
+                        help="force NO_TRADE when target_dte is unavailable (only a fallback "
+                             "expiry exists) instead of trading the fallback "
+                             "(default from STRICT_TARGET_DTE env or scanner.expiry YAML or false)")
     # Phase 4.1 — per-candidate audit print (no truncation)
     parser.add_argument("--print-candidates", dest="print_candidates", action="store_true",
                         help="print per-candidate audit blocks to stdout (Phase 4.1)")
@@ -119,6 +146,15 @@ def main() -> int:
         allow_ah_roll = _env_bool(
             "ALLOW_AFTER_HOURS_EXPIRY_ROLL",
             bool(expiry_cfg.get("allow_after_hours_roll", False)),
+        )
+
+    # Phase 4.2 — strict target-DTE resolution (CLI > env > YAML > default).
+    if args.strict_target_dte is not None:
+        strict_target_dte = bool(args.strict_target_dte)
+    else:
+        strict_target_dte = _env_bool(
+            "STRICT_TARGET_DTE",
+            bool(expiry_cfg.get("strict_target_dte", False)),
         )
 
     after_hours_cutoff_et = str(expiry_cfg.get("after_hours_cutoff_et", "16:00"))
@@ -193,6 +229,14 @@ def main() -> int:
         available_expiries=available_expiries,
         after_hours_cutoff_et=after_hours_cutoff_et,
     )
+    # Phase 4.2 — strict gate: a 'fallback' / 'fallback_only_available' source
+    # means the requested target_dte was NOT in the chain. Under strict mode we
+    # mark it unavailable and (below, after strat.select) force NO_TRADE. The
+    # eff_expiry/chain fetch is left UNTOUCHED so there's no None-chain abort.
+    strict_unavailable = strict_target_dte and expiry_decision.source in (
+        "fallback", "fallback_only_available",
+    )
+    strict_target_dte_passed = not strict_unavailable
     eff_expiry = expiry_decision.expiry or structure.expiry
 
     # Build a QuoteRequest from the structure so synthesis providers
@@ -207,12 +251,47 @@ def main() -> int:
         required_strikes=tuple(required_strikes),
         spot_hint_source=spot_hint_source,
     )
+
+    # ── Phase 4.2.1 — pre-fetch guard ────────────────────────────────────
+    # Short-circuit to a clean NO_TRADE WITHOUT calling the quote provider
+    # when the request can't be served. This keeps a REST provider (Tasty)
+    # from being asked for a whole-chain pull it MUST refuse (and stops a
+    # premarket / no-anchor read from looking like a provider failure):
+    #   (a) strict target-DTE: the requested DTE is not in the chain — block
+    #       BEFORE the fetch so Tasty is never called (req 5).
+    #   (b) no required_strikes: structure produced no strikes to price (req 2).
+    # The Tasty whole-chain safety boundary is UNCHANGED — we simply never
+    # send it an empty-strikes request in the first place.
+    if strict_unavailable:
+        return _emit_skipped_quote_no_trade(
+            cfg=cfg, args=args, log=log, strategies=strategies, structure=structure,
+            resolved_quote_name=resolved_quote_name, target_dte=target_dte,
+            dte_mode=dte_mode, eff_expiry=eff_expiry, expiry_decision=expiry_decision,
+            required_strikes=required_strikes, strict_target_dte=strict_target_dte,
+            strict_target_dte_passed=strict_target_dte_passed,
+            quote_request_skipped_reason="strict_target_dte_unavailable",
+            selector_blockers=["strict_target_dte_unavailable"],
+        )
+    if not required_strikes:
+        return _emit_skipped_quote_no_trade(
+            cfg=cfg, args=args, log=log, strategies=strategies, structure=structure,
+            resolved_quote_name=resolved_quote_name, target_dte=target_dte,
+            dte_mode=dte_mode, eff_expiry=eff_expiry, expiry_decision=expiry_decision,
+            required_strikes=required_strikes, strict_target_dte=strict_target_dte,
+            strict_target_dte_passed=strict_target_dte_passed,
+            quote_request_skipped_reason="no_required_strikes",
+            selector_blockers=["no_required_strikes", "insufficient_structure"],
+        )
+
     chain = quote_provider.get_option_chain(symbol, expiry=eff_expiry, request=quote_request)
     if chain is None:
+        # The pre-fetch guard already handled the "no strikes" / strict cases,
+        # so a None chain here is a GENUINE provider failure (auth / transport /
+        # unresolved root) — surface it as an error, not a clean NO_TRADE.
         log.error(
-            "QuoteProvider returned no chain for %s @ %s (target_dte=%d, src=%s) "
-            "— aborting tick.",
-            symbol, eff_expiry, target_dte, expiry_decision.source,
+            "QuoteProvider returned no chain for %s @ %s (target_dte=%d, src=%s, "
+            "required_strikes=%d) — genuine provider failure, aborting tick.",
+            symbol, eff_expiry, target_dte, expiry_decision.source, len(required_strikes),
         )
         return 3
     quote_provider.get_spot(symbol)  # heartbeat
@@ -260,12 +339,19 @@ def main() -> int:
             structure=structure,
         )
 
+        # Phase 4.2.1 — strict target-DTE is now enforced BEFORE the quote fetch
+        # (see the pre-fetch guard in main()): a strict-unavailable tick returns
+        # a clean NO_TRADE without ever reaching here, so this path always serves
+        # a real (non-suppressed) expiry. strict_target_dte_passed is True here.
+        row_esr = expiry_decision.source
         for c in candidates:
             row = _candidate_row(
                 sid, c, session, ts, decision.decision, chain=chain,
                 target_dte=target_dte,
                 available_expiries=available_expiries,
-                expiry_selection_reason=expiry_decision.source,
+                expiry_selection_reason=row_esr,
+                strict_target_dte=strict_target_dte,
+                strict_target_dte_passed=strict_target_dte_passed,
             )
             ranked_rows.append(row)
             if args.print_candidates:
@@ -306,6 +392,9 @@ def main() -> int:
             "expiry_root_symbol":            expiry_decision.root_hint,
             "expiry_days_out":               expiry_decision.days_out,
             "available_expiries_count":      len(available_expiries),
+            # Phase 4.2 — strict target-DTE audit (auto-rides into JSONL)
+            "strict_target_dte":             strict_target_dte,
+            "strict_target_dte_passed":      strict_target_dte_passed,
         }
         if structure.expiry and eff_expiry and eff_expiry != structure.expiry:
             snapshot_summary["expiry_override"] = {
@@ -400,6 +489,10 @@ _DEFAULT_RANKED_FIELDS = [
     "selector_eligible_base", "selector_blockers", "selector_readiness_note",
     # Phase 4.1 — target-DTE plumbing
     "target_dte", "selected_expiry", "candidate_dte", "expiry_selection_reason",
+    # ── Phase 4.2 — APPENDED at the TAIL (never inserted mid-list) ──
+    "bid_ask_quality_mode", "bid_ask_quality_reason",
+    "quote_clock_skew_detected", "quote_clock_skew_seconds",
+    "strict_target_dte", "strict_target_dte_passed",
 ]  # used only when no candidate rows exist — keep in sync with _candidate_row()
 
 
@@ -410,6 +503,8 @@ def _candidate_row(
     target_dte: int = 0,
     available_expiries: list[str] | None = None,
     expiry_selection_reason: str | None = None,
+    strict_target_dte: bool = False,
+    strict_target_dte_passed: bool = True,
 ) -> dict:
     import json as _json
     import os as _os
@@ -441,7 +536,7 @@ def _candidate_row(
 
     # Per-leg quote_time → age vs `ts` (in ET). Pick the OLDEST of the two
     # so a stale leg can't hide behind a fresh one.
-    quote_age_seconds: float | None = None
+    raw_quote_age_seconds: float | None = None
     for leg in (short, long_):
         qt_iso = leg.get("quote_time")
         if not qt_iso:
@@ -453,8 +548,24 @@ def _candidate_row(
         if qt.tzinfo is None or ts.tzinfo is None:
             continue
         age = (ts - qt).total_seconds()
-        if quote_age_seconds is None or age > quote_age_seconds:
-            quote_age_seconds = age
+        if raw_quote_age_seconds is None or age > raw_quote_age_seconds:
+            raw_quote_age_seconds = age
+
+    # Phase 4.2 — clock-skew clamp. A NEGATIVE oldest age means the quote
+    # timestamp is AHEAD of the scanner clock (provider/scanner skew). Clamp the
+    # emitted age to 0.0 and surface skew metadata. None stays None (no data).
+    # BOTH within- and beyond-tolerance skews clamp to 0.0; the tolerance only
+    # labels the magnitude (QUOTE_AGE_CLOCK_SKEW_TOLERANCE_SECONDS).
+    quote_clock_skew_detected = False
+    quote_clock_skew_seconds = 0.0
+    if raw_quote_age_seconds is None:
+        quote_age_seconds: float | None = None
+    elif raw_quote_age_seconds >= 0:
+        quote_age_seconds = raw_quote_age_seconds
+    else:
+        quote_age_seconds = 0.0
+        quote_clock_skew_detected = True
+        quote_clock_skew_seconds = abs(raw_quote_age_seconds)
 
     row: dict = {
         "ts": ts.isoformat(),
@@ -550,6 +661,8 @@ def _candidate_row(
         available_expiries=available_expiries,
         today_et=ts.date(),
         expiry_selection_reason=expiry_selection_reason,
+        strict_target_dte=strict_target_dte,
+        strict_target_dte_passed=strict_target_dte_passed,
     )
     # Stamp readiness onto candidate.meta too, so the Streamlit per-candidate
     # expander can read the same values without re-deriving.
@@ -587,6 +700,22 @@ def _candidate_row(
     row["selected_expiry"]          = readiness["selected_expiry"]
     row["candidate_dte"]            = readiness["candidate_dte"]
     row["expiry_selection_reason"]  = readiness["expiry_selection_reason"]
+    # ── Phase 4.2 — APPENDED tail columns (never inserted mid-list) ──
+    # bid_ask_quality SCORE reuses the existing 'bid_ask_quality' column (above);
+    # quote_quality_bucket/reason + worst_leg_* reuse existing columns. These six
+    # are NEW: mode/reason for the score, the skew clamp, and the strict flags.
+    row["bid_ask_quality_mode"]     = c.meta.get("bid_ask_quality_mode")
+    row["bid_ask_quality_reason"]   = c.meta.get("bid_ask_quality_reason")
+    row["quote_clock_skew_detected"] = quote_clock_skew_detected
+    row["quote_clock_skew_seconds"]  = round(quote_clock_skew_seconds, 2)
+    row["strict_target_dte"]         = readiness["strict_target_dte"]
+    row["strict_target_dte_passed"]  = readiness["strict_target_dte_passed"]
+    # Mirror the new fields onto c.meta (like c.meta['_readiness'] above) so the
+    # decision_log.jsonl record auto-rides them via _candidate_to_dict(meta=...).
+    c.meta["quote_clock_skew_detected"] = quote_clock_skew_detected
+    c.meta["quote_clock_skew_seconds"]  = round(quote_clock_skew_seconds, 2)
+    c.meta["strict_target_dte"]         = readiness["strict_target_dte"]
+    c.meta["strict_target_dte_passed"]  = readiness["strict_target_dte_passed"]
     return row
 
 
@@ -644,6 +773,7 @@ def _print_candidate_audit(row: dict, c, chain=None) -> None:  # type: ignore[no
     out("--- identity ---")
     for k in ("strategy_id", "symbol" if "symbol" in row else "side", "selected_expiry",
               "target_dte", "candidate_dte", "expiry_selection_reason",
+              "strict_target_dte", "strict_target_dte_passed",
               "quote_chain_root", "quote_root_resolution_source"):
         v = row.get(k) if k in row else getattr(c, k, None)
         out(f"  {k}={v!r}")
@@ -669,7 +799,9 @@ def _print_candidate_audit(row: dict, c, chain=None) -> None:  # type: ignore[no
     # Quote
     out("--- quote ---")
     for k in ("quote_provider", "quote_timestamp", "quote_age_seconds",
-              "bid_ask_quality", "quote_quality_bucket", "quote_quality_reason",
+              "quote_clock_skew_detected", "quote_clock_skew_seconds",
+              "bid_ask_quality", "bid_ask_quality_mode", "bid_ask_quality_reason",
+              "quote_quality_bucket", "quote_quality_reason",
               "spread_bid", "spread_ask", "spread_mid",
               "spread_width", "spread_width_pct_of_mid",
               "worst_leg_bid_ask_abs", "worst_leg_bid_ask_pct_of_mid",
@@ -690,6 +822,205 @@ def _print_candidate_audit(row: dict, c, chain=None) -> None:  # type: ignore[no
         out(f"  {k}={row.get(k)!r}")
 
     out("---")
+
+
+def _print_skipped_quote_audit(
+    *,
+    quote_request_skipped_reason: str,
+    resolved_quote_name: str,
+    target_dte: int,
+    dte_mode: str,
+    eff_expiry,                                   # type: ignore[no-untyped-def]
+    expiry_decision,                              # type: ignore[no-untyped-def]
+    required_strikes: list,
+    strict_target_dte: bool,
+    strict_target_dte_passed: bool,
+    selector_blockers: list,
+    missing_required_quote_strikes: list,
+    candidate_dte,                                # type: ignore[no-untyped-def]
+    expiry_selection_reason,                      # type: ignore[no-untyped-def]
+) -> None:
+    """Phase 4.2.1 — scan-level audit block for a tick whose quote request was
+    skipped (no required strikes / strict target-DTE unavailable). Mirrors the
+    key=value style of `_print_candidate_audit` so `--print-candidates` stays
+    greppable even when NO provider call was made. NO secrets / env / tokens."""
+    out = print
+    out(f"=== QUOTE REQUEST SKIPPED === decision=NO_TRADE  "
+        f"reason={quote_request_skipped_reason}")
+    out("--- skip context ---")
+    for k, v in (
+        ("quote_request_skipped_reason", quote_request_skipped_reason),
+        ("required_strikes_available", bool(required_strikes)),
+        ("provider_called", False),
+        ("quote_provider", resolved_quote_name),
+        ("target_dte", target_dte),
+        ("dte_mode", dte_mode),
+        ("selected_expiry", eff_expiry),
+        ("candidate_dte", candidate_dte),
+        ("expiry_selection_reason", expiry_selection_reason),
+        ("expiry_selection_source", expiry_decision.source),
+        ("strict_target_dte", strict_target_dte),
+        ("strict_target_dte_passed", strict_target_dte_passed),
+        ("required_strikes", list(required_strikes)),
+        ("missing_required_quote_strikes", missing_required_quote_strikes),
+        ("selector_blockers", selector_blockers),
+    ):
+        out(f"  {k}={v!r}")
+    out("---")
+
+
+def _emit_skipped_quote_no_trade(
+    *,
+    cfg,                                          # type: ignore[no-untyped-def]
+    args,                                         # type: ignore[no-untyped-def]
+    log,                                          # type: ignore[no-untyped-def]
+    strategies: dict,
+    structure,                                    # type: ignore[no-untyped-def]
+    resolved_quote_name: str,
+    target_dte: int,
+    dte_mode: str,
+    eff_expiry,                                   # type: ignore[no-untyped-def]
+    expiry_decision,                              # type: ignore[no-untyped-def]
+    required_strikes: list,
+    strict_target_dte: bool,
+    strict_target_dte_passed: bool,
+    quote_request_skipped_reason: str,
+    selector_blockers: list,
+) -> int:
+    """Phase 4.2.1 — emit a clean NO_TRADE WITHOUT calling the quote provider.
+
+    Triggered pre-fetch when the request can't be served (no required strikes,
+    or strict target-DTE unavailable). Writes the same decision_log.jsonl +
+    header-only ranked_candidates.csv the normal no-candidate path writes,
+    carrying machine-readable audit fields. Logs a WARNING (not an error) and
+    returns 0 — a skipped quote request is a normal NO_TRADE, not a failure.
+    """
+    from src.reporting.decision_log import log_decision, log_decision_to_file
+    from src.storage.csv_writer import write_csv_snapshot
+    from src.storage.paths import latest_dir
+    from src.strategies.base import StrategyDecision
+    from src.utils.time import now_et
+
+    ts = now_et()
+    output_root = cfg.output_dir
+    latest = latest_dir(output_root)
+    structure_missing = (structure.raw or {}).get("missing_fields") or []
+    candidate_dte = expiry_decision.days_out
+    # No fetch happened, so NONE of the required strikes were quoted.
+    missing_required_quote_strikes = list(required_strikes)
+    expiry_selection_reason = (
+        "strict_target_dte_unavailable"
+        if quote_request_skipped_reason == "strict_target_dte_unavailable"
+        else expiry_decision.reason
+    )
+
+    if quote_request_skipped_reason == "no_required_strikes":
+        human = "quote request skipped: no required strikes available"
+        explanation = (
+            f"NO_TRADE — no required strikes from structure; quote provider "
+            f"'{resolved_quote_name}' was NOT called (insufficient structure / "
+            f"premarket no-anchor read)."
+        )
+    else:  # strict_target_dte_unavailable
+        human = "quote request skipped: strict target-DTE unavailable"
+        explanation = (
+            f"NO_TRADE — strict_target_dte: target_dte={target_dte} ({dte_mode}) "
+            f"not available (source={expiry_decision.source}); strict mode "
+            f"suppressed the fallback and quote provider '{resolved_quote_name}' "
+            f"was NOT called."
+        )
+
+    log.warning(
+        "%s (provider=%s, target_dte=%d, selected_expiry=%s, "
+        "expiry_selection_source=%s, required_strikes=%d)",
+        human, resolved_quote_name, target_dte, eff_expiry,
+        expiry_decision.source, len(required_strikes),
+    )
+
+    snapshot_summary: dict = {
+        "structure_provider": structure.source,
+        "structure_ts":       structure.quote_ts.isoformat(),
+        # No quote-provider call was made — chain-derived fields are null.
+        "quote_provider":     None,
+        "quote_ts":           None,
+        "spot":               None,
+        "structure_spot":     structure.spot,
+        "maxvol":             structure.exposures.maxvol,
+        "put_ceiling_2k":     structure.exposures.put_ceiling_2k,
+        "put_ceiling_5k":     structure.exposures.put_ceiling_5k,
+        "call_floor_2k":      structure.exposures.call_floor_2k,
+        "call_floor_5k":      structure.exposures.call_floor_5k,
+        "gamma_regime":       structure.exposures.gamma_regime,
+        "structure_missing_fields": list(structure_missing),
+        "structure_subscription_active": (structure.raw or {}).get("subscription_active"),
+        # quote alignment audit
+        "required_strikes":      list(required_strikes),
+        "quote_chain_min_strike": None,
+        "quote_chain_max_strike": None,
+        "missing_required_quote_strikes": missing_required_quote_strikes,
+        "quote_spot_source":     None,
+        "quote_spot_hint":       None,
+        # broker quote-provider audit
+        "resolved_quote_provider":       resolved_quote_name,
+        "quote_chain_root":              None,
+        "quote_root_resolution_source":  None,
+        # target-DTE plumbing audit
+        "target_dte":                    target_dte,
+        "dte_mode":                      dte_mode,
+        "selected_expiry":               eff_expiry,
+        "candidate_dte":                 candidate_dte,
+        "expiry_selection_source":       expiry_decision.source,
+        "expiry_selection_reason":       expiry_selection_reason,
+        "expiry_root_symbol":            expiry_decision.root_hint,
+        "expiry_days_out":               expiry_decision.days_out,
+        "strict_target_dte":             strict_target_dte,
+        "strict_target_dte_passed":      strict_target_dte_passed,
+        # ── Phase 4.2.1 — skipped-quote-request audit (machine-readable) ──
+        "quote_request_skipped":         True,
+        "quote_request_skipped_reason":  quote_request_skipped_reason,
+        "required_strikes_available":    bool(required_strikes),
+        "selector_blockers":             list(selector_blockers),
+    }
+
+    if not args.dry_run:
+        for sid in strategies:
+            decision = StrategyDecision(
+                strategy_id=sid,
+                decision="NO_TRADE",
+                selected=None,
+                all_candidates=[],
+                explanation=explanation,
+                rejection_reasons=list(selector_blockers),
+                threshold_used=None,
+                rejection_type=None,
+                best_score=None,
+                weak_components=[],
+            )
+            log_decision(output_root, decision, snapshot_summary, ts)
+            log_decision_to_file(latest / "decision_log.jsonl", decision, snapshot_summary, ts)
+
+    if args.print_candidates:
+        _print_skipped_quote_audit(
+            quote_request_skipped_reason=quote_request_skipped_reason,
+            resolved_quote_name=resolved_quote_name,
+            target_dte=target_dte, dte_mode=dte_mode, eff_expiry=eff_expiry,
+            expiry_decision=expiry_decision, required_strikes=required_strikes,
+            strict_target_dte=strict_target_dte,
+            strict_target_dte_passed=strict_target_dte_passed,
+            selector_blockers=selector_blockers,
+            missing_required_quote_strikes=missing_required_quote_strikes,
+            candidate_dte=candidate_dte,
+            expiry_selection_reason=expiry_selection_reason,
+        )
+
+    if not args.dry_run:
+        # Header-only snapshot — same convention as a normal zero-candidate
+        # NO_TRADE tick (no rows → headers only). Keeps the CSV schema stable.
+        write_csv_snapshot(latest / "ranked_candidates.csv", [], _DEFAULT_RANKED_FIELDS)
+        log.info("skipped-quote NO_TRADE written (reason=%s, strategies=%d)",
+                 quote_request_skipped_reason, len(strategies))
+
+    return 0
 
 
 def _refine_decision_explanation(

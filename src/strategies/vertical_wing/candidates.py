@@ -24,6 +24,14 @@ from src.providers.quotes.types import (
 )
 from src.providers.structure.types import StructureSnapshot
 from src.strategies.base import Candidate
+from src.utils.quote_quality import (
+    DEFAULT_ACCEPTABLE_PCT,
+    DEFAULT_GOOD_PCT,
+    DEFAULT_MAX_ABS_CAP,
+    DEFAULT_POOR_PCT,
+)
+from src.utils.quote_quality import bid_ask_quality as _bid_ask_quality
+from src.utils.quote_quality import quality_bucket as _quality_bucket
 
 
 def _ceiling_for_threshold(
@@ -112,12 +120,23 @@ def _stamp_spread_meta(
     short_q: OptionQuote,
     long_q: OptionQuote,
     spread: SpreadQuote,
+    *,
+    bid_ask_quality_mode: str = "relative",
+    good_pct: float = DEFAULT_GOOD_PCT,
+    acceptable_pct: float = DEFAULT_ACCEPTABLE_PCT,
+    poor_pct: float = DEFAULT_POOR_PCT,
+    max_abs_cap: float = DEFAULT_MAX_ABS_CAP,
 ) -> None:
     """Phase 4.1 — surface spread bid/ask/mid + width metrics as top-level meta.
 
     Keeps the existing `spread_quote` sub-dict for back-compat. New top-level
     keys are consumed by readiness / CSV / Streamlit; same numbers, easier
     to grep.
+
+    Phase 4.2 — ALSO stamps the relative-aware bid_ask_quality score plus its
+    mode/reason AND the pct-of-mid quote_quality_bucket/reason here, keyed on
+    the SAME cutoffs so score and bucket always agree. readiness.py PREFERS
+    these stamped values; it only re-derives for fixtures that lack them.
     """
     meta["spread_bid"]   = spread.credit_bid
     meta["spread_ask"]   = spread.credit_ask
@@ -137,6 +156,33 @@ def _stamp_spread_meta(
     else:
         meta["spread_width_pct_of_mid"] = None
 
+    # Phase 4.2 — relative-aware bid_ask_quality (replaces the blunt absolute
+    # $0.20 cap). Same pct cutoffs drive both score and bucket.
+    score, mode_used, score_reason = _bid_ask_quality(
+        worst_abs=worst_abs,
+        worst_pct=worst_pct,
+        mode=bid_ask_quality_mode,
+        good_pct=good_pct,
+        acceptable_pct=acceptable_pct,
+        poor_pct=poor_pct,
+        max_abs_cap=max_abs_cap,
+    )
+    short_passed = short_q.validation_passed
+    long_passed  = long_q.validation_passed
+    bucket, bucket_reason = _quality_bucket(
+        worst_pct=worst_pct,
+        short_passed=short_passed,
+        long_passed=long_passed,
+        good_pct=good_pct,
+        acceptable_pct=acceptable_pct,
+        poor_pct=poor_pct,
+    )
+    meta["bid_ask_quality"]        = score
+    meta["bid_ask_quality_mode"]   = mode_used
+    meta["bid_ask_quality_reason"] = score_reason
+    meta["quote_quality_bucket"]   = bucket
+    meta["quote_quality_reason"]   = bucket_reason
+
 
 def build_put_ceiling_call_credit(
     structure: StructureSnapshot,
@@ -145,6 +191,12 @@ def build_put_ceiling_call_credit(
     spread_width: float,
     strategy_id: str,
     max_bid_ask_width: float | None = None,
+    *,
+    bid_ask_quality_mode: str = "relative",
+    good_pct: float = DEFAULT_GOOD_PCT,
+    acceptable_pct: float = DEFAULT_ACCEPTABLE_PCT,
+    poor_pct: float = DEFAULT_POOR_PCT,
+    max_abs_cap: float = DEFAULT_MAX_ABS_CAP,
 ) -> Candidate | None:
     """SELL Call@K / BUY Call@(K + width) where K = StructureProvider's PUT_CEILING."""
     short_k, anchor_source, structure_volume = _ceiling_for_threshold(structure, threshold)
@@ -189,12 +241,18 @@ def build_put_ceiling_call_credit(
         "short_leg":            _quote_dict(short_q),
         "long_leg":             _quote_dict(long_q),
         "spread_quote":         _spread_dict(spread),
-        "bid_ask_quality":      _bid_ask_quality_score(
-            short_q, long_q, max_bid_ask_width or 0.20,
-        ),
         "threshold":            threshold,
     }
-    _stamp_spread_meta(meta, short_q, long_q, spread)
+    # Phase 4.2 — stamps bid_ask_quality (+ mode/reason) and
+    # quote_quality_bucket (+ reason) from the SAME pct cutoffs.
+    _stamp_spread_meta(
+        meta, short_q, long_q, spread,
+        bid_ask_quality_mode=bid_ask_quality_mode,
+        good_pct=good_pct,
+        acceptable_pct=acceptable_pct,
+        poor_pct=poor_pct,
+        max_abs_cap=max_abs_cap,
+    )
 
     return Candidate(
         strategy_id=strategy_id,
@@ -219,6 +277,12 @@ def build_call_floor_put_credit(
     spread_width: float,
     strategy_id: str,
     max_bid_ask_width: float | None = None,
+    *,
+    bid_ask_quality_mode: str = "relative",
+    good_pct: float = DEFAULT_GOOD_PCT,
+    acceptable_pct: float = DEFAULT_ACCEPTABLE_PCT,
+    poor_pct: float = DEFAULT_POOR_PCT,
+    max_abs_cap: float = DEFAULT_MAX_ABS_CAP,
 ) -> Candidate | None:
     """SELL Put@K / BUY Put@(K - width) where K = StructureProvider's CALL_FLOOR."""
     short_k, anchor_source, structure_volume = _floor_for_threshold(structure, threshold)
@@ -263,12 +327,18 @@ def build_call_floor_put_credit(
         "short_leg":            _quote_dict(short_q),
         "long_leg":             _quote_dict(long_q),
         "spread_quote":         _spread_dict(spread),
-        "bid_ask_quality":      _bid_ask_quality_score(
-            short_q, long_q, max_bid_ask_width or 0.20,
-        ),
         "threshold":            threshold,
     }
-    _stamp_spread_meta(meta, short_q, long_q, spread)
+    # Phase 4.2 — stamps bid_ask_quality (+ mode/reason) and
+    # quote_quality_bucket (+ reason) from the SAME pct cutoffs.
+    _stamp_spread_meta(
+        meta, short_q, long_q, spread,
+        bid_ask_quality_mode=bid_ask_quality_mode,
+        good_pct=good_pct,
+        acceptable_pct=acceptable_pct,
+        poor_pct=poor_pct,
+        max_abs_cap=max_abs_cap,
+    )
 
     return Candidate(
         strategy_id=strategy_id,

@@ -23,56 +23,32 @@ from datetime import date
 from typing import Any
 
 from src.strategies.base import Candidate
+from src.utils.quote_quality import (
+    DEFAULT_ACCEPTABLE_PCT,
+    DEFAULT_GOOD_PCT,
+    DEFAULT_POOR_PCT,
+)
+from src.utils.quote_quality import quality_bucket as _quality_bucket
 
 # Buckets a candidate's quote quality lives in, after the validator runs.
 # Ordered: invalid → poor → acceptable → good. unknown=no quote data at all
 # (e.g. mock provider without validation, missing leg widths).
 QuoteQualityBucket = str  # one of {good, acceptable, poor, invalid, wide, unknown}
 
-# Boundaries (in absolute $ per leg bid-ask spread) — chosen to be
-# meaningful for SPX 0DTE/short-dated wings. Tuned to match what Dan sees
-# in live ticks: <$0.10 is excellent, $0.20-$0.50 is normal, $0.50+ wide.
-_BUCKET_GOOD_MAX       = 0.10
-_BUCKET_ACCEPTABLE_MAX = 0.20
-_BUCKET_POOR_MAX       = 0.50
-# Anything above _BUCKET_POOR_MAX → 'wide'.
+# Phase 4.2 — bucket boundaries MIGRATED from absolute-$ bins to pct-of-mid
+# (fraction of the worst leg's mid). The SHARED helper in src/utils/quote_quality
+# owns the cutoffs (good<=3%, acceptable<=7%, poor<=15%, wide>15%) so the bucket
+# and the bid_ask_quality SCORE always agree — fixing the live 4.1 case where a
+# quote PASSED validation yet scored bid_ask_quality=0.00 with bucket='poor'.
+# This module PREFERS the bucket/reason stamped onto Candidate.meta by the
+# strategy; the helper here is the fallback for fixtures / mock candidates that
+# carry only a pct (or nothing).
 
 
 @dataclass(frozen=True)
 class _SessionLike:
     """Minimal duck-type for `session` arg — we read starting_balance only."""
     starting_balance: float
-
-
-def _quote_quality_bucket(
-    *,
-    worst_leg_abs: float | None,
-    short_passed: bool | None,
-    long_passed: bool | None,
-) -> tuple[str, str]:
-    """Return (bucket, reason).
-
-    Order:
-      - any leg explicitly failed validation → 'invalid' (validator wins)
-      - no width data + no validation result  → 'unknown'
-      - width <= _BUCKET_GOOD_MAX            → 'good'
-      - width <= _BUCKET_ACCEPTABLE_MAX      → 'acceptable'
-      - width <= _BUCKET_POOR_MAX            → 'poor'
-      - width >  _BUCKET_POOR_MAX            → 'wide'
-
-    Tuple's `reason` is a short snake_case string suitable for CSV.
-    """
-    if short_passed is False or long_passed is False:
-        return "invalid", "validation_failed"
-    if worst_leg_abs is None:
-        return "unknown", "no_leg_width"
-    if worst_leg_abs <= _BUCKET_GOOD_MAX:
-        return "good", f"worst_leg_abs<={_BUCKET_GOOD_MAX:.2f}"
-    if worst_leg_abs <= _BUCKET_ACCEPTABLE_MAX:
-        return "acceptable", f"worst_leg_abs<={_BUCKET_ACCEPTABLE_MAX:.2f}"
-    if worst_leg_abs <= _BUCKET_POOR_MAX:
-        return "poor", f"worst_leg_abs<={_BUCKET_POOR_MAX:.2f}"
-    return "wide", f"worst_leg_abs>{_BUCKET_POOR_MAX:.2f}"
 
 
 def _shape_filter_reasons(c: Candidate) -> list[str]:
@@ -102,6 +78,8 @@ def compute_readiness(
     available_expiries: list[str] | None = None,
     today_et: date | None = None,
     expiry_selection_reason: str | None = None,
+    strict_target_dte: bool = False,
+    strict_target_dte_passed: bool = True,
 ) -> dict[str, Any]:
     """Classify `c` into a flat dict of selector-facing readiness fields.
 
@@ -121,6 +99,15 @@ def compute_readiness(
                                causes candidate_dte to be None
       expiry_selection_reason: optional override; if not provided, derived
                                from (target_dte, c.expiry, available_expiries)
+      strict_target_dte:       Phase 4.2 — when True, a target_dte that could
+                               only be served by an expiry FALLBACK is treated
+                               as unavailable (the scanner forces NO_TRADE).
+                               Default False = today's lax fallback behavior.
+      strict_target_dte_passed: False when strict mode is on AND the requested
+                               target_dte was NOT available (fell back). When
+                               this is False under strict_target_dte=True, a
+                               'strict_target_dte_unavailable' blocker is added,
+                               esr is overridden, and eligibility flips False.
 
     Output keys (ALL always present):
       - candidate_passes_score_threshold (bool)
@@ -143,6 +130,8 @@ def compute_readiness(
       - selected_expiry                   (str)
       - candidate_dte                     (int | None)
       - expiry_selection_reason           (str)
+      - strict_target_dte                 (bool)
+      - strict_target_dte_passed          (bool)
     """
     score = float(c.score or 0.0)
     edge = score - float(threshold)
@@ -163,18 +152,34 @@ def compute_readiness(
     )
     risk_rejection_reason = "; ".join(r for r in risk_reasons if r) or None
 
-    # Quote: classify on worst-leg width AND validator pass/fail.
+    # Quote: classify on worst-leg PCT-of-mid AND validator pass/fail.
+    # Phase 4.2 — PREFER the bucket/reason the strategy stamped into meta
+    # (computed from the SAME pct cutoffs as the bid_ask_quality score, so the
+    # two agree). FALL BACK to the shared helper for fixtures / mock candidates
+    # that carry only a pct (or nothing). readiness NEVER re-derives the score.
     short_leg = c.meta.get("short_leg") or {}
     long_leg = c.meta.get("long_leg") or {}
     short_passed = short_leg.get("validation_passed")
     long_passed = long_leg.get("validation_passed")
     worst_leg_abs = c.meta.get("worst_leg_bid_ask_abs")
     worst_leg_pct = c.meta.get("worst_leg_bid_ask_pct_of_mid")
-    bucket, bucket_reason = _quote_quality_bucket(
-        worst_leg_abs=worst_leg_abs,
-        short_passed=short_passed,
-        long_passed=long_passed,
-    )
+    stamped_bucket = c.meta.get("quote_quality_bucket")
+    stamped_reason = c.meta.get("quote_quality_reason")
+    if isinstance(stamped_bucket, str) and isinstance(stamped_reason, str):
+        bucket, bucket_reason = stamped_bucket, stamped_reason
+    else:
+        bucket, bucket_reason = _quality_bucket(
+            worst_pct=(
+                float(worst_leg_pct)
+                if isinstance(worst_leg_pct, (int, float))
+                else None
+            ),
+            short_passed=short_passed,
+            long_passed=long_passed,
+            good_pct=DEFAULT_GOOD_PCT,
+            acceptable_pct=DEFAULT_ACCEPTABLE_PCT,
+            poor_pct=DEFAULT_POOR_PCT,
+        )
     # A candidate "passes quote filters" if NO leg explicitly failed.
     # 'unknown' counts as a pass (mock chain leaves validation None).
     passes_quote = bucket != "invalid"
@@ -243,6 +248,17 @@ def compute_readiness(
     else:
         esr = expiry_selection_reason
 
+    # Phase 4.2 — strict target-DTE gate. When strict mode is on AND the
+    # requested target_dte could only be served by a fallback expiry, the
+    # candidate is NOT eligible: add the blocker, override esr (it wins over
+    # the matches_target/fallback derivation above), and flip eligibility.
+    # Applied AFTER esr derivation so 'strict_target_dte_unavailable' wins; it
+    # never fires when strict_target_dte is False (default).
+    if strict_target_dte and not strict_target_dte_passed:
+        blockers.append("strict_target_dte_unavailable")
+        esr = "strict_target_dte_unavailable"
+        selector_eligible_base = False
+
     # Short readiness note — 1-line summary for the audit print.
     if selector_eligible_base and not is_marginal:
         note = "eligible"
@@ -280,4 +296,6 @@ def compute_readiness(
         "selected_expiry":                   c.expiry,
         "candidate_dte":                     candidate_dte,
         "expiry_selection_reason":           esr,
+        "strict_target_dte":                 bool(strict_target_dte),
+        "strict_target_dte_passed":          bool(strict_target_dte_passed),
     }

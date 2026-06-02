@@ -792,9 +792,16 @@ is purely additive.
 
 ### 11.3 Quote quality bucket
 
-`compute_readiness(...)` classifies each candidate's quote into one of:
+> **SUPERSEDED by Phase 4.2 — see §12.** The bucket below is the ORIGINAL 4.1
+> definition on **absolute-$** bins. Phase 4.2 MIGRATED the bucket to
+> **pct-of-mid** bins so it shares the SAME cutoffs as the `bid_ask_quality`
+> score (they can no longer contradict). The table is retained for historical
+> context only; §12 is authoritative.
 
-| Bucket | Rule |
+`compute_readiness(...)` classifies each candidate's quote into one of
+(4.1 absolute bins — superseded):
+
+| Bucket | Rule (4.1, superseded) |
 |---|---|
 | `invalid`   | Either leg has `validation_passed=False` (validator wins) |
 | `unknown`   | No leg-width data AND no validation result (mock chain default) |
@@ -803,11 +810,11 @@ is purely additive.
 | `poor`      | worst-leg bid-ask abs ≤ **$0.50** |
 | `wide`      | worst-leg bid-ask abs >  $0.50 |
 
-The bucket is **distinct from** the existing `bid_ask_quality` score component
-(`_bid_ask_quality_score` in `candidates.py`). That scorer uses an absolute
-$0.20 cap and clips to 0.0 when the worst leg exceeds it. Phase 4.1 keeps the
-scorer unchanged (no scoring weight changes); the bucket makes the legibility
-of the cap visible alongside.
+In 4.1 the bucket was **distinct from** the `bid_ask_quality` score component
+(an absolute $0.20 cap that clipped to 0.0 when the worst leg exceeded it), so
+a wide-but-valid quote could score 0.0 yet bucket `acceptable`/`poor`. **Phase
+4.2 fixes that contradiction** — the score and bucket now share one pct-of-mid
+ruleset (§12).
 
 A `quote_invalid:<reason>` blocker enters `selector_blockers` only when bucket
 is `invalid` — the other widths still pass `candidate_passes_quote_filters`
@@ -856,3 +863,148 @@ group, or filter on these.
 
 Precedence: CLI > env > YAML > default. Defaults match today's behavior so
 no operator action is required.
+
+## 12. Phase 4.2 — relative bid/ask quality + strict DTE + clock skew
+
+Three surgical changes. NOTHING else in scoring/weights/threshold/risk-caps is
+touched; no execution. The `bid_ask_quality` recalibration is the ONLY
+sanctioned scoring change.
+
+### 12.1 Quote VALIDATION vs quote QUALITY (two different things)
+
+| | Quote VALIDATION | Quote QUALITY |
+|---|---|---|
+| What | broker per-leg pass/fail | strategy sub-score `bid_ask_quality` |
+| Where | `QuoteValidation.validate` (`types.py`) | `src/utils/quote_quality.py` |
+| Output | `OptionQuote.validation_passed` + `*_validation_passed` CSV cols | `bid_ask_quality` ∈ [0,1] + `quote_quality_bucket` |
+| Rejects | crossed / zero-bid / wide-abs / wide-pct / **positive-age** stale | (does not reject — feeds a 0.05-weighted score) |
+| 4.2 change | **none** (byte-identical) | abs cap → **relative pct-of-mid** |
+
+A quote can PASS validation and still earn a low `bid_ask_quality` (or vice
+versa). They are independent and intentionally so.
+
+### 12.2 Relative `bid_ask_quality` + bucket (shared pct-of-mid cutoffs)
+
+The shared pure module `src/utils/quote_quality.py` (stdlib-only; never
+contains the `vertical_wing` substring, so `src/selector/readiness.py` may
+import it without tripping `test_no_vw_leak`) is the single source of truth for
+BOTH the score and the bucket — keyed on the WORST leg's bid-ask spread as a
+fraction of its mid (`worst_leg_bid_ask_pct_of_mid`):
+
+| worst-leg pct-of-mid | `bid_ask_quality` (relative) | `quote_quality_bucket` |
+|---|---|---|
+| ≤ `BID_ASK_GOOD_PCT` (3%) | `1.0` | `good` |
+| > 3% … ≤ `BID_ASK_ACCEPTABLE_PCT` (7%) | linear **0.8 → 0.6** | `acceptable` |
+| > 7% … ≤ `BID_ASK_POOR_PCT` (15%) | linear **0.5 → 0.2** | `poor` |
+| > 15% | `0.0` | `wide` |
+| `None` (no usable mid) or negative | `0.0`* | `unknown` |
+| crossed / missing leg (`worst_abs is None`) | `0.0` | `invalid` |
+| any leg `validation_passed=False` | `0.0` | `invalid` (validator wins) |
+
+\* When `worst_pct is None` (no mid) the SCORE auto-falls back to the absolute
+path (`1 - worst_abs/cap`) so a missing mid never silently zeroes an otherwise
+valid quote; the BUCKET reports `unknown`.
+
+Worked endpoints (verifiable in `tests/test_phase4p2_quote_quality.py`):
+`pct=0.05 → 0.7`, `pct=0.07 → 0.6`, `pct=0.11 → 0.35`, `pct=0.15 → 0.2`. The
+live motivating case `pct=0.0645` (a $0.20 leg on a ~$3.10 mid) → **~0.6275**
+(bucket `acceptable`), where the old absolute $0.20 cap gave **0.0**.
+
+`candidates.py` STAMPS all five into `Candidate.meta`: `bid_ask_quality`,
+`bid_ask_quality_mode`, `bid_ask_quality_reason`, `quote_quality_bucket`,
+`quote_quality_reason`. `readiness.py` PREFERS the stamped bucket/reason and
+only calls the shared helper for fixtures/mock candidates lacking them
+(`readiness.py` never imports `vertical_wing`).
+
+### 12.3 `bid_ask_*` config table
+
+| Source | Name | Default | Notes |
+|---|---|---|---|
+| YAML | `…default_parameters.BID_ASK_QUALITY_MODE` | `relative` | `relative` (pct-of-mid) \| `absolute` (legacy cap) |
+| YAML | `…default_parameters.BID_ASK_GOOD_PCT` | `0.03` | ≤ this → score 1.0 / bucket `good` |
+| YAML | `…default_parameters.BID_ASK_ACCEPTABLE_PCT` | `0.07` | ≤ this → 0.8–0.6 / `acceptable` |
+| YAML | `…default_parameters.BID_ASK_POOR_PCT` | `0.15` | ≤ this → 0.5–0.2 / `poor`; above → 0.0 / `wide` |
+| YAML | `…default_parameters.BID_ASK_MAX_ABS_CAP` | `1.00` | absolute-mode (or pct=None) cap. **Set 0.20 for 4.1 parity** |
+| Env | `BID_ASK_QUALITY_MODE` … `BID_ASK_MAX_ABS_CAP` | (match YAML) | env substitution into YAML `${…}`; `strategy.py` `float()`-casts the numerics |
+| Env | `QUOTE_AGE_CLOCK_SKEW_TOLERANCE_SECONDS` | `2.0` | labels within/beyond-tolerance skew magnitude only |
+
+**Operator parity caveat:** `BID_ASK_MAX_ABS_CAP` defaults to **1.00**, NOT the
+legacy 0.20. `BID_ASK_QUALITY_MODE=absolute` reproduces 4.1 ONLY if you also
+set `BID_ASK_MAX_ABS_CAP=0.20`.
+
+The 0.05 `bid_ask_quality` weight (`score_weights`), the 0.60
+`no_trade_score_threshold`, and `hard_filters.max_bid_ask_width=0.20` are
+**UNCHANGED**.
+
+### 12.4 Clock-skew clamp rule
+
+In `run_scanner.py._candidate_row` the oldest-leg `quote_age_seconds` is the
+scanner's observability age:
+
+| raw oldest age | emitted `quote_age_seconds` | `quote_clock_skew_detected` | `quote_clock_skew_seconds` |
+|---|---|---|---|
+| `None` (no quote_time) | `None` | `False` | `0.0` |
+| `>= 0` (normal) | raw (rounded) | `False` | `0.0` |
+| `< 0` (quote ts ahead of clock) | **`0.0`** | `True` | `abs(raw)` |
+
+Both within-tolerance and beyond-tolerance negatives clamp to 0.0;
+`QUOTE_AGE_CLOCK_SKEW_TOLERANCE_SECONDS` (default 2.0) documents the magnitude
+distinction only. `QuoteValidation.validate` is **not** touched, so its
+positive-age staleness rejection (`age > max_age_seconds`) is byte-identical
+and tiny/negative skews never trigger a stale rejection.
+
+### 12.5 Strict target-DTE reason + blocker
+
+| Knob | Default | Effect when true |
+|---|---|---|
+| CLI `--strict-target-dte` | (from env) | scanner only; tri-state `store_true` |
+| Env `STRICT_TARGET_DTE` | `false` | |
+| YAML `scanner.expiry.strict_target_dte` | `false` | |
+
+Precedence CLI > env > YAML > default. When `target_dte` can only be served by
+an expiry FALLBACK (`expiry_decision.source ∈ {fallback,
+fallback_only_available}`), strict mode:
+
+- forces `decision.decision = "NO_TRADE"` AFTER `strat.select` (all candidate
+  observability preserved; the `eff_expiry`/chain fetch is left untouched so
+  there is no None-chain traceback);
+- adds the `strict_target_dte_unavailable` entry to `selector_blockers`;
+- overrides `expiry_selection_reason` (esr) to `strict_target_dte_unavailable`
+  (wins over the `matches_target`/`fallback` derivation);
+- flips `selector_eligible_base` to `False`.
+
+An **exact** match (e.g. `--target-dte 0` resolving to `source='today'`) is NOT
+a fallback, so strict is a no-op there. `pick_target_expiry` is byte-identical
+(its 18 expiry tests stay green); strict enforcement lives entirely in
+`run_scanner.py` + `readiness.py`.
+
+### 12.6 New CSV/JSONL/audit fields
+
+Six columns APPENDED at the TAIL of `_DEFAULT_RANKED_FIELDS` (existing indices
+preserved, never inserted mid-list):
+
+`bid_ask_quality_mode`, `bid_ask_quality_reason`, `quote_clock_skew_detected`,
+`quote_clock_skew_seconds`, `strict_target_dte`, `strict_target_dte_passed`.
+
+The `bid_ask_quality` SCORE reuses the existing `bid_ask_quality` column;
+`quote_quality_bucket`/`quote_quality_reason` + `worst_leg_bid_ask_abs`/
+`…pct_of_mid` reuse existing columns (no duplicates). `decision_log.jsonl`
+auto-rides the new fields because the scanner mirrors them onto
+`Candidate.meta` (like `_readiness`) and the JSONL writer embeds meta verbatim.
+`snapshot_summary` also carries `strict_target_dte` + `strict_target_dte_passed`.
+
+### 12.7 Deliberate no-touch / documented mock tweak
+
+- `QuoteValidation.validate` (`types.py`): NOT touched.
+- `src/utils/expiry.py`: NOT touched (a None expiry is silently rescued by
+  `eff_expiry`, so a sentinel can't force NO_TRADE; the 18 expiry tests assert
+  `source='fallback'`/`'fallback_only_available'`).
+- `src/reporting/decision_log.py`: NOT touched (pass-through embeds meta).
+- `src/providers/_mock_data.py`: ONE sanctioned tweak — the four legs of the
+  two default-selected mock spreads (5780/5785/5815/5820) tightened
+  `bid_ask_width` 0.10 → 0.02. A flat $0.10 on a sub-$1 OTM long leg (e.g. 5820
+  `c_mid=0.50` → 20% of mid) is correctly `wide`/0.0 under the relative scorer
+  and would otherwise break the mock smoke invariant (one CALL_CREDIT + one
+  PUT_CREDIT tradeable). All mids/volumes/OI and every other strike's width are
+  UNCHANGED. (The design's original "no mock change needed" premise was wrong —
+  it analyzed the short anchor legs, not the worst/long legs.)

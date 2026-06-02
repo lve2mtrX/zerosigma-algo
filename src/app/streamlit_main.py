@@ -549,6 +549,10 @@ else:
                 "planned $":   round(planned, 0),
                 "R:R":         round(c.reward_risk, 2),
                 "b/a quality": round(c.meta.get("bid_ask_quality", 0.0), 2),
+                # Phase 4.2 — surface the bid_ask_quality MODE (relative |
+                # absolute) so the operator can see which calibration produced
+                # the score, alongside the existing 'bucket' column.
+                "b/a mode":    c.meta.get("bid_ask_quality_mode") or "—",
                 "breakeven":   round(c.breakeven, 2),
                 "score":       round(c.score, 2),
                 "gap":         (round(c.score_gap_to_threshold, 3)
@@ -557,6 +561,8 @@ else:
                 "edge":        (round(c.score_edge, 4)
                                 if isinstance(c.score_edge, (int, float)) else None),
                 "bucket":      readiness["quote_quality_bucket"],
+                # Phase 4.2 — bucket reason (same pct cutoffs as the score)
+                "bucket_reason": readiness["quote_quality_reason"],
                 "risk_type":   readiness["risk_rejection_type"] or "—",
                 "rejection":   c.rejection_type or ("rejected" if c.rejected else None),
                 "weak":        "; ".join(c.weak_components),
@@ -645,7 +651,12 @@ else:
                         "Phase 4.1: `score_edge` (score − threshold), "
                         "`quote_quality_bucket` (good/acceptable/poor/wide/invalid), "
                         "`risk_rejection_type` (planned/theoretical cap), "
-                        "`selector_blockers` (eligibility audit)."
+                        "`selector_blockers` (eligibility audit). "
+                        "Phase 4.2: `bid_ask_quality` is now RELATIVE (pct-of-mid) "
+                        "and shares the SAME cutoffs as the bucket; quote VALIDATION "
+                        "(broker pass/fail per leg, above) is separate from the quote "
+                        "QUALITY score. `quote_clock_skew_*` flags a negative quote "
+                        "age clamped to 0. `strict_target_dte` (CLI scanner only)."
                     )
                     sc = st.columns(4)
                     sc[0].metric(
@@ -668,6 +679,45 @@ else:
                             "**Selector blockers:** "
                             + ", ".join(f"`{b}`" for b in blockers)
                         )
+                    # ── Phase 4.2 — bid_ask_quality mode + clock-skew tiles ──
+                    # mode/reason are stamped on c.meta by the strategy; the
+                    # clock-skew fields are stamped by the scanner's
+                    # _candidate_row and may be absent in this inline preview
+                    # (strict_target_dte is intentionally NOT wired into the
+                    # inline compute_readiness this phase).
+                    p42 = st.columns(4)
+                    p42[0].metric(
+                        "b/a quality",
+                        f"{c.meta.get('bid_ask_quality', 0.0):.2f}",
+                        c.meta.get("bid_ask_quality_mode") or "—",
+                    )
+                    p42[1].metric(
+                        "b/a reason", c.meta.get("bid_ask_quality_reason") or "—",
+                    )
+                    skew_det = c.meta.get("quote_clock_skew_detected")
+                    p42[2].metric(
+                        "Clock skew",
+                        "yes" if skew_det else ("no" if skew_det is False else "—"),
+                    )
+                    skew_s = c.meta.get("quote_clock_skew_seconds")
+                    p42[3].metric(
+                        "Skew (s)",
+                        f"{skew_s:.2f}" if isinstance(skew_s, (int, float)) else "—",
+                    )
+                    # Phase 4.2 — bucket reason (shares the score's pct cutoffs)
+                    # + strict_target_dte status. strict is sourced from the
+                    # readiness dict; in this inline preview it is the default
+                    # (False / True) since strict is a CLI-scanner-only gate.
+                    q_reason = rd.get("quote_quality_reason")
+                    if q_reason:
+                        st.caption(f"Quote-quality reason: `{q_reason}`")
+                    strict_on = rd.get("strict_target_dte")
+                    strict_ok = rd.get("strict_target_dte_passed")
+                    st.caption(
+                        f"strict_target_dte: `{strict_on}`  ·  "
+                        f"passed: `{strict_ok}`  "
+                        "_(CLI scanner gate; not enforced in this inline preview)_"
+                    )
                 st.json(c.score_breakdown, expanded=False)
 
     decision = strat.select(candidates, params)

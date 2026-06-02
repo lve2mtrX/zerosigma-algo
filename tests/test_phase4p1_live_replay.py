@@ -134,8 +134,13 @@ def test_live_call_credit_is_marginal_but_selected():
     r = compute_readiness(cc, session=_session(), threshold=0.60, min_score_edge=0.02)
     assert r["candidate_is_marginal"]      is True
     assert r["selector_readiness_note"]    == "eligible_but_marginal"
-    # quote_quality_bucket: worst_leg_abs=0.20 → 'acceptable' (boundary)
-    assert r["quote_quality_bucket"]       == "acceptable"
+    # Phase 4.2 abs→pct migration: the bucket now keys on pct-of-mid, not the
+    # old absolute-$ bins. This live CALL_CREDIT's worst leg is the 7610 short
+    # (0.20 wide on a 1.30 mid = 15.38% of mid), which is > the 15% poor cutoff
+    # → 'wide'. (Under the old 4.1 absolute bins 0.20 was the 'acceptable'
+    # boundary.) Crucially the SELECTION branch is unchanged — this is still
+    # selected + marginal; only the observability bucket label moved.
+    assert r["quote_quality_bucket"]       == "wide"
 
 
 def test_live_put_credit_rejected_with_structured_risk_fields():

@@ -42,6 +42,17 @@ PHASE_4P1_APPENDED = (
     "target_dte", "selected_expiry", "candidate_dte", "expiry_selection_reason",
 )
 
+# Phase 4.2 APPENDED at the TAIL of _DEFAULT_RANKED_FIELDS (after every Phase
+# 4.1 column). bid_ask_quality SCORE reuses the existing 'bid_ask_quality'
+# column; quote_quality_bucket/reason + worst_leg_* reuse existing columns —
+# these six are the NEW ones (score mode/reason, the clock-skew clamp, and the
+# strict-target-DTE flags). Order is load-bearing — they must stay at the tail.
+PHASE_4P2_APPENDED = (
+    "bid_ask_quality_mode", "bid_ask_quality_reason",
+    "quote_clock_skew_detected", "quote_clock_skew_seconds",
+    "strict_target_dte", "strict_target_dte_passed",
+)
+
 
 def test_default_ranked_fields_keeps_phase_le_4_tail_intact():
     """Every Phase ≤4 column appears in _DEFAULT_RANKED_FIELDS BEFORE the
@@ -59,6 +70,30 @@ def test_default_ranked_fields_contains_all_phase4p1_columns():
     fields = set(rs._DEFAULT_RANKED_FIELDS)
     for col in PHASE_4P1_APPENDED:
         assert col in fields, f"missing Phase 4.1 column {col!r}"
+
+
+def test_default_ranked_fields_contains_all_phase4p2_columns():
+    fields = set(rs._DEFAULT_RANKED_FIELDS)
+    for col in PHASE_4P2_APPENDED:
+        assert col in fields, f"missing Phase 4.2 column {col!r}"
+
+
+def test_phase4p2_columns_appended_at_tail_after_phase4p1():
+    """The six Phase 4.2 columns APPEND after every Phase 4.1 column — they
+    were tacked onto the END of _DEFAULT_RANKED_FIELDS, never inserted
+    mid-list. Anchored on 'expiry_selection_reason' (the last 4.1 column)."""
+    fields = list(rs._DEFAULT_RANKED_FIELDS)
+    last_phase4p1_idx = max(fields.index(c) for c in PHASE_4P1_APPENDED)
+    first_phase4p2_idx = min(fields.index(c) for c in PHASE_4P2_APPENDED)
+    assert last_phase4p1_idx < first_phase4p2_idx, (
+        "Phase 4.2 columns must APPEND after every Phase 4.1 column"
+    )
+    # They also come strictly after expiry_selection_reason.
+    esr_idx = fields.index("expiry_selection_reason")
+    for col in PHASE_4P2_APPENDED:
+        assert fields.index(col) > esr_idx, (
+            f"Phase 4.2 column {col!r} must follow expiry_selection_reason"
+        )
 
 
 def test_candidate_row_emits_all_phase4p1_columns():
@@ -119,17 +154,31 @@ def test_candidate_row_emits_all_phase4p1_columns():
     # All Phase 4.1 columns present
     for col in PHASE_4P1_APPENDED:
         assert col in row, f"row missing Phase 4.1 column {col!r}"
+    # Phase 4.2 — the six new tail columns are emitted too.
+    for col in PHASE_4P2_APPENDED:
+        assert col in row, f"row missing Phase 4.2 column {col!r}"
     # Spot-check key values
     assert row["score_edge"] == 0.05
     assert row["score_edge_passed"] is True
     assert row["spread_bid"]  == 0.35
     assert row["spread_mid"]  == 0.425
     assert row["worst_leg_bid_ask_abs"] == 0.10
-    assert row["quote_quality_bucket"]  == "good"
+    # Phase 4.2 abs→pct migration: this fixture stamps
+    # worst_leg_bid_ask_pct_of_mid=0.18 (18%) and does NOT pre-stamp a
+    # quote_quality_bucket, so readiness derives it from pct → 'wide' (>15%).
+    # (Under the old 4.1 absolute bins worst_abs=0.10 was 'good'.)
+    assert row["quote_quality_bucket"]  == "wide"
     assert row["risk_rejection_type"]   is None
     assert row["planned_stop_risk_dollars"] == 405.0
     assert row["planned_stop_risk_cap_dollars"] == 1000.0
-    # Selector_eligible_base = True (all passes)
+    # Phase 4.2 — strict flags default to (False, True) when not requested;
+    # no clock skew on a same-timestamp fixture.
+    assert row["strict_target_dte"] is False
+    assert row["strict_target_dte_passed"] is True
+    assert row["quote_clock_skew_detected"] is False
+    assert row["quote_clock_skew_seconds"] == 0.0
+    # Selector_eligible_base: quote bucket 'wide' is NOT 'invalid', so quote
+    # filters still PASS and (with score/risk/trade passing) base stays True.
     assert row["selector_eligible_base"] is True
     # Expiry plumbing
     assert row["target_dte"] == 0
@@ -146,9 +195,11 @@ def test_existing_phase_le_4_column_indices_preserved():
     assert fields[2] == "decision"
     assert fields[3] == "side"
     # Phase 4 last block ends at quote_rejection_reason — find it and
-    # confirm everything after is Phase 4.1.
+    # confirm everything after is a Phase 4.1 OR Phase 4.2 appended column.
+    # (Phase 4.2 tacked six more columns at the tail; allow BOTH tuples.)
     qrr = fields.index("quote_rejection_reason")
+    allowed = set(PHASE_4P1_APPENDED) | set(PHASE_4P2_APPENDED)
     for col in fields[qrr + 1:]:
-        assert col in PHASE_4P1_APPENDED, (
+        assert col in allowed, (
             f"unexpected column {col!r} appended after quote_rejection_reason"
         )

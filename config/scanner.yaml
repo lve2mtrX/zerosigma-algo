@@ -55,3 +55,8 @@ scanner:
     dte_mode: trading_days          # calendar_days | trading_days
     allow_after_hours_roll: false
     after_hours_cutoff_et: "16:00"   # ET; default = market close
+    # Phase 4.2 — when true, a target_dte the broker chain can't serve (only a
+    # fallback expiry exists) forces NO_TRADE instead of silently trading the
+    # fallback. CLI --strict-target-dte > STRICT_TARGET_DTE env > this > false.
+    # Default false = today's lax fallback behavior.
+    strict_target_dte: false

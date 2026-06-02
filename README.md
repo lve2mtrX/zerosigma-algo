@@ -700,6 +700,131 @@ differs from `structure.expiry`.
 See `docs/reference_notes.md §11` for the full algorithm + holiday list
 (hardcoded 2025-2027 — annual review needed).
 
+##### Phase 4.2 — relative bid/ask quality + strict DTE + clock skew
+
+Phase 4.2 makes **three surgical changes**. Everything else — all other
+scoring components, the `bid_ask_quality` **weight** (0.05), the
+`no_trade_score_threshold` (0.60), `hard_filters.max_bid_ask_width` (0.20),
+and every risk cap — is **untouched**. No execution, no order paths.
+
+**1. Relative-aware `bid_ask_quality` (quote VALIDATION vs quote QUALITY).**
+These are two independent things and Phase 4.2 keeps them separate:
+
+- **Quote VALIDATION** (`QuoteValidation`, Phase 4) is the broker's per-leg
+  pass/fail: crossed market / zero bid / wide absolute spread / wide pct /
+  staleness. It lands on `OptionQuote.validation_passed` and the
+  `short/long/quote_validation_passed` CSV columns. **Unchanged in 4.2.**
+- **Quote QUALITY** is the strategy's `bid_ask_quality` sub-score. In 4.1
+  it used a blunt **absolute $0.20 cap** and clipped to 0.0 whenever the
+  worst leg's spread exceeded $0.20 — so a Tasty quote that *passed*
+  validation could still score `bid_ask_quality=0.00` while its
+  `quote_quality_bucket` (then on absolute $ bins) read `poor`. The score
+  and the bucket disagreed.
+
+4.2 replaces the absolute cap with a **relative pct-of-mid** scorer in a new
+pure module `src/utils/quote_quality.py`. The **same cutoffs drive BOTH the
+score and the bucket**, so they can never contradict again:
+
+| worst-leg pct-of-mid | score | bucket |
+|---|---|---|
+| ≤ 3% (`BID_ASK_GOOD_PCT`) | 1.0 | `good` |
+| > 3% … ≤ 7% (`BID_ASK_ACCEPTABLE_PCT`) | linear 0.8 → 0.6 | `acceptable` |
+| > 7% … ≤ 15% (`BID_ASK_POOR_PCT`) | linear 0.5 → 0.2 | `poor` |
+| > 15% | 0.0 | `wide` |
+| None / negative | 0.0 | `unknown` (no leg width) |
+| crossed / missing leg | 0.0 | `invalid` |
+| any leg failed validation | 0.0 | `invalid` (validator wins) |
+
+The live case that motivated this: a worst leg **$0.20 wide on a ~$3.10 mid
+= 6.45% of mid**. Under the old absolute cap → 0.0. Under relative mode →
+**~0.63** (bucket `acceptable`). The `quote_quality_bucket` semantics
+deliberately **migrated from absolute-$ bins to pct-of-mid bins**.
+
+Legacy absolute scoring is still available as an opt-in:
+`BID_ASK_QUALITY_MODE=absolute` (with `BID_ASK_MAX_ABS_CAP=0.20` for exact
+4.1 parity — the default cap is **1.00**, NOT 0.20). When a leg has no usable
+mid, the scorer auto-falls back to absolute so a missing mid never silently
+zeroes an otherwise-valid quote.
+
+New `Candidate.meta` keys + CSV columns: `bid_ask_quality_mode`
+(`relative`|`absolute`), `bid_ask_quality_reason`. (The score reuses the
+existing `bid_ask_quality` column; the bucket reuses `quote_quality_bucket`.)
+
+**2. Strict target-DTE.** By default the scanner *falls back* to the nearest
+forward expiry when the requested `target_dte` isn't in the broker chain.
+`--strict-target-dte` (or `STRICT_TARGET_DTE=true`, or
+`scanner.expiry.strict_target_dte: true`) instead forces **NO_TRADE** rather
+than silently trading the fallback — the row gets a
+`strict_target_dte_unavailable` selector blocker and the decision explanation
+says so. No traceback. An **exact** target_dte match (e.g. today's expiry at
+`--target-dte 0`) is *not* a fallback, so strict mode is a no-op there.
+`pick_target_expiry` is unchanged.
+
+**Phase 4.2.1 — pre-fetch quote-request guard.** The scanner now decides
+whether it can even *ask* for quotes before calling the provider. Two
+conditions short-circuit to a clean **NO_TRADE** *without* calling the quote
+provider at all:
+
+- **No required strikes** — the structure produced no anchor strikes to price
+  (e.g. a premarket / public-only ZS read). The scanner logs
+  `quote request skipped: no required strikes available` (a **warning**, not an
+  error) and emits NO_TRADE with `quote_request_skipped_reason=no_required_strikes`,
+  `required_strikes_available=false`, and `selector_blockers` ⊇
+  `[no_required_strikes, insufficient_structure]`.
+- **Strict target-DTE unavailable** — enforced here, *before* the fetch, with
+  `quote_request_skipped_reason=strict_target_dte_unavailable`.
+
+This is why `TastytradeQuoteProvider` is never handed an empty
+`required_strikes` request: the REST provider correctly **refuses whole-chain
+pulls**, and the scanner no longer mistakes that refusal for a provider
+failure. The Tasty whole-chain safety boundary is unchanged — the scanner
+simply doesn't send an unservable request. A `None` chain returned *after* a
+real request (auth/transport/unresolved-root) is still a genuine error.
+Both skip paths still write `decision_log.jsonl` (rich `snapshot_summary`) and a
+header-only `ranked_candidates.csv`; `--print-candidates` prints a
+`QUOTE REQUEST SKIPPED` audit block.
+
+**3. Clock-skew clamp.** A negative oldest-leg `quote_age_seconds` means the
+quote timestamp is *ahead* of the scanner clock (provider/scanner skew). 4.2
+clamps the emitted age to **0.0** and surfaces `quote_clock_skew_detected` +
+`quote_clock_skew_seconds`. `QUOTE_AGE_CLOCK_SKEW_TOLERANCE_SECONDS`
+(default 2.0) only *labels* within- vs beyond-tolerance magnitude — both
+clamp to 0.0. The broker validator's positive-age staleness rejection is
+**byte-identical** (negative/tiny skews never trigger a stale rejection).
+
+Six CSV columns are **APPENDED at the tail** (existing indices preserved):
+`bid_ask_quality_mode`, `bid_ask_quality_reason`, `quote_clock_skew_detected`,
+`quote_clock_skew_seconds`, `strict_target_dte`, `strict_target_dte_passed`.
+The audit print and Streamlit per-candidate expander surface them; the
+decision-log JSONL auto-rides them via `Candidate.meta`.
+
+**Example commands:**
+
+```powershell
+# Mock chain (tight relative spreads → decision matches the 4.1 baseline)
+python -m scripts.run_scanner --structure-provider zerosigma_api `
+  --quote-provider mock --target-dte 1 --print-candidates
+
+# Tasty, today's expiry (relative quality scoring on real quotes)
+python -m scripts.run_scanner --quote-provider tastytrade `
+  --target-dte 1 --print-candidates
+
+# Tasty, demand DTE=2 strictly — NO_TRADE if only a fallback expiry exists
+python -m scripts.run_scanner --quote-provider tastytrade `
+  --target-dte 2 --strict-target-dte --print-candidates
+```
+
+**Mock-data note.** The four legs of the two default-selected mock spreads
+(strikes 5780/5785/5815/5820) carry a tighter `bid_ask_width=0.02`. A flat
+$0.10 spread on a sub-$1 OTM long leg (e.g. 5820 `c_mid=0.50` → 20% of mid)
+is an unrealistically *wide* relative market that the recalibrated scorer
+correctly scores 0.0/`wide`; tightening those legs keeps the mock smoke
+invariant ("at least one CALL_CREDIT + one PUT_CREDIT is tradeable") intact.
+All mids/volumes/OI and every other strike's width are unchanged.
+
+See `docs/reference_notes.md §12` for the bid/ask config table, the
+clock-skew clamp rule, and the strict-DTE reason string.
+
 ##### What's still missing under `public_only`
 
 | Field | Still None under public_only? | How to populate |

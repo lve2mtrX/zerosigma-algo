@@ -96,35 +96,52 @@ class TestScoreEdge:
 # ── quote quality bucket ─────────────────────────────────────────────────
 
 class TestQuoteQualityBucket:
+    # Phase 4.2 abs→pct migration: the bucket now keys on
+    # worst_leg_bid_ask_PCT_OF_MID (fraction of the worst leg's mid), NOT the
+    # old absolute-$ bins. The SAME cutoffs (good<=3%, acceptable<=7%,
+    # poor<=15%, wide>15%) drive both the bucket and the bid_ask_quality score
+    # so they always agree. An abs-only fixture (no pct) now yields 'unknown'
+    # — see test_unknown_when_no_data below. These four cases set the pct field
+    # in the intended band.
     def test_good_tight_quote(self):
+        # pct 1% <= good (3%) -> 'good'
         c = _candidate(meta={"worst_leg_bid_ask_abs": 0.05,
+                             "worst_leg_bid_ask_pct_of_mid": 0.01,
                              "risk_rejections": {"planned_loss_cap": {"passed": True}}})
         r = compute_readiness(c, session=_S(), threshold=0.60, min_score_edge=0.02)
         assert r["quote_quality_bucket"] == "good"
 
     def test_acceptable_at_boundary(self):
+        # pct exactly at the acceptable boundary (7%) -> 'acceptable'
         c = _candidate(meta={"worst_leg_bid_ask_abs": 0.20,
+                             "worst_leg_bid_ask_pct_of_mid": 0.07,
                              "risk_rejections": {"planned_loss_cap": {"passed": True}}})
         r = compute_readiness(c, session=_S(), threshold=0.60, min_score_edge=0.02)
         assert r["quote_quality_bucket"] == "acceptable"
 
     def test_poor_above_acceptable(self):
+        # pct 12% in (7%, 15%] -> 'poor'
         c = _candidate(meta={"worst_leg_bid_ask_abs": 0.40,
+                             "worst_leg_bid_ask_pct_of_mid": 0.12,
                              "risk_rejections": {"planned_loss_cap": {"passed": True}}})
         r = compute_readiness(c, session=_S(), threshold=0.60, min_score_edge=0.02)
         assert r["quote_quality_bucket"] == "poor"
 
     def test_wide_above_poor(self):
+        # pct 20% > poor (15%) -> 'wide'
         c = _candidate(meta={"worst_leg_bid_ask_abs": 1.00,
+                             "worst_leg_bid_ask_pct_of_mid": 0.20,
                              "risk_rejections": {"planned_loss_cap": {"passed": True}}})
         r = compute_readiness(c, session=_S(), threshold=0.60, min_score_edge=0.02)
         assert r["quote_quality_bucket"] == "wide"
 
     def test_validation_failed_overrides_to_invalid(self):
-        # Even with tight bid/ask, an explicit validator failure on either leg
-        # forces bucket=invalid.
+        # Phase 4.2: validator precedence survives the abs→pct migration. Even
+        # with a tight pct, an explicit validator failure on either leg
+        # short-circuits to bucket=invalid BEFORE any pct band is consulted.
         c = _candidate(meta={
             "worst_leg_bid_ask_abs": 0.05,
+            "worst_leg_bid_ask_pct_of_mid": 0.01,
             "short_leg": {"validation_passed": False},
             "long_leg": {"validation_passed": True},
             "risk_rejections": {"planned_loss_cap": {"passed": True}},
@@ -135,12 +152,25 @@ class TestQuoteQualityBucket:
         assert any("quote_invalid" in b for b in r["selector_blockers"])
 
     def test_unknown_when_no_data(self):
+        # Phase 4.2: the 'unknown' sentinel MOVED from "abs absent" to "pct
+        # absent". A candidate with neither pct nor a leg-validation result
+        # (e.g. mock chain) buckets 'unknown' and still PASSES quote filters.
         c = _candidate(meta={
             "risk_rejections": {"planned_loss_cap": {"passed": True}},
         })
         r = compute_readiness(c, session=_S(), threshold=0.60, min_score_edge=0.02)
         assert r["quote_quality_bucket"] == "unknown"
         # unknown should still allow eligibility (mock chain leaves validation None)
+        assert r["candidate_passes_quote_filters"] is True
+
+    def test_abs_only_fixture_is_unknown_not_crash(self):
+        # Phase 4.2: an abs-only fixture (no pct) must NOT crash and must
+        # bucket 'unknown' (pct is the key now). Guards the other test classes
+        # in this file that still stamp only worst_leg_bid_ask_abs.
+        c = _candidate(meta={"worst_leg_bid_ask_abs": 0.05,
+                             "risk_rejections": {"planned_loss_cap": {"passed": True}}})
+        r = compute_readiness(c, session=_S(), threshold=0.60, min_score_edge=0.02)
+        assert r["quote_quality_bucket"] == "unknown"
         assert r["candidate_passes_quote_filters"] is True
 
 

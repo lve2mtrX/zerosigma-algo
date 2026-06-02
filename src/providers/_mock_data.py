@@ -52,10 +52,22 @@ class MockStrikeRow:
 
 # Deterministic 5-pt grid from 5780 to 5830 around spot 5800.
 # Volumes wired so 2K/5K PUT_CEILING and CALL_FLOOR resolve to different strikes.
+#
+# Phase 4.2 NOTE — the four strikes that compose the two default-selected
+# spreads (CALL_CREDIT 5815/5820 + PUT_CREDIT 5785/5780) carry a tighter
+# bid_ask_width=0.02 (vs the flat 0.10 default). RATIONALE: the new
+# relative-aware bid_ask_quality sub-score keys on pct-OF-MID, and a flat
+# $0.10 spread on a sub-$1 OTM long leg (e.g. 5820 c_mid=0.50 → 20%) is an
+# unrealistically WIDE relative market that the recalibrated scorer correctly
+# scores 0.0/'wide'. Tightening these legs to a realistic 0.02 (≈1-4% of mid)
+# restores a coherent quote so the mock smoke invariant ("at least one
+# CALL_CREDIT + one PUT_CREDIT candidate is tradeable") holds. This is the
+# ONLY sanctioned _mock_data.py change for Phase 4.2; all mids/volumes/OI and
+# every other strike's width are UNCHANGED.
 MOCK_CHAIN: tuple[MockStrikeRow, ...] = (
     # ── below spot — CALL_FLOOR territory ──
-    MockStrikeRow(5780, c_mid=18.50, p_mid=0.85,  c_volume=300,  p_volume=200,  c_open_interest=900, p_open_interest=1100),
-    MockStrikeRow(5785, c_mid=14.20, p_mid=1.60,  c_volume=2200, p_volume=300,  c_open_interest=1200, p_open_interest=1000),  # 2K CALL_FLOOR
+    MockStrikeRow(5780, c_mid=18.50, p_mid=0.85,  c_volume=300,  p_volume=200,  c_open_interest=900, p_open_interest=1100, bid_ask_width=0.02),  # PUT_CREDIT long leg
+    MockStrikeRow(5785, c_mid=14.20, p_mid=1.60,  c_volume=2200, p_volume=300,  c_open_interest=1200, p_open_interest=1000, bid_ask_width=0.02),  # 2K CALL_FLOOR (PUT_CREDIT short)
     MockStrikeRow(5790, c_mid=10.40, p_mid=2.50,  c_volume=5400, p_volume=400,  c_open_interest=1800, p_open_interest=1200),  # also 5K-qualifying
     MockStrikeRow(5795, c_mid=6.80,  p_mid=3.40,  c_volume=600,  p_volume=500,  c_open_interest=1500, p_open_interest=1400),
     # ── at-the-money — thin, wide bid/ask ──
@@ -63,8 +75,8 @@ MOCK_CHAIN: tuple[MockStrikeRow, ...] = (
     MockStrikeRow(5805, c_mid=1.95,  p_mid=4.95,  c_volume=200,  p_volume=180,  c_open_interest=1700, p_open_interest=1800, bid_ask_width=0.40),
     # ── above spot — PUT_CEILING territory ──
     MockStrikeRow(5810, c_mid=1.80,  p_mid=8.80,  c_volume=400,  p_volume=5500, c_open_interest=1300, p_open_interest=2400),  # 5K PUT_CEILING (also 2K-qualifying)
-    MockStrikeRow(5815, c_mid=1.10,  p_mid=13.40, c_volume=350,  p_volume=4500, c_open_interest=1100, p_open_interest=2100),  # 2K PUT_CEILING (highest @2K)
-    MockStrikeRow(5820, c_mid=0.50,  p_mid=18.20, c_volume=250,  p_volume=400,  c_open_interest=950,  p_open_interest=1500),
+    MockStrikeRow(5815, c_mid=1.10,  p_mid=13.40, c_volume=350,  p_volume=4500, c_open_interest=1100, p_open_interest=2100, bid_ask_width=0.02),  # 2K PUT_CEILING (CALL_CREDIT short)
+    MockStrikeRow(5820, c_mid=0.50,  p_mid=18.20, c_volume=250,  p_volume=400,  c_open_interest=950,  p_open_interest=1500, bid_ask_width=0.02),  # CALL_CREDIT long leg
     MockStrikeRow(5825, c_mid=0.20,  p_mid=23.10, c_volume=180,  p_volume=300,  c_open_interest=800,  p_open_interest=1300),
     MockStrikeRow(5830, c_mid=0.10,  p_mid=28.05, c_volume=150,  p_volume=200,  c_open_interest=700,  p_open_interest=1100),
 )

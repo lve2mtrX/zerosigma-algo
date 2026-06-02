@@ -1455,3 +1455,153 @@ only (`marginal_score: bool | None`) to avoid touching the literal.
 holidays. Update the dict + `_SUPPORTED_YEARS` annually each Nov-Dec; tests
 will fail loudly if `pick_target_expiry` is called for a year outside the
 supported range.
+
+---
+
+## 2026-06-02 — Phase 4.2 (quote-scoring recalibration / strict DTE / clock skew)
+
+Motivation: the hardcoded ABSOLUTE bid/ask cap (default $0.20) made valid Tasty
+quotes score `bid_ask_quality=0.00`. Live 4.1 tick: CALL_CREDIT 7610/7615,
+worst leg $0.20 wide on a ~$3.10 mid (= 6.45% of mid) -> old scorer clipped to
+0.0 and the candidate fell below the 0.60 threshold, while the
+`quote_quality_bucket` (then on absolute-$ bins) read a contradictory label.
+**The selector should wait until the quote-quality score is relative-aware** —
+a 6.45%-of-mid market is a perfectly tradeable spread, not a 0.0.
+
+Three surgical changes (NOTHING else in scoring/weights/threshold/risk-caps
+touched; no execution):
+
+1. **Relative `bid_ask_quality`** — new pure module `src/utils/quote_quality.py`
+   (stdlib-only, neutral path so both `vertical_wing/candidates.py` and
+   `src/selector/readiness.py` import it without tripping `test_no_vw_leak`;
+   the module never contains the `vertical_wing` substring). pct-of-mid
+   cutoffs (good<=3% -> 1.0; <=7% -> 0.8..0.6; <=15% -> 0.5..0.2; >15% -> 0.0;
+   None/neg -> 0.0; crossed/missing leg -> 0.0/`invalid`). The SAME cutoffs
+   drive the score AND `quote_quality_bucket`, so they can't disagree again.
+   `candidates.py` STAMPS score + mode + reason + bucket + bucket-reason into
+   `Candidate.meta`; `readiness.py` PREFERS the stamped bucket and falls back
+   to the shared helper for fixtures. The `quote_quality_bucket` semantics
+   MIGRATED from absolute-$ bins to pct-of-mid bins (deliberate). Legacy
+   `absolute` mode retained as a knob (`BID_ASK_QUALITY_MODE`,
+   `BID_ASK_MAX_ABS_CAP`; set cap 0.20 for 4.1 parity — default cap is 1.00,
+   NOT 0.20) and auto-used when a leg has no usable mid.
+
+2. **Strict target-DTE** — `--strict-target-dte` / `STRICT_TARGET_DTE` /
+   `scanner.expiry.strict_target_dte` (default false). When `target_dte` can
+   only be served by an expiry FALLBACK, strict forces NO_TRADE (blocker +
+   esr `strict_target_dte_unavailable`). Enforced in `run_scanner.py` +
+   `readiness.py` ONLY; `pick_target_expiry` is byte-identical (its 18 tests
+   stay green — a None expiry there is silently rescued by `eff_expiry`, so a
+   sentinel can't force NO_TRADE; strict is detected from
+   `expiry_decision.source in {fallback, fallback_only_available}` after
+   `strat.select`). NOTE: the orchestrator task item said to add strict
+   handling in `expiry.py`, but the DESIGN said do NOT edit it — followed the
+   design.
+
+3. **Clock-skew clamp** — negative oldest-leg `quote_age_seconds` (quote ts
+   ahead of scanner clock) clamps to 0.0 with `quote_clock_skew_detected` /
+   `quote_clock_skew_seconds`. `QUOTE_AGE_CLOCK_SKEW_TOLERANCE_SECONDS`
+   (default 2.0) labels magnitude only; both within- and beyond-tolerance
+   negatives clamp to 0.0. None stays None. `QuoteValidation.validate` is
+   untouched -> positive-age staleness rejection byte-identical.
+
+### Design deviation recorded (mock data)
+
+The design's `documented_choices` claimed the mock's selected wings score
+relative 1.0 and `_mock_data.py` needs NO change — that premise was WRONG (it
+analyzed the SHORT anchor legs, not the WORST/long legs). The selected
+CALL_CREDIT long leg is 5820 (`c_mid=0.50`); a flat $0.10 spread there is 20%
+of mid -> 0.0/`wide`, which dropped the mock CALL_CREDIT below 0.60 and broke
+the smoke invariant. Sanctioned (constraint #7) minimal fix: tightened
+`bid_ask_width` 0.10 -> 0.02 on the 4 legs (5780/5785/5815/5820) of the two
+default-selected spreads. All mids/volumes/OI and every other strike's width
+UNCHANGED. Mock now trades CALL_CREDIT again.
+
+### New CSV/JSONL/audit fields
+
+Six CSV columns APPENDED at the tail (indices preserved): `bid_ask_quality_mode`,
+`bid_ask_quality_reason`, `quote_clock_skew_detected`, `quote_clock_skew_seconds`,
+`strict_target_dte`, `strict_target_dte_passed`. JSONL auto-rides via meta.
+`bid_ask_quality` SCORE reuses the existing column; `quote_quality_bucket/reason`
++ `worst_leg_*` reuse existing columns (no duplicates).
+
+### Tests touched / added
+
+- `test_phase4p1_readiness.py::TestQuoteQualityBucket` — rewrote the 4 band
+  cases to set `worst_leg_bid_ask_pct_of_mid` (good 0.01 / acceptable 0.07 /
+  poor 0.12 / wide 0.20); validator-fail still `invalid`, no-data still
+  `unknown` (now keyed on pct). Added an abs-only -> `unknown` guard.
+- `test_phase4p1_live_replay.py` — the live CALL_CREDIT's worst leg is 15.38%
+  of mid -> bucket now `wide` (was `acceptable` under abs); decision branch
+  unchanged.
+- `test_phase4p1_csv_columns.py` — added `PHASE_4P2_APPENDED`; index-preserve
+  loop allows both 4.1+4.2 tuples; new tail-order test; `quote_quality_bucket`
+  spot-check updated to the pct value.
+- NEW `test_phase4p2_quote_quality.py` (module endpoints, bucket+score
+  agreement, candidates.py stamping, absolute legacy, crossed-leg floor).
+- NEW `test_phase4p2_strict_and_skew.py` (strict off/on/exact-match via the
+  scanner harness + `--help`; clock-skew clamp on `_candidate_row`).
+
+### Absolute-mode parity caveat (operators)
+
+`BID_ASK_MAX_ABS_CAP` defaults to 1.00, NOT the legacy 0.20. Selecting
+`BID_ASK_QUALITY_MODE=absolute` will NOT reproduce Phase 4.1 behavior unless
+`BID_ASK_MAX_ABS_CAP=0.20` is set explicitly.
+
+### Streamlit / UI-parity gap
+
+`strict_target_dte` is intentionally NOT threaded into the inline Streamlit
+`compute_readiness` (the new strict params are keyword-only with defaults, so
+the inline caller works unchanged). The candidate table gains `b/a mode` +
+`bucket_reason` columns; the per-candidate expander gains bid_ask_quality
+mode/reason tiles, clock-skew tiles, and a strict-status caption. Wiring strict
+into the inline preview is a Phase 5 nicety.
+
+---
+
+## 2026-06-02 — Phase 4.2.1: scanner pre-fetch quote-request guard
+
+**Bug (live, premarket):**
+`run_scanner --structure-provider zerosigma_api --quote-provider tastytrade --target-dte 1 --print-candidates`
+aborted with:
+```
+TastytradeQuoteProvider.get_option_chain: no required_strikes in QuoteRequest — production provider does not pull whole chains
+QuoteProvider returned no chain for SPX @ 2026-06-02 (target_dte=1, src=fallback) — aborting tick.
+```
+
+**Root cause:** during a premarket / public-only ZS read the structure carries
+no anchors, so `_collect_required_strikes` returns `[]`. The scanner still
+called `quote_provider.get_option_chain(...)` with an empty `required_strikes`.
+`TastytradeQuoteProvider` correctly refuses whole-chain pulls (returns `None`),
+and the scanner treated that `None` as a hard failure (`return 3`). Same for
+`--target-dte 2 --strict-target-dte`. Strict-DTE was also enforced *after*
+`select()` — i.e. *after* Tasty had already been called.
+
+**Fix (`scripts/run_scanner.py` only):** added a pre-fetch guard right after the
+`QuoteRequest` is built and BEFORE `get_option_chain`. Two conditions
+short-circuit to a clean NO_TRADE without calling the provider:
+  1. `strict_unavailable` (strict mode + a fallback expiry source) →
+     `quote_request_skipped_reason=strict_target_dte_unavailable`;
+  2. empty `required_strikes` →
+     `quote_request_skipped_reason=no_required_strikes`.
+New helper `_emit_skipped_quote_no_trade(...)` logs a WARNING
+("quote request skipped: no required strikes available"), writes the usual
+`decision_log.jsonl` (NO_TRADE + rich machine-readable `snapshot_summary`:
+`required_strikes_available`, `missing_required_quote_strikes`,
+`selector_blockers`, `target_dte`, `selected_expiry`, `candidate_dte`,
+`expiry_selection_reason`, ...) and a header-only `ranked_candidates.csv`, and
+`--print-candidates` prints a `QUOTE REQUEST SKIPPED` block. The dead
+post-select strict override was removed (strict is now enforced pre-fetch); the
+genuine-failure `None`-chain path (real strikes requested, provider still fails)
+still `return 3`.
+
+**Boundary unchanged:** Tasty still refuses whole-chain pulls — the scanner just
+never sends an unservable request. No execution, no order preview, no scoring
+changes, no risk-cap changes. Mock behavior only changes under the same
+missing-strikes condition (premarket no-anchor → clean skip vs the old
+synthesize-then-zero-candidates; both NO_TRADE).
+
+**Tests:** new `tests/test_phase4p2_skip_quote_fetch.py` (5 tests, recording
+fake Tasty-like provider — empty strikes → provider NOT called; strict → NOT
+called; normal → called with strikes; no whole-chain pull ever; mock also skips).
+Full suite **318 passed**, ruff clean. Mock smoke confirmed the clean skip path.

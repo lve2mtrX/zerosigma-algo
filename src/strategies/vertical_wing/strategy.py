@@ -20,6 +20,20 @@ from src.strategies.vertical_wing.candidates import (
 from src.strategies.vertical_wing.scoring import score_candidate
 
 
+def _as_float(value: object, default: float) -> float:
+    """Coerce a merged-param value to float, tolerating YAML ${} env strings.
+
+    Phase 4.2: BID_ASK_* knobs may arrive as strings (env substitution) or as
+    plain YAML numbers. Empty/None/unparseable falls back to `default`.
+    """
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
 class VerticalWingV1:
     def __init__(
         self,
@@ -86,14 +100,30 @@ class VerticalWingV1:
         width = float(merged.get("spread_width", 5))
         max_ba = float(merged.get("max_bid_ask_width", 0.20))
 
+        # Phase 4.2 — relative-aware bid_ask_quality knobs. YAML ${} env
+        # substitution yields STRINGS, so float()-cast the numeric cutoffs
+        # (mirrors the max_ba/threshold/width casts above). MODE is a plain
+        # string ('relative' default | 'absolute').
+        ba_mode = str(merged.get("BID_ASK_QUALITY_MODE", "relative") or "relative")
+        good_pct = _as_float(merged.get("BID_ASK_GOOD_PCT"), 0.03)
+        acceptable_pct = _as_float(merged.get("BID_ASK_ACCEPTABLE_PCT"), 0.07)
+        poor_pct = _as_float(merged.get("BID_ASK_POOR_PCT"), 0.15)
+        max_abs_cap = _as_float(merged.get("BID_ASK_MAX_ABS_CAP"), 1.00)
+
         out: list[Candidate] = []
         cc = build_put_ceiling_call_credit(
             structure, chain, threshold, width, self.id, max_bid_ask_width=max_ba,
+            bid_ask_quality_mode=ba_mode,
+            good_pct=good_pct, acceptable_pct=acceptable_pct, poor_pct=poor_pct,
+            max_abs_cap=max_abs_cap,
         )
         if cc is not None:
             out.append(cc)
         pc = build_call_floor_put_credit(
             structure, chain, threshold, width, self.id, max_bid_ask_width=max_ba,
+            bid_ask_quality_mode=ba_mode,
+            good_pct=good_pct, acceptable_pct=acceptable_pct, poor_pct=poor_pct,
+            max_abs_cap=max_abs_cap,
         )
         if pc is not None:
             out.append(pc)
