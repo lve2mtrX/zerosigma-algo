@@ -1038,9 +1038,57 @@ with `duplicate_selected_signal=true`.
 tick with `status=skipped_market_closed`. Default off (deterministic tests).
 
 The Streamlit cockpit shows a **read-only** "Forward runs (monitoring)" section
-(latest manifest + heartbeat + counts); start/stop controls are deferred to Phase
-7.1. **The next phase is dashboard controls and/or a backtest adapter — NOT live
-execution.**
+(enhanced in Phase 8). **The next phase is dashboard start/stop controls and/or a
+backtest adapter — NOT live execution.**
+
+##### Phase 8 — forward run review + control UX (READ-ONLY — no execution)
+
+Phase 8 makes forward runs easy to inspect. **Review/control UX only — no
+execution, no broker/paper orders, no order preview, and the UI never launches or
+stops a process** (it only displays commands to copy).
+
+Inspection lives in the pure module `src/forward/review.py` (discover runs, load
+manifest/heartbeat/tick/signal/no-trade/selected-trades, summarize a run — all
+tolerant of missing/empty files). The Phase 7 runner now also writes
+`outputs/forward/latest/latest_run_pointer.json` so `latest` resolves robustly.
+
+**Review CLI** (`scripts/review_forward.py` — read-only; `RUN_ID` may be a run id
+or the alias `latest`):
+
+```powershell
+python -m scripts.review_forward --list [--limit N]
+python -m scripts.review_forward --latest
+python -m scripts.review_forward --run RUN_ID
+python -m scripts.review_forward --signals RUN_ID [--limit N]
+python -m scripts.review_forward --no-trades RUN_ID [--limit N]
+python -m scripts.review_forward --ticks RUN_ID [--limit N]
+python -m scripts.review_forward --export-summary RUN_ID --output outputs/forward/summary_RUN_ID.json
+```
+
+A run summary reports: `run_id`, profile (`id`/`name`/`hash`), `status`,
+`started/ended_at`, `interval_seconds`, and the counts `tick_count`,
+`signal_count`, `duplicate_signal_count`, `no_trade_count`, `error_count`, plus
+`latest_tick_time` / `latest_decision` / `latest_selected_trade` /
+`latest_no_trade_reason` / `latest_heartbeat_status` and the selected-trade
+summaries. A missing run exits non-zero with a helpful message (no traceback).
+
+**Run a safe local forward session, then review it:**
+
+```powershell
+python -m scripts.run_forward --profile vertical_wing_score_best_1dte --interval-seconds 60 --market-hours-only
+python -m scripts.run_forward --profile vertical_wing_score_best_1dte --once
+python -m scripts.review_forward --latest
+python -m scripts.review_forward --signals latest --limit 10
+python -m scripts.review_forward --no-trades latest
+python -m scripts.review_forward --ticks latest --limit 20
+```
+
+**Streamlit "Forward runs (monitoring)" section** (read-only): latest-heartbeat
+caption, a run-selector dropdown over discovered runs, the five count metrics,
+tables of selected signals / no-trade reasons / latest ticks, the run-folder path,
+and a copy-only code block of the `run_forward`/`review_forward` commands. **No
+start/stop buttons, no subprocess launch, no process management** — that's a later
+phase. Inspecting forward runs never reads or prints secrets.
 
 ##### What's still missing under `public_only`
 

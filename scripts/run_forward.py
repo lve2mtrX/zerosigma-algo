@@ -238,6 +238,12 @@ def main(argv: list[str] | None = None) -> int:
     def _persist_manifest() -> None:
         _write_json(run_dir / "run_manifest.json", manifest)
         _write_json(latest_dir / "run_manifest.json", manifest)
+        # Phase 8 — pointer so the review tooling resolves "latest" robustly.
+        _write_json(latest_dir / "latest_run_pointer.json", {
+            "run_id": run_id, "run_path": str(run_dir),
+            "status": manifest["status"], "updated_at": manifest.get("ended_at")
+                                                          or manifest["started_at"],
+        })
 
     def _persist_heartbeat(hb: dict) -> None:
         _write_json(run_dir / "heartbeat.json", hb)

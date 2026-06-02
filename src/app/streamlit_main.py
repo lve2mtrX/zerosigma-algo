@@ -27,6 +27,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.app.session_state import SessionConfig  # noqa: E402
 from src.config.strategy_profiles import list_profiles as list_run_profiles  # noqa: E402
+from src.forward import review as forward_review  # noqa: E402
 from src.paper.account import PaperAccount  # noqa: E402
 from src.paper.manual_tracker import (  # noqa: E402
     append_equity_point,
@@ -934,60 +935,86 @@ if paper_account.equity_curve:
 
 st.header("Forward runs (monitoring)")
 st.caption(
-    "Read-only view of the local forward runner "
+    "Read-only review of the local forward runner "
     "(`python -m scripts.run_forward --profile <id>`). Monitoring + local ledger "
-    "only — **no execution, no broker orders.** Start/stop controls are a future "
-    "phase (7.1)."
+    "only — **no execution, no broker orders.** This panel never launches or "
+    "stops a run; it only inspects ledgers + shows the commands to copy."
 )
-_fwd_latest = OUTPUT_ROOT / "forward" / "latest"
-_fwd_manifest = _fwd_latest / "run_manifest.json"
-if not _fwd_manifest.is_file():
-    st.info("No forward runs yet. Run `python -m scripts.run_forward --profile "
-            "vertical_wing_score_best_1dte --once` to create one.")
-else:
-    import json as _fjson
-    try:
-        _man = _fjson.loads(_fwd_manifest.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        _man = {}
-    _hb_path = _fwd_latest / "heartbeat.json"
-    _hb = {}
-    if _hb_path.is_file():
-        try:
-            _hb = _fjson.loads(_hb_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            _hb = {}
-    fcols = st.columns(4)
-    fcols[0].metric("Latest run", _man.get("run_id", "—"))
-    fcols[1].metric("Status", _man.get("status", "—"))
-    fcols[2].metric("Profile", _man.get("profile_id", "—"))
-    fcols[3].metric("Selector", _man.get("daily_selector", "—"))
+
+# Discover runs (newest first) via the Phase 8 review module — read-only.
+_fwd_runs = forward_review.discover_runs()
+_fwd_hb = forward_review.load_latest_heartbeat()
+if _fwd_hb:
     st.caption(
-        f"profile_hash `{_man.get('profile_hash', '—')}`  ·  "
-        f"quotes=`{_man.get('quote_provider', '—')}`  ·  "
-        f"target_dte={_man.get('target_dte', '—')}  ·  "
-        f"no_execution={_man.get('no_execution', True)}  ·  "
-        f"started={_man.get('started_at', '—')}"
+        f"**Latest heartbeat** — run `{_fwd_hb.get('run_id', '—')}` · "
+        f"status={_fwd_hb.get('status', '—')} · tick {_fwd_hb.get('tick_id', '—')} @ "
+        f"{_fwd_hb.get('latest_tick_time', '—')} · "
+        f"decision={_fwd_hb.get('latest_decision', '—')} · "
+        f"selected_trade={_fwd_hb.get('selected_trade', False)}"
     )
-    if _hb:
+
+if not _fwd_runs:
+    st.info("No forward runs yet. Run "
+            "`python -m scripts.run_forward --profile vertical_wing_score_best_1dte --once` "
+            "to create one.")
+else:
+    _run_ids = [p.name for p in _fwd_runs]
+    _chosen_run = st.selectbox("Run", options=_run_ids, index=0,
+                               help="Discovered forward runs (newest first).")
+    _summary = forward_review.summarize_run(_chosen_run)
+    if _summary is None:
+        st.warning(f"Could not summarize run {_chosen_run}.")
+    else:
+        m = st.columns(5)
+        m[0].metric("Ticks", _summary["tick_count"])
+        m[1].metric("Signals", _summary["signal_count"])
+        m[2].metric("Dup signals", _summary["duplicate_signal_count"])
+        m[3].metric("No-trade", _summary["no_trade_count"])
+        m[4].metric("Errors", _summary["error_count"])
         st.caption(
-            f"heartbeat: tick {_hb.get('tick_id', '—')} @ {_hb.get('latest_tick_time', '—')} · "
-            f"latest_decision={_hb.get('latest_decision', '—')} · "
-            f"selected_trade={_hb.get('selected_trade', False)}"
+            f"status=`{_summary.get('status')}` · profile=`{_summary.get('profile_id')}` "
+            f"(hash `{_summary.get('profile_hash')}`) · selector=`{_summary.get('daily_selector')}` · "
+            f"target_dte={_summary.get('target_dte')} · quotes=`{_summary.get('quote_provider')}` · "
+            f"no_execution={_summary.get('no_execution', True)}"
         )
-    # Per-run selected / no-trade counts from the latest run's ledger (best-effort).
-    _run_id = _man.get("run_id")
-    if _run_id:
-        _rdir = OUTPUT_ROOT / "forward" / "runs" / _run_id
-        def _count_lines(p: Path) -> int:
-            try:
-                return sum(1 for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip())
-            except OSError:
-                return 0
-        n_sig = _count_lines(_rdir / "signal_log.jsonl")
-        n_no = _count_lines(_rdir / "no_trade_log.jsonl")
-        n_tick = _count_lines(_rdir / "tick_log.jsonl")
-        st.caption(f"ticks={n_tick} · selected_signals={n_sig} · no_trade_ticks={n_no}")
+        st.caption(
+            f"started={_summary.get('started_at')} → ended={_summary.get('ended_at')} · "
+            f"latest_decision={_summary.get('latest_decision')} · "
+            f"latest_selected_trade={_summary.get('latest_selected_trade')}"
+        )
+        st.caption(f"run folder: `{_summary.get('run_path')}`")
+
+        _sigs = forward_review.load_signal_log(_chosen_run)
+        if _sigs:
+            st.markdown("**Selected signals**")
+            st.dataframe(_sigs, use_container_width=True, hide_index=True)
+        _nts = forward_review.load_no_trade_log(_chosen_run)
+        if _nts:
+            st.markdown("**No-trade reasons**")
+            st.dataframe(_nts[-25:], use_container_width=True, hide_index=True)
+        _ticks = forward_review.load_tick_log(_chosen_run)
+        if _ticks:
+            st.markdown("**Tick log (latest 25)**")
+            st.dataframe(
+                [{k: t.get(k) for k in ("tick_id", "status", "scanner_return_code",
+                                         "post_selector_decision", "selected_trade",
+                                         "duplicate_selected_signal", "selector_no_trade_reason",
+                                         "tick_finished_at")}
+                 for t in _ticks[-25:]],
+                use_container_width=True, hide_index=True,
+            )
+
+# Safe commands to copy (display only — NO process launch from the UI).
+_prof_for_cmd = (_summary.get("profile_id") if _fwd_runs and _summary else None) \
+    or "vertical_wing_score_best_1dte"
+st.markdown("**Start a local forward session (copy into a terminal — the UI never launches it):**")
+st.code(
+    f"python -m scripts.run_forward --profile {_prof_for_cmd} --interval-seconds 60 --market-hours-only\n"
+    f"python -m scripts.run_forward --profile {_prof_for_cmd} --once\n"
+    f"python -m scripts.run_forward --profile {_prof_for_cmd} --max-ticks 5 --interval-seconds 60\n"
+    f"python -m scripts.review_forward --latest",
+    language="powershell",
+)
 
 
 # ──────────────────────────────────────────────────────────────────────

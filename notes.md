@@ -1767,3 +1767,45 @@ the spec was prescriptive and the in-process `main(argv)` seam kept the patch sm
 + behavior-preserving.
 
 **Next:** dashboard start/stop controls and/or a backtest adapter (Phase 7.x) — NOT execution.
+
+---
+
+## 2026-06-02 — Phase 8: forward run review + control UX (read-only)
+
+Made forward runs easy to inspect. **Review/control UX only — NO execution, NO
+broker/paper orders, NO order preview, NO process management.** The Streamlit panel
+never launches or stops a run; it only inspects ledgers + shows copy-only commands.
+
+**New:** `src/forward/__init__.py` + `src/forward/review.py` — pure, read-only
+inspection (discover_runs newest-first; load_latest_{pointer,manifest,heartbeat};
+resolve_run_dir with the `latest` alias; load_{tick,signal,no_trade}_log +
+load_selected_trades; summarize_run with run_id/profile/status/timestamps +
+tick_count/signal_count/duplicate_signal_count/no_trade_count/error_count +
+latest_{tick_time,decision,selected_trade,no_trade_reason,heartbeat_status} +
+selected_trade_summaries). Every reader tolerates missing/empty/corrupt files →
+no traceback. `scripts/review_forward.py` CLI:
+`--list/--latest/--run/--signals/--no-trades/--ticks/--export-summary`,
+`--limit N`, `--forward-root`; missing run → clean exit 1 + helpful message.
+
+**Phase 7 polish (non-breaking):** `_persist_manifest` now also writes
+`outputs/forward/latest/latest_run_pointer.json` (run_id + run_path + status) so
+`latest`/`--latest` resolve robustly. No ledger schema change.
+
+**Streamlit:** the Phase 7 "Forward runs (monitoring)" section now uses the review
+module: run-selector dropdown over discovered runs, latest-heartbeat caption, the 5
+count metrics, tables of selected signals / no-trade reasons / latest 25 ticks, the
+run-folder path, and a COPY-ONLY `st.code` block of the run_forward + review_forward
+commands. No start/stop buttons, no subprocess (a test greps `subprocess`/order
+terms out of both review files).
+
+**Tests:** `tests/test_phase8_forward_review.py` (16) — discover sorted newest-first
++ empty-root clean, latest heartbeat/manifest/pointer, `latest` alias, summarize
+with signals+dupes (1 signal / 1 dup across 2 ticks), summarize no-trade, summarize
+missing-optional-files clean, selected_trades.csv load, unknown-run→None, CLI
+list/latest/run/signals/missing→1/export-json, no-execution-surface grep,
+streamlit parses + imports review. Most seed REAL ledgers via the Phase 7 runner
+into a tmp --output-dir. Full suite **405 passed**, ruff clean.
+
+**Next (pick one):** (A) dashboard start/stop process control, or (B) a
+historical/backtest adapter replaying snapped data through the same scanner path —
+still NOT live broker execution.

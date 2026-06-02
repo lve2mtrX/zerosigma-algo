@@ -1153,3 +1153,30 @@ target_dte | trade_date`. Repeat within a run → not re-appended; tick flagged
 `_is_rth(dt)` (pure): weekday AND 09:30 ≤ ET ≤ 16:00. `--market-hours-only` skips
 scanning outside RTH (`status=skipped_market_closed`). Default off (deterministic
 tests). No holiday calendar this phase (Phase 7.x).
+
+---
+
+## 16. Phase 8 — forward run review (read-only inspection)
+
+REVIEW UX ONLY — no execution/orders/process-management. `src/forward/review.py`
+(pure) + `scripts/review_forward.py` (CLI). Reads the Phase 7 ledger; tolerant of
+missing/empty/corrupt files (returns None/[] — never raises).
+
+### `latest` resolution order
+`resolve_run_dir("latest")`: `latest/latest_run_pointer.json` → its `run_id` →
+`runs/{run_id}/`; else `latest/run_manifest.json` `run_id`; else the newest dir from
+`discover_runs`. `discover_runs` sorts run dirs by name desc (the run_id's fixed-width
+`YYYYMMDD_HHMMSS` prefix sorts chronologically) with mtime tiebreak.
+
+### Summary fields (summarize_run)
+run_id, run_path, profile_{id,name,hash}, status, started/ended_at, interval_seconds,
+daily_selector, quote_provider, target_dte, no_execution, tick_count, signal_count,
+duplicate_signal_count (ticks with `duplicate_selected_signal is True`),
+no_trade_count, error_count (ticks with `status=="error"`), latest_tick_time,
+latest_decision, latest_selected_trade, latest_no_trade_reason,
+selected_trade_summaries (from signal_log), latest_heartbeat_status.
+
+### Phase 7 addition
+`run_forward._persist_manifest` writes `latest/latest_run_pointer.json`
+(`run_id`, `run_path`, `status`, `updated_at`) on every persist. Non-breaking; the
+review module also falls back to `latest/run_manifest.json` when the pointer is absent.
