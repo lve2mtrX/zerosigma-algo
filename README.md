@@ -524,6 +524,84 @@ Phase 4 concern when the production `TastytradeQuoteProvider` lands.
 If you forget the env, the probe exits 0 with a clean warning. No
 traceback, no live HTTP attempt.
 
+##### Phase 4 — `TastytradeQuoteProvider` (live REST quotes, no execution)
+
+Phase 4 promotes the probe into a real `QuoteProvider` implementation
+that plugs into the existing scanner / Streamlit cockpit:
+
+```powershell
+# Default — mock chain, unchanged
+python -m scripts.run_scanner --structure-provider zerosigma_api
+
+# Phase 4 — live Tasty REST quotes (REQUIRES TASTY_* OAuth env vars)
+python -m scripts.run_scanner --structure-provider zerosigma_api `
+                              --quote-provider     tastytrade
+```
+
+What it does:
+
+- **Composes** the Phase 3 `TastyProbeClient` for OAuth refresh + REST
+  fetch + SPX→SPXW root resolution. Same auth code; same safety gates;
+  same redaction.
+- Calls `/market-data/by-type` once per scan tick, fetching BOTH C+P
+  sides of each strike the strategy asked for via `QuoteRequest`. VW's
+  typical 4 strikes × 2 sides = 8 symbols sits well under Tasty's
+  100-symbol cap.
+- Wraps the result in the exact `OptionChainSnapshot` shape the mock
+  provider returns, so strategies don't notice the swap. Resolved root
+  + `root_resolution_source` ride on the snapshot for audit.
+- Applies **broker-side `QuoteValidation`** per quote — crossed market,
+  zero-bid, wide spread (abs + pct), stale age. Failed quotes stay in
+  the chain so the cockpit can render them; they carry
+  `validation_passed=False` + a short `validation_rejection_reason` so
+  CSV/JSONL stays grep-friendly. Thresholds live in `.env`:
+
+```bash
+TASTY_QUOTE_MAX_AGE_SECONDS=10       # quote freshness during RTH
+TASTY_QUOTE_MAX_SPREAD_PCT=0.50      # (ask-bid)/mid
+TASTY_QUOTE_MAX_SPREAD_ABS=5.00      # absolute $ spread
+TASTY_REJECT_ZERO_BID=true
+TASTY_REJECT_CROSSED_MARKET=true
+```
+
+What it does **NOT** do (Phase 4 boundary, same as the probe):
+
+- **No order submission.** Provider does not even define `submit_order`
+  / `preview_order` / `place_order` (tests assert this).
+- **No order preview / dry-run.**
+- **No DXLink WebSocket.** REST polling only — `has_dxlink=false` in
+  the live capability matrix.
+- **No snapshot worker.** Provider fetches what the scanner asks for,
+  nothing more.
+- **No whole-chain pulls.** `get_option_chain()` requires
+  `request.required_strikes` (the scanner has always passed this since
+  Phase 2.6). Calling without it logs a warning and returns `None`.
+
+`QUOTE_PROVIDER` precedence: `--quote-provider` CLI flag → `QUOTE_PROVIDER`
+env var → `config/providers.yaml` → `"mock"`. The scanner **fails loudly**
+when `tastytrade` is selected without OAuth creds; the Streamlit cockpit
+**falls back to mock visibly** with a yellow warning panel so the UI
+stays loadable.
+
+Per-candidate observability columns added to `ranked_candidates.csv`:
+
+| Column | Meaning |
+|---|---|
+| `quote_provider` | `mock` / `null` / `tastytrade` — which provider quoted this candidate |
+| `quote_timestamp` | ISO timestamp from the chain |
+| `quote_age_seconds` | Now − oldest leg `quote_time`. Surfaces stale fills. |
+| `quote_chain_root` | `SPXW` for daily/0DTE; `SPX` for monthlies. None on mock. |
+| `quote_root_resolution_source` | `explicit` / `auto_chain` / `direct_match` / `unresolved` |
+| `short_validation_passed` / `long_validation_passed` | `True` / `False` / `None` (unvalidated) |
+| `short_rejection_reason` / `long_rejection_reason` | short snake_case (`crossed_market`, `zero_bid`, `spread_pct`, `stale`, ...) |
+| `quote_validation_passed` | `True` ONLY when BOTH legs passed. `None` when both legs unvalidated. |
+| `quote_rejection_reason` | concat of per-leg reasons |
+
+The Streamlit cockpit gains a Quote-Provider selector in the sidebar, a
+`root=…` chip in the Provider status panel, a per-candidate `quote`
+column (`✓ pass` / `✗ fail` / `—`), and per-leg pass/reason metrics inside
+each candidate's expander.
+
 ##### What's still missing under `public_only`
 
 | Field | Still None under public_only? | How to populate |
@@ -595,7 +673,7 @@ real services (ZS API for structure, broker API for quotes).
 | Layer | Phase 1.5 implementation | Phase 2+ plan |
 |---|---|---|
 | `StructureProvider` | `StubStructureProvider` — structure context only (MaxVol, DA-GEX, gamma regime, DDOI pin, PUT/CALL 2K/5K levels). No chain quotes. | `ZeroSigmaApiStructureProvider` against `/api/v1/market/*` and `/api/v1/exposure/*` (stubbed, raises NotImplementedError). |
-| `QuoteProvider` | `MockQuoteProvider` — deterministic SPX chain with bid/ask/mid, volume, OI, optional Greeks per strike + spot. `NullQuoteProvider` available for manual-mark mode. | Broker-specific provider (TBD via Phase 4 capability probe). |
+| `QuoteProvider` | `MockQuoteProvider` (default, deterministic SPX chain), `NullQuoteProvider` (manual marks), and **Phase 4** `TastytradeQuoteProvider` (live Tasty REST, opt-in via `QUOTE_PROVIDER=tastytrade` or `--quote-provider tastytrade`). | DXLink-streaming Tasty provider, plus other brokers when needed. |
 | `ExecutionProvider` | `disabled` / `local_paper` / `manual_trade_tracking`. **No live orders.** | `broker_paper`, `manual_confirm`, `live_tiny`, `live` — stubbed today, raise NotImplementedError. |
 
 **Next step:** wire the real `ZeroSigmaApiStructureProvider` against

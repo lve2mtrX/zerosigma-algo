@@ -229,6 +229,10 @@ def _quote_dict(q: OptionQuote) -> dict:
         "bid": q.bid, "ask": q.ask, "mid": q.mid,
         "volume": q.volume, "open_interest": q.open_interest,
         "vendor_symbol": q.vendor_symbol,
+        # Phase 4 — broker-provider validation result (None = not validated)
+        "validation_passed":           q.validation_passed,
+        "validation_rejection_reason": q.validation_rejection_reason,
+        "quote_time": q.quote_time.isoformat() if q.quote_time else None,
     }
 
 

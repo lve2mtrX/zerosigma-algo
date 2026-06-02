@@ -35,7 +35,10 @@ from src.paper.manual_tracker import (  # noqa: E402
     unrealized_pnl_dollars,
 )
 from src.paper.positions import PaperPosition  # noqa: E402
-from src.providers.quotes.mock_provider import MockQuoteProvider  # noqa: E402
+from src.providers.quotes.factory import build_quote_provider  # noqa: E402
+from src.providers.quotes.tastytrade_provider import (  # noqa: E402
+    TastytradeConfigurationError,
+)
 from src.providers.structure.factory import build_structure_provider  # noqa: E402
 from src.providers.structure.stub import StubStructureProvider  # noqa: E402
 from src.reporting.config_change_log import (  # noqa: E402
@@ -149,7 +152,26 @@ with st.sidebar:
              "(requires ZS_API_AUTH_MODE + credentials in .env). Empty creds → falls "
              "back to stub automatically.",
     )
-    st.caption(f"Quote provider:     `{CFG.providers.quotes_active}`  (mock until broker wired)")
+    # Phase 4 — quote provider selector. Default = whatever the factory
+    # resolves (CLI override > QUOTE_PROVIDER env > YAML > "mock"). Picking
+    # `tastytrade` without TASTY_* OAuth env vars triggers a graceful
+    # fallback to mock with a visible warning below.
+    available_quotes = ["mock", "null", "tastytrade"]
+    yaml_quote_default = (CFG.providers.quotes_active or "mock").lower()
+    default_quote_idx = (
+        available_quotes.index(yaml_quote_default)
+        if yaml_quote_default in available_quotes else 0
+    )
+    chosen_quote = st.selectbox(
+        "Quote provider",
+        options=available_quotes,
+        index=default_quote_idx,
+        help="Mock = deterministic synthesized chain (no network). "
+             "null = no quotes (force manual marks). "
+             "tastytrade = live Tasty REST quotes (requires TASTY_OAUTH_* "
+             "or TASTY_USERNAME/PASSWORD in .env). Misconfigured tasty → "
+             "falls back to mock with a warning.",
+    )
     st.caption(f"Execution mode:     `{CFG.providers.execution_active}`")
 
 
@@ -159,7 +181,22 @@ with st.sidebar:
 structure_provider, resolved_structure_name = build_structure_provider(
     CFG, override=chosen_structure,
 )
-quote_provider     = MockQuoteProvider()
+
+# Streamlit MUST stay loadable even when Tasty is misconfigured — fall
+# back to mock visibly. CLI scanner is the strict path.
+quote_provider_error: str | None = None
+try:
+    quote_provider, resolved_quote_name = build_quote_provider(
+        override=chosen_quote,
+        yaml_active=CFG.providers.quotes_active,
+        fallback_on_misconfig=True,    # never block UI on bad creds
+    )
+except TastytradeConfigurationError as exc:
+    # Defensive — fallback_on_misconfig=True should make this unreachable.
+    quote_provider_error = f"{type(exc).__name__}: {exc}"
+    from src.providers.quotes.mock_provider import MockQuoteProvider
+    quote_provider, resolved_quote_name = MockQuoteProvider(), "mock"
+
 SYMBOL = CFG.scanner.get("symbols", ["SPX"])[0]
 try:
     structure = structure_provider.get_snapshot(SYMBOL)
@@ -202,6 +239,20 @@ with st.expander("Provider status", expanded=True):
             ("spot @ " + spot_quote.ts.strftime("%H:%M:%S") if spot_quote else "no quotes")
         ),
     )
+    # Phase 4 — surface broker-side root resolution + misconfig fallback
+    if chain is not None and chain.resolved_root_symbol:
+        cols[1].caption(
+            f"root=`{chain.resolved_root_symbol}` "
+            f"(source: {chain.root_resolution_source or '-'})"
+        )
+    if chosen_quote == "tastytrade" and resolved_quote_name != "tastytrade":
+        st.warning(
+            "Selected `tastytrade` but provider is not configured "
+            "(missing TASTY_OAUTH_* or TASTY_USERNAME/PASSWORD). Running "
+            "on the mock chain. See `.env.example` for required variables."
+        )
+    if quote_provider_error is not None:
+        st.warning(f"Quote provider boot error → fell back to mock. `{quote_provider_error}`")
     cols[2].metric(
         "ExecutionProvider",
         CFG.providers.execution_active,
@@ -457,12 +508,23 @@ else:
             theoretical = theoretical_max_loss_dollars(c.max_risk, session.contracts_per_trade)
             short_leg = c.meta.get("short_leg") or {}
             long_leg  = c.meta.get("long_leg")  or {}
+            # Phase 4 — per-candidate quote-validation badge. None=unvalidated
+            # (mock chain), True=both legs passed, False=at least one rejected.
+            sp = short_leg.get("validation_passed")
+            lp = long_leg.get("validation_passed")
+            if sp is None and lp is None:
+                quote_badge = "—"
+            elif sp is True and lp is True:
+                quote_badge = "✓ pass"
+            else:
+                quote_badge = "✗ fail"
             rows.append({
                 "side":        c.side,
                 "short K":     c.short_strike,
                 "long K":      c.long_strike,
                 "short b/a/m": _fmt_quote(short_leg),
                 "long b/a/m":  _fmt_quote(long_leg),
+                "quote":       quote_badge,
                 "credit ($)":  round(c.credit, 2),
                 "width":       round(c.max_risk + c.credit, 2),
                 "theoretical $": round(theoretical, 0),
@@ -532,6 +594,26 @@ else:
                         "**Filter reasons:** "
                         + ", ".join(f"`{r}`" for r in c.rejection_reasons)
                     )
+                # Phase 4 — broker-side quote-validation detail per leg
+                short_meta = c.meta.get("short_leg") or {}
+                long_meta  = c.meta.get("long_leg")  or {}
+                if any(
+                    k in short_meta or k in long_meta
+                    for k in ("validation_passed", "validation_rejection_reason", "quote_time")
+                ):
+                    qcols = st.columns(2)
+                    for col, label, leg in (
+                        (qcols[0], "Short leg", short_meta),
+                        (qcols[1], "Long leg",  long_meta),
+                    ):
+                        passed = leg.get("validation_passed")
+                        reason = leg.get("validation_rejection_reason")
+                        qtime  = leg.get("quote_time")
+                        badge  = (
+                            "—" if passed is None else
+                            ("✓ pass" if passed else f"✗ {reason or 'fail'}")
+                        )
+                        col.metric(f"{label} quote", badge, qtime or "")
                 st.json(c.score_breakdown, expanded=False)
 
     decision = strat.select(candidates, params)

@@ -641,3 +641,74 @@ These are out of scope for this repo; recording so they aren't lost:
    detect Schwab outages.
 
 None of these block Phase 1.
+
+---
+
+## 10. Phase 4 — `TastytradeQuoteProvider` REST endpoints + validation
+
+Promoted the Phase 3 probe into the production `QuoteProvider`. No new
+Tasty endpoints beyond what Phase 3 documented — Phase 4 just wires them
+into the scanner / cockpit through the `QuoteProvider` Protocol.
+
+### Endpoints consumed at scan-tick rate
+
+| Endpoint | Auth | Phase | Purpose |
+|---|---|---|---|
+| `POST /oauth/token` (refresh) | OAuth | 3 → 4 | Mint a short-lived access token from the long-lived refresh token. Provider reuses the probe's `TastyProbeClient.login()`. |
+| `POST /sessions` | legacy | 3 → 4 | Fallback when OAuth env vars are not all set. BARE Authorization header thereafter. |
+| `GET /option-chains/{symbol}/nested` | both | 3 → 4 | One per `get_option_chain()` call — only to resolve SPX vs SPXW for the requested expiry. |
+| `GET /market-data/by-type?option=<comma-OCC>` | both | 4 | One per scan tick — fetches BOTH C+P sides of each `required_strike` in a single call. Cap 100 symbols per request. |
+
+The probe (`scripts.probe_tastytrade`) remains the operator-facing
+diagnostic; the provider is the in-process consumer.
+
+### `QuoteValidation` thresholds (`src/providers/quotes/types.py`)
+
+Applied PER QUOTE inside the provider, BEFORE the quote is handed to
+the strategy. Failed quotes are NOT removed from the chain — they ride
+along with `validation_passed=False` + a short snake_case
+`validation_rejection_reason` so CSV / JSONL stays grep-friendly.
+
+| Check | Default | Env var | Reason string |
+|---|---|---|---|
+| Missing bid OR ask | always on | n/a | `missing_bid_or_ask` |
+| ask < bid (crossed) | on | `TASTY_REJECT_CROSSED_MARKET=true` | `crossed_market(bid=…,ask=…)` |
+| bid <= 0 (no market) | on | `TASTY_REJECT_ZERO_BID=true` | `zero_bid` |
+| (ask − bid) > $5.00 | on | `TASTY_QUOTE_MAX_SPREAD_ABS=5.00` | `spread_abs(0.00>5.00)` |
+| (ask − bid)/mid > 50% | on | `TASTY_QUOTE_MAX_SPREAD_PCT=0.50` | `spread_pct(60.0%>50%)` |
+| now − quote_time > 10s | on | `TASTY_QUOTE_MAX_AGE_SECONDS=10` | `stale(age=12.0s>10s)` |
+
+All five thresholds default to conservative values — appropriate for an
+ACTIVE RTH session. After-hours quotes will fail `stale` immediately;
+operators should set `TASTY_QUOTE_MAX_AGE_SECONDS=0` to disable the
+age check when reviewing EOD data.
+
+### Provider selection precedence
+
+```
+--quote-provider <name>          # CLI flag on scripts.run_scanner
+  ↓ fallback
+QUOTE_PROVIDER=<name>            # .env
+  ↓ fallback
+config/providers.yaml: quotes.active
+  ↓ fallback
+"mock"                           # safe default — synthesized chain, no network
+```
+
+`<name>` is one of `mock`, `null`, `tastytrade`. Any unknown name falls
+back to `mock` with a warning. Selecting `tastytrade` without
+`TASTY_CLIENT_ID/SECRET/REFRESH_TOKEN` (or `TASTY_USERNAME/PASSWORD`):
+
+- **Scanner** raises `TastytradeConfigurationError` and exits with code 4.
+- **Streamlit cockpit** falls back to mock visibly (yellow warning) so
+  the UI stays loadable.
+
+### Files to point at when wiring future quote providers
+
+| File | Role |
+|---|---|
+| `src/providers/quotes/base.py` | `QuoteProvider` Protocol — the 5 methods every provider must implement. |
+| `src/providers/quotes/types.py` | `OptionQuote`, `OptionChainSnapshot`, `QuoteRequest`, `QuoteValidation`. |
+| `src/providers/quotes/factory.py` | Provider selection precedence + instantiation. |
+| `src/providers/quotes/tastytrade_provider.py` | Reference implementation — composes a probe client, applies validation, attaches root metadata. |
+| `tests/test_phase4_tastytrade_provider.py` | Test patterns — fake probe, `MockTransport` not required for happy path. |

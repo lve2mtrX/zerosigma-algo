@@ -642,10 +642,58 @@ They are NOT to be implemented by this repo:
 
 ---
 
-## 15. Broker Capability Probe (Phase 4 task brief)
+## 15. Broker Capability Probe → Phase 4 production provider (status: DONE)
 
-When we run this later, the probe should attempt — for each candidate broker
-— the following in order, recording pass/fail per step:
+The Phase 3 probe (`scripts/probe_tastytrade.py`) confirmed Tasty supports
+everything VW needs for live REST quotes: OAuth refresh auth, account
+list, SPX/SPXW chain with daily/0DTE, per-strike bid/ask/mid via
+`/market-data/by-type`. Live capability matrix from Dan's account:
+`has_auth=true, has_accounts=true, has_chain=true, has_quotes=true,
+chain_has_0dte_today=true, has_dxlink=false,
+order_submission_enabled=false, probe_exposes_submit_path=false`.
+
+**Phase 4 outcome**: `TastytradeQuoteProvider`
+(`src/providers/quotes/tastytrade_provider.py`) is implemented as a real
+`QuoteProvider` and wired through the existing scanner / Streamlit
+cockpit. It **composes** the Phase 3 probe (auth + REST + root resolution)
+and adds:
+
+  - The full `QuoteProvider` Protocol (`get_spot`, `get_option_quote`,
+    `get_option_chain`, `quote_timestamp`, `status`).
+  - `QuoteValidation` — broker-side per-quote thresholds (crossed,
+    zero-bid, spread-abs, spread-pct, stale-age). Tuned via
+    `TASTY_QUOTE_*` env vars.
+  - Quote-provider factory (`src/providers/quotes/factory.py`) mirroring
+    the structure factory. Precedence: `--quote-provider` CLI →
+    `QUOTE_PROVIDER` env → `config/providers.yaml` → `"mock"`.
+  - New `ranked_candidates.csv` columns: `quote_provider`,
+    `quote_timestamp`, `quote_age_seconds`, `quote_chain_root`,
+    `quote_root_resolution_source`, `{short,long}_validation_passed`,
+    `{short,long}_rejection_reason`, `quote_validation_passed`,
+    `quote_rejection_reason`.
+  - Streamlit: sidebar quote-provider selector, `root=` chip in
+    Provider status, per-candidate `quote ✓/✗` column, per-leg
+    validation metrics in each candidate expander.
+
+**Phase 4 boundary** (intentionally narrow — not in scope this phase):
+
+  - No live execution. No order submission. No order preview /
+    dry-run. No order tickets. Tests assert the provider does not
+    even define `submit_order` / `preview_order` / `place_order`.
+  - No DXLink WebSocket — REST polling only.
+  - No snapshot worker. Provider fetches what the scanner asks for.
+  - No whole-chain pulls — REST cost is per-symbol; the scanner
+    always supplies `request.required_strikes` (since Phase 2.6).
+  - ZS API remains structure-only (MaxVol, exposures, ceilings, floors).
+  - Mock provider stays the default. `tastytrade` is opt-in.
+  - The scanner fails LOUDLY on misconfigured `tastytrade`; the
+    Streamlit cockpit falls back to mock visibly so the UI stays
+    loadable.
+
+### Historical broker probe checklist (for any future broker)
+
+When evaluating a non-Tasty broker, the probe should attempt — for that
+broker — the following in order, recording pass/fail per step:
 
 1. Auth (key + secret accepted)
 2. Account list / account balances
@@ -712,9 +760,13 @@ informs the QuoteProvider choice.
   Fields not exposed by the current ZS API land as `None` with their names
   tracked in `snapshot.raw["missing_fields"]`: `gamma_flip`, `call_wall`,
   `put_wall`, `ddoi_pin`. Filed as open question §14.8.
-- `QuoteProvider` is `MockQuoteProvider` (deterministic chain from
-  `_mock_data.MOCK_CHAIN`) + `NullQuoteProvider`. Broker probe → real
-  provider lands in Phase 4–5.
+- `QuoteProvider` defaults to `MockQuoteProvider` (deterministic chain
+  from `_mock_data.MOCK_CHAIN`) + `NullQuoteProvider`. **Phase 4 added
+  `TastytradeQuoteProvider`** — live REST quotes via the Phase 3
+  probe's OAuth path; opt-in via `QUOTE_PROVIDER=tastytrade` or
+  `--quote-provider tastytrade`; conservative per-quote validation
+  enforced by `QuoteValidation`. Phase 5+ may add DXLink streaming or
+  additional broker providers.
 - Execution provider modes available: `disabled`, `local_paper`,
   `manual_trade_tracking`. Live modes stubbed only.
 - `force_stop` on a `BASELINE_CASH_SETTLE` position is intentionally a no-op

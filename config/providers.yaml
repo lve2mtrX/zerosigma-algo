@@ -36,25 +36,46 @@ structure:
         enable_ddoi:       "${ZS_API_ENABLE_DDOI}"
 
 quotes:
-  # Phase 1: null provider — returns None, forcing manual marks.
-  active: "null"
+  # SAFE DEFAULT: mock (deterministic synthesized chain — no network, no creds).
+  # Set QUOTE_PROVIDER=tastytrade in .env (with TASTY_* OAuth creds) to switch
+  # to the live Phase 4 broker provider. Empty / missing → "mock".
+  active: "${QUOTE_PROVIDER}"
+  default_if_unset: "mock"
 
   implementations:
+
+    mock:
+      module: "src.providers.quotes.mock_provider"
+      class:  "MockQuoteProvider"
+      params: {}
 
     null:
       module: "src.providers.quotes.null_provider"
       class:  "NullQuoteProvider"
       params: {}
 
-    # Future broker provider stubs (NOT implemented Phase 1).
+    # Phase 4 — REST-only Tasty quote provider. Built via .from_env() at
+    # runtime through src/providers/quotes/factory.py; the params block here
+    # is informational so a reader can see which env vars are consulted.
+    # No api_key/api_secret — Tasty uses OAuth refresh-token flow.
     tastytrade:
       module: "src.providers.quotes.tastytrade_provider"
       class:  "TastytradeQuoteProvider"
       params:
-        api_key:    "${BROKER_API_KEY}"
-        api_secret: "${BROKER_API_SECRET}"
-        account_id: "${BROKER_ACCOUNT_ID}"
-        paper:      "${BROKER_PAPER_MODE}"
+        env:                     "${TASTY_ENV}"                # production | certification
+        base_url:                "${TASTY_BASE_URL}"            # empty = pick from TASTY_ENV
+        oauth_client_id:         "${TASTY_CLIENT_ID}"
+        oauth_client_secret:     "${TASTY_CLIENT_SECRET}"
+        oauth_refresh_token:     "${TASTY_REFRESH_TOKEN}"
+        legacy_session_username: "${TASTY_USERNAME}"            # fallback only
+        legacy_session_password: "${TASTY_PASSWORD}"
+        account_number:          "${TASTY_ACCOUNT_NUMBER}"
+        # Quote-validation thresholds — applied per quote inside the provider.
+        quote_max_age_seconds:   "${TASTY_QUOTE_MAX_AGE_SECONDS}"
+        quote_max_spread_pct:    "${TASTY_QUOTE_MAX_SPREAD_PCT}"
+        quote_max_spread_abs:    "${TASTY_QUOTE_MAX_SPREAD_ABS}"
+        reject_zero_bid:         "${TASTY_REJECT_ZERO_BID}"
+        reject_crossed_market:   "${TASTY_REJECT_CROSSED_MARKET}"
 
 execution:
   # Allowed Phase 1 modes: disabled | local_paper | manual_trade_tracking

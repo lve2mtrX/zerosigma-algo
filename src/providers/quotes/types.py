@@ -40,6 +40,10 @@ class OptionQuote:
     Greek fields are optional because some brokers don't expose them in their
     quote feed. When None, downstream code must either skip those scoring
     sub-features or compute Greeks via a model.
+
+    Validation fields (Phase 4) are set by broker providers that run their
+    own quality checks (e.g. TastytradeQuoteProvider). Mock/null providers
+    leave them as None — meaning "not validated", NOT "passed validation".
     """
     underlying:      str            # e.g. "SPX"
     expiry:          str            # "YYYY-MM-DD"
@@ -58,6 +62,9 @@ class OptionQuote:
     gamma: float | None = None
     vega:  float | None = None
     theta: float | None = None
+    # Phase 4 — broker-side validation result. None means "not validated".
+    validation_passed:           bool | None = None
+    validation_rejection_reason: str | None = None
 
     @property
     def bid_ask_spread(self) -> float | None:
@@ -67,14 +74,71 @@ class OptionQuote:
 
 
 @dataclass(frozen=True)
+class QuoteValidation:
+    """Conservative validation thresholds for live broker quotes (Phase 4).
+
+    Applied by the broker QuoteProvider PER QUOTE. Reasons are short
+    snake_case strings so CSV/JSONL stays grep-friendly.
+
+    Defaults match `.env.example`:
+      TASTY_QUOTE_MAX_AGE_SECONDS=10
+      TASTY_QUOTE_MAX_SPREAD_PCT=0.50
+      TASTY_QUOTE_MAX_SPREAD_ABS=5.00
+      TASTY_REJECT_ZERO_BID=true
+      TASTY_REJECT_CROSSED_MARKET=true
+    """
+    max_age_seconds:       float = 10.0
+    max_spread_pct:        float = 0.50
+    max_spread_abs:        float = 5.00
+    reject_zero_bid:       bool  = True
+    reject_crossed_market: bool  = True
+
+    def validate(
+        self,
+        quote: OptionQuote,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[bool, str | None]:
+        """Returns (passed, rejection_reason)."""
+        if quote.bid is None or quote.ask is None:
+            return False, "missing_bid_or_ask"
+        if self.reject_crossed_market and quote.ask < quote.bid:
+            return False, f"crossed_market(bid={quote.bid:.2f},ask={quote.ask:.2f})"
+        if self.reject_zero_bid and quote.bid <= 0:
+            return False, "zero_bid"
+        spread = quote.ask - quote.bid
+        if spread > self.max_spread_abs:
+            return False, f"spread_abs({spread:.2f}>{self.max_spread_abs:.2f})"
+        mid = quote.mid if quote.mid is not None else (quote.bid + quote.ask) / 2.0
+        if mid > 0 and (spread / mid) > self.max_spread_pct:
+            return False, f"spread_pct({spread/mid:.2%}>{self.max_spread_pct:.0%})"
+        if now is not None and quote.quote_time is not None and self.max_age_seconds > 0:
+            try:
+                age = (now - quote.quote_time).total_seconds()
+                if age > self.max_age_seconds:
+                    return False, f"stale(age={age:.1f}s>{self.max_age_seconds:.0f}s)"
+            except (TypeError, ValueError):
+                pass     # mismatched tz → skip age check
+        return True, None
+
+
+@dataclass(frozen=True)
 class OptionChainSnapshot:
-    """A whole chain for one expiry at one timestamp."""
+    """A whole chain for one expiry at one timestamp.
+
+    Phase 4 added optional `resolved_root_symbol` + `root_resolution_source`
+    fields so broker providers (e.g. Tastytrade) can record SPX→SPXW auto-
+    resolution in the chain itself. Mock/null providers leave them None.
+    """
     underlying:    str
     spot:          float
     expiry:        str
     quotes:        list[OptionQuote]
     quote_ts:      datetime
     provider_name: str
+    # Phase 4 — broker provider may report which OPRA root it resolved to
+    resolved_root_symbol:   str | None = None
+    root_resolution_source: str | None = None    # explicit|auto_chain|direct_match|unresolved
 
     def find(self, strike: float, option_type: OptionType) -> OptionQuote | None:
         for q in self.quotes:

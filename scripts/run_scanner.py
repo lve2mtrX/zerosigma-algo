@@ -36,12 +36,18 @@ def main() -> int:
     parser.add_argument("--structure-provider", dest="structure_provider", default=None,
                         choices=["stub", "zerosigma_api"],
                         help="override active structure provider (default: from config/.env)")
+    parser.add_argument("--quote-provider", dest="quote_provider", default=None,
+                        choices=["mock", "null", "tastytrade"],
+                        help="override active quote provider (default: from QUOTE_PROVIDER env "
+                             "or config/.env; mock if neither). Phase 4: tastytrade requires "
+                             "TASTY_* OAuth env vars — set up via scripts.probe_tastytrade first.")
     parser.add_argument("--dry-run",  action="store_true",
                         help="do not write decision_log / ranked_candidates")
     args = parser.parse_args()
 
     from src.app.session_state import SessionConfig
-    from src.providers.quotes.mock_provider import MockQuoteProvider
+    from src.providers.quotes.factory import build_quote_provider
+    from src.providers.quotes.tastytrade_provider import TastytradeConfigurationError
     from src.providers.quotes.types import QuoteRequest
     from src.providers.structure.factory import build_structure_provider
     from src.reporting.decision_log import log_decision, log_decision_to_file
@@ -74,12 +80,21 @@ def main() -> int:
 
     symbol = args.symbol or cfg.scanner.get("symbols", ["SPX"])[0]
 
-    # Acquire BOTH providers — explicit separation. Structure provider can be
-    # overridden by --structure-provider; quote provider is mock for Phase 2.
+    # Acquire BOTH providers — explicit separation. Both selectable via
+    # CLI overrides. Quote provider falls back to mock by default; selecting
+    # tastytrade requires `TASTY_*` OAuth env vars to be set.
     structure_provider, resolved_structure_name = build_structure_provider(
         cfg, override=args.structure_provider,
     )
-    quote_provider = MockQuoteProvider()
+    try:
+        quote_provider, resolved_quote_name = build_quote_provider(
+            override=args.quote_provider,
+            yaml_active=cfg.providers.quotes_active,
+            fallback_on_misconfig=False,    # fail loudly per Phase 4 spec
+        )
+    except TastytradeConfigurationError as exc:
+        log.error("Tastytrade quote provider unavailable: %s", exc)
+        return 4
     try:
         structure = structure_provider.get_snapshot(symbol)
     except Exception as exc:
@@ -117,9 +132,13 @@ def main() -> int:
     structure_missing = (structure.raw or {}).get("missing_fields") or []
     log.info(
         "scan tick: symbol=%s profile=%s strategies=%s structure=%s quotes=%s "
+        "quote_provider=%s quote_root=%s quote_ts=%s "
         "missing_structure_fields=%d spot_hint=%.2f source=%s required=%d missing_quote_strikes=%d",
         symbol, profile.name, list(strategies.keys()),
-        structure.source, chain.provider_name, len(structure_missing),
+        structure.source, chain.provider_name,
+        resolved_quote_name, chain.resolved_root_symbol or "-",
+        chain.quote_ts.isoformat(),
+        len(structure_missing),
         spot_hint or 0.0, spot_hint_source, len(required_strikes),
         len(missing_required_quote_strikes),
     )
@@ -147,7 +166,7 @@ def main() -> int:
         )
 
         for c in candidates:
-            ranked_rows.append(_candidate_row(sid, c, session, ts, decision.decision))
+            ranked_rows.append(_candidate_row(sid, c, session, ts, decision.decision, chain=chain))
 
         snapshot_summary = {
             "structure_provider": structure.source,
@@ -171,6 +190,10 @@ def main() -> int:
             "missing_required_quote_strikes": list(missing_required_quote_strikes),
             "quote_spot_source":     spot_hint_source,
             "quote_spot_hint":       spot_hint,
+            # Phase 4 — broker quote-provider audit fields
+            "resolved_quote_provider":       resolved_quote_name,
+            "quote_chain_root":              chain.resolved_root_symbol,
+            "quote_root_resolution_source":  chain.root_resolution_source,
         }
 
         if not args.dry_run:
@@ -231,17 +254,61 @@ _DEFAULT_RANKED_FIELDS = [
     # leg quotes
     "short_bid", "short_ask", "short_mid", "long_bid", "long_ask", "long_mid",
     "bid_ask_quality",
-]
+    # Phase 4 — quote-provider observability
+    "quote_provider", "quote_timestamp", "quote_age_seconds",
+    "quote_chain_root", "quote_root_resolution_source",
+    "short_validation_passed", "short_rejection_reason",
+    "long_validation_passed",  "long_rejection_reason",
+    "quote_validation_passed", "quote_rejection_reason",
+]  # used only when no candidate rows exist — keep in sync with _candidate_row()
 
 
-def _candidate_row(strategy_id: str, c, session, ts: datetime, decision_str: str) -> dict:
+def _candidate_row(
+    strategy_id: str, c, session, ts: datetime, decision_str: str,
+    chain=None,                                  # type: ignore[no-untyped-def]
+) -> dict:
     import json as _json
+    from datetime import datetime as _dt
 
     from src.risk.limits import planned_loss_dollars, theoretical_max_loss_dollars
 
     short = c.meta.get("short_leg") or {}
     long_ = c.meta.get("long_leg")  or {}
     breakdown = c.score_breakdown or {}
+
+    # ── Phase 4 quote-provider observability ─────────────────────────────
+    short_passed = short.get("validation_passed")
+    long_passed  = long_.get("validation_passed")
+    short_reason = short.get("validation_rejection_reason")
+    long_reason  = long_.get("validation_rejection_reason")
+
+    # Overall = True ONLY when BOTH legs are explicitly True. None on either
+    # side (= "not validated", as with mock) leaves overall = None so the
+    # CSV can't be misread as "passed".
+    if short_passed is None and long_passed is None:
+        overall_passed = None
+    elif short_passed is True and long_passed is True:
+        overall_passed = True
+    else:
+        overall_passed = False
+    combined_reason = "; ".join(r for r in (short_reason, long_reason) if r) or None
+
+    # Per-leg quote_time → age vs `ts` (in ET). Pick the OLDEST of the two
+    # so a stale leg can't hide behind a fresh one.
+    quote_age_seconds: float | None = None
+    for leg in (short, long_):
+        qt_iso = leg.get("quote_time")
+        if not qt_iso:
+            continue
+        try:
+            qt = _dt.fromisoformat(qt_iso)
+        except ValueError:
+            continue
+        if qt.tzinfo is None or ts.tzinfo is None:
+            continue
+        age = (ts - qt).total_seconds()
+        if quote_age_seconds is None or age > quote_age_seconds:
+            quote_age_seconds = age
 
     row: dict = {
         "ts": ts.isoformat(),
@@ -289,6 +356,19 @@ def _candidate_row(strategy_id: str, c, session, ts: datetime, decision_str: str
         "short_bid": short.get("bid"), "short_ask": short.get("ask"), "short_mid": short.get("mid"),
         "long_bid":  long_.get("bid"), "long_ask":  long_.get("ask"), "long_mid":  long_.get("mid"),
         "bid_ask_quality": round(c.meta.get("bid_ask_quality", 0.0), 3),
+        # ── Phase 4 — quote-provider observability ───────────────────────
+        "quote_provider":               (chain.provider_name if chain else None),
+        "quote_timestamp":              (chain.quote_ts.isoformat() if chain else None),
+        "quote_age_seconds":            (round(quote_age_seconds, 2)
+                                          if quote_age_seconds is not None else None),
+        "quote_chain_root":             (chain.resolved_root_symbol if chain else None),
+        "quote_root_resolution_source": (chain.root_resolution_source if chain else None),
+        "short_validation_passed":      short_passed,
+        "short_rejection_reason":       short_reason,
+        "long_validation_passed":       long_passed,
+        "long_rejection_reason":        long_reason,
+        "quote_validation_passed":      overall_passed,
+        "quote_rejection_reason":       combined_reason,
     })
     return row
 

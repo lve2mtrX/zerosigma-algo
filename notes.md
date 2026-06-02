@@ -1209,3 +1209,101 @@ doesn't surface as untracked in `git status`.
 
 4. Validate quote freshness during RTH (the after-hours probe may
    return EOD-stale values that look fine but aren't actionable).
+
+---
+
+## Phase 4 — `TastytradeQuoteProvider` (live REST quotes)
+
+Phase 3.1 capability run on Dan's account confirmed everything VW needs:
+`has_auth=true, has_accounts=true, has_chain=true, has_quotes=true,
+chain_supports_spxw=true, chain_has_0dte_today=true,
+quote_probe_count=2, quote_probe_resolved_root_symbol=SPXW,
+quote_probe_root_resolution_source=auto_chain,
+quote_probe_http_status=200, has_streaming_token=false,
+has_dxlink=false, trade_scope_present=true,
+order_submission_enabled=false, execution_blocked_by_safety_gate=true,
+probe_exposes_submit_path=false`.
+
+So Phase 4 is **REST-only first, DXLink deferred** — slower polling but
+ships immediately. Tasty is treated strictly as a quote provider. ZS API
+remains structure-only.
+
+### What landed
+
+1. **`src/providers/quotes/tastytrade_provider.py`** —
+   `TastytradeQuoteProvider`. Composes `TastyProbeClient` for auth + REST
+   + root resolution; implements the full `QuoteProvider` Protocol;
+   builds OCC symbols for BOTH C+P sides of each `required_strike`;
+   applies `QuoteValidation` per quote; wraps in `OptionChainSnapshot`
+   with `resolved_root_symbol` + `root_resolution_source` so downstream
+   code can audit the SPX→SPXW pick. No order paths even defined.
+
+2. **`src/providers/quotes/types.py`** — added optional `validation_passed`
+   + `validation_rejection_reason` fields on `OptionQuote`; optional
+   `resolved_root_symbol` + `root_resolution_source` fields on
+   `OptionChainSnapshot`; new `QuoteValidation` frozen dataclass with a
+   `.validate(quote, now=None) -> (bool, reason | None)` method enforcing
+   crossed / zero-bid / spread-abs / spread-pct / stale-age checks.
+
+3. **`src/providers/quotes/factory.py`** — `build_quote_provider()` with
+   precedence `--quote-provider` CLI → `QUOTE_PROVIDER` env → YAML →
+   `"mock"`. Raises `TastytradeConfigurationError` on Tasty misconfig
+   when `fallback_on_misconfig=False` (the scanner's strict path); the
+   Streamlit cockpit passes `fallback_on_misconfig=True` so the UI
+   never blocks on bad creds.
+
+4. **`scripts/run_scanner.py`** — added `--quote-provider {mock,null,tastytrade}`
+   CLI; replaced the hardcoded `MockQuoteProvider()` with the factory;
+   surfaced `quote_provider`, `quote_chain_root`, `quote_ts` in the
+   scan-tick log; added new `ranked_candidates.csv` columns —
+   `quote_provider`, `quote_timestamp`, `quote_age_seconds`,
+   `quote_chain_root`, `quote_root_resolution_source`,
+   `{short,long}_validation_passed`, `{short,long}_rejection_reason`,
+   `quote_validation_passed` (overall AND, None when both legs
+   unvalidated), `quote_rejection_reason` (concat).
+
+5. **`src/app/streamlit_main.py`** — sidebar quote-provider selector;
+   `root=…` chip in Provider status panel; per-candidate `quote ✓/✗`
+   column on the table; per-leg validation metrics inside each
+   candidate's expander.
+
+6. **`config/providers.yaml`** — `quotes` section now env-driven
+   (`active: "${QUOTE_PROVIDER}"`, `default_if_unset: mock`); added
+   `mock` to implementations; rewrote tasty params to point at the
+   real `TASTY_*` env vars (not invented `TASTY_OAUTH_*` names).
+
+7. **`.env.example`** — added `QUOTE_PROVIDER=mock` + the five
+   `TASTY_QUOTE_*` validation knobs with conservative defaults
+   (10s max age, 50% max pct, $5 max abs, reject zero-bid, reject
+   crossed).
+
+8. **`tests/test_phase4_tastytrade_provider.py`** — 33 tests covering
+   `QuoteValidation` thresholds, `validation_from_env` parsing, factory
+   precedence + misconfig handling + null + unknown fallback,
+   `TastytradeConfigurationError` raises on missing creds, provider
+   exposes NO order methods, `get_option_chain` happy path via
+   monkey-patched probe (no real HTTP), failed-quote-kept-with-reason,
+   auth/root failure paths, status reports safety-gate-off, and
+   `_candidate_row` emits the new columns. Also a smoke check that
+   `scripts.run_scanner --help` accepts `--quote-provider`.
+
+### Boundary (NOT in Phase 4)
+
+- No order submission. No order preview / dry-run. No order tickets.
+- No DXLink WebSocket (REST polling only; `has_dxlink=false` confirmed).
+- No snapshot worker.
+- No historical Tasty storage.
+- No whole-chain pulls — `get_option_chain()` requires
+  `request.required_strikes`. Returns `None` and logs a warning
+  otherwise.
+- ZS API remains structure-only.
+- Mock stays the default. Existing scanner with mock provider unchanged.
+
+### Validation results
+
+- `198 passed in 8.36s` (full pytest suite, including the 33 new Phase 4
+  tests).
+- `ruff check .` → `All checks passed!`
+- `python -m scripts.run_scanner --quote-provider mock --dry-run` →
+  ran end-to-end; log line shows `quote_provider=mock quote_root=-`;
+  no regression vs. previous scanner behavior.
