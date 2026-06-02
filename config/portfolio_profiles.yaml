@@ -1,0 +1,29 @@
+# Phase 9B — example portfolio for `scripts.run_portfolio_forward --profiles-file`.
+#
+# LOCAL PAPER ACCOUNTING ONLY. This file selects which Phase 6 run-profiles to
+# monitor together in one local paper portfolio and (optionally) overrides the
+# paper lifecycle knobs. It contains NO secrets and NO execution intent — every
+# referenced profile uses stub structure + mock quotes by default.
+#
+# Precedence for lifecycle config: CLI flags > this `lifecycle:` block > env
+# (PAPER_*) > built-in defaults.
+#
+#   python -m scripts.run_portfolio_forward --profiles-file config/portfolio_profiles.yaml --once
+
+# Run-profile ids (resolved from profiles/<id>.yaml) or explicit paths.
+profiles:
+  - vertical_wing_score_best_1dte
+  - vertical_wing_no_trade
+
+# Optional paper lifecycle overrides (omit to use env / defaults).
+lifecycle:
+  contracts: 1
+  take_profit_pct: 0.50          # close when debit-to-close <= 50% of entry credit
+  stop_loss_pct: 1.50            # close when debit-to-close >= 150% of entry credit
+  exit_on_eod: true
+  eod_exit_time: "15:55"         # ET
+  allow_multiple_open_per_profile: false
+  allow_duplicate_strikes: false
+  max_open_trades_total: 5
+  max_open_trades_per_profile: 1
+  position_reconciliation_mode: local_only   # broker reconciliation is deferred

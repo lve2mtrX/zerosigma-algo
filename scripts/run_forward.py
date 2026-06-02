@@ -187,6 +187,13 @@ def main(argv: list[str] | None = None) -> int:
                         choices=["mock", "null", "tastytrade"])
     parser.add_argument("--structure-provider", dest="structure_provider", default=None,
                         choices=["stub", "zerosigma_api"])
+    # Phase 9A — optional cooperation with the local process controller. Absent =
+    # exact Phase 7 behavior. --control-state-path: the controller's
+    # control_state.json to update each tick. --stop-file: poll for a graceful stop.
+    parser.add_argument("--control-state-path", dest="control_state_path", default=None,
+                        help="control_state.json to update each tick (Phase 9A)")
+    parser.add_argument("--stop-file", dest="stop_file", default=None,
+                        help="path polled each tick; if it appears, stop cleanly (Phase 9A)")
     args = parser.parse_args(argv)
 
     # ── load + validate the run-profile (Phase 6) ──
@@ -249,6 +256,17 @@ def main(argv: list[str] | None = None) -> int:
         _write_json(run_dir / "heartbeat.json", hb)
         _write_json(latest_dir / "heartbeat.json", hb)
 
+    def _update_control(**fields) -> None:
+        # Phase 9A — best-effort update of the controller's control_state.json.
+        # No-op when run standalone (no --control-state-path). Never fatal.
+        if not args.control_state_path:
+            return
+        try:
+            from src.forward import control as _control
+            _control.update_control_state(args.control_state_path, **fields)
+        except Exception:
+            pass
+
     # ── --dry-run: validate + print plan + write a dry-run manifest only ──
     if args.dry_run:
         _persist_manifest()
@@ -274,6 +292,11 @@ def main(argv: list[str] | None = None) -> int:
         scanner_argv += ["--structure-provider", args.structure_provider]
 
     _persist_manifest()
+    _update_control(
+        run_id=run_id, status="running", last_seen_at=started.isoformat(),
+        latest_heartbeat_path=str(latest_dir / "heartbeat.json"),
+        latest_manifest_path=str(latest_dir / "run_manifest.json"),
+    )
     emitted: set[str] = set()
     exit_code = 0
     tick_id = 0
@@ -284,6 +307,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while max_ticks is None or tick_id < max_ticks:
+            # Phase 9A — graceful stop: a controller wrote the stop file.
+            if args.stop_file and Path(args.stop_file).exists():
+                manifest["status"] = "stopped"
+                log.info("forward: stop_file present — stopping cleanly")
+                break
             tick_id += 1
             tick_started = now_et()
             tick: dict = {
@@ -407,6 +435,11 @@ def main(argv: list[str] | None = None) -> int:
                 "latest_tick_time": tick["tick_finished_at"],
                 "latest_decision": last_decision, "selected_trade": last_selected,
             })
+            _update_control(
+                run_id=run_id, status="running", tick_id=tick_id,
+                last_seen_at=tick["tick_finished_at"],
+                latest_decision=last_decision, latest_selected_trade=last_selected,
+            )
             log.info("forward tick %d: decision=%s selected_trade=%s dup=%s",
                      tick_id, last_decision, last_selected, tick["duplicate_selected_signal"])
 
@@ -428,6 +461,10 @@ def main(argv: list[str] | None = None) -> int:
             "latest_tick_time": manifest["ended_at"],
             "latest_decision": last_decision, "selected_trade": last_selected,
         })
+        _update_control(
+            run_id=run_id, status=manifest["status"], active=False,
+            last_seen_at=manifest["ended_at"],
+        )
 
     return exit_code
 

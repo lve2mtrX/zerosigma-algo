@@ -1809,3 +1809,149 @@ into a tmp --output-dir. Full suite **405 passed**, ruff clean.
 **Next (pick one):** (A) dashboard start/stop process control, or (B) a
 historical/backtest adapter replaying snapped data through the same scanner path —
 still NOT live broker execution.
+
+---
+
+## 2026-06-02 — Phase 9A: local forward-runner process control (start/stop/status)
+
+Picked option (A) from Phase 8's fork, but as a **CLI** (not Streamlit buttons).
+**LOCAL PROCESS CONTROL ONLY — NO execution, NO broker/paper orders, NO order
+preview, NO account selection, NO position reconciliation, NO auto-execution, NO
+snapshot workers, NO backtest storage.** Every control-state file stamps
+`no_execution=true` + `execution_mode=disabled_local_monitoring`; a test greps
+`submit_order/place_order/preview_order/create_order/broker./execute_trade` out of
+both new files.
+
+**New:** `src/forward/control.py` — process-state dir `outputs/forward/control/`
+(`forward_runner.pid`, `control_state.json`, `stop_requested.json`, `logs/`).
+- PID liveness is **non-destructive** and `psutil`-free: Windows ctypes
+  `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION=0x1000)` + `GetExitCodeProcess`
+  (`STILL_ACTIVE=259`); POSIX `os.kill(pid, 0)`. Wrapped in a monkeypatchable
+  `_pid_alive` (and `_terminate_pid`) so tests never touch a real process.
+  Deliberately NOT `os.kill(pid,0)` on Windows (that can deliver CTRL_C_EVENT).
+- `status()` reconciles stored state vs the live probe: alive → `running`/active;
+  dead + stored "running" → `stale` (NOT running); terminal states
+  (completed/stopped/error) preserved; no state → `stopped`.
+- `cleanup_stale()` removes pid/state/stop files **only** after confirming the PID
+  is not alive — refuses loudly ("ALIVE") otherwise.
+- `start()` loads the Phase 6 profile, refuses if a live runner is active, opens
+  out/err logs, and `subprocess.Popen`s a DETACHED background runner using
+  `sys.executable` (Win `DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP`, POSIX
+  `start_new_session`); writes pid + `starting` state.
+- `stop()` writes the stop sentinel + sets `stopping`; `--force` additionally
+  `_terminate_pid`s **only** the stored PID, only if alive.
+
+**New:** `scripts/control_forward.py` — `--forward-root` + subcommands
+`status` / `command` (prints the safe run command, **never launches**) /
+`start` / `stop [--force]` / `cleanup-stale`. Windows PowerShell, no admin.
+
+**`run_forward.py` wiring (additive):** `--control-state-path` (writes live
+`run_id`/`status`/`last_seen_at`/latest heartbeat+manifest paths/latest
+decision+selected-trade into the shared control state) and `--stop-file` (checked
+at the top of each tick → clean exit with manifest `status=stopped`). With neither
+flag the runner is **byte-identical to Phase 7/8** (a test asserts no `control/`
+dir is created).
+
+**Streamlit:** "Forward runs (monitoring)" gains a READ-ONLY control block —
+Runner/Active/PID metrics, a `stale` warning, and a copy-only `st.code` of the
+`control_forward` commands. **No start/stop buttons; the UI never spawns/kills.**
+
+**Tests:** `tests/test_phase9a_control.py` (17) — status no-state/alive/stale,
+cleanup-stale removes-dead / refuses-alive, command prints-without-launch, start
+creates pid+state+logs (mocked Popen, pid 4242) / refuses-when-active, stop writes
+sentinel / force targets ONLY stored pid (`killed == [4242]`) / no-op when not
+alive, run_forward exits-on-stop-file / updates-control-state / standalone-unchanged,
+CLI start-requires-profile / status-runs, no-execution grep. Full suite
+**422 passed**, ruff clean.
+
+**Validated live:** `control_forward status` (no state → `stopped`), `command`
+(prints argv, writes nothing), `start --once` → status later showed `completed`
+with `run_id` filled by the child, `review_forward --latest` reads the run,
+`cleanup-stale` clears files once the PID is dead.
+
+**Next:** Phase 9B = historical / snapped-data (backtest) adapter — replay archived
+snapshots through the same `run_scanner.main(argv)` path + Phase 7/8 ledger/review.
+Live broker execution (manual-confirm → broker paper/live) stays deferred to
+Phases 10–11.
+
+---
+
+## 2026-06-02 — Phase 9B: multi-strategy local paper trade lifecycle + P&L
+
+Built the paper-trade lifecycle (TP/SL/EOD) + a multi-profile portfolio runner.
+**LOCAL PAPER ACCOUNTING ONLY — NO broker orders, NO order preview, NO paper-broker
+orders, NO live execution, NO historical backtest yet.** Every ledger stamps
+`no_execution=true` + `execution_mode=local_paper_lifecycle_only`; a test greps
+`submit_order/place_order/preview_order/create_order/broker./execute_trade/order_preview`
+out of all 5 new files. (Renumber: 9B is now the paper lifecycle; snapped-data
+backtest moved to Phase 10; Tasty execution readiness/live to Phase 11.)
+
+**Plan-vs-actual notes (chose direct authoring for the coupled core):** the user
+picked the "workflow" path, so Stage 1 was a 5-agent parallel **understand**
+workflow (mapped src/paper, the signal schema, run_forward mechanics, review
+patterns, config/clock/re-pricing). 4/5 agents returned clean; the
+config-clock-reprice agent hit the StructuredOutput non-call failure again, so I
+recovered that area with direct reads. Then I authored the tightly-coupled
+trading-math core directly (drift-prone to parallelize) and reserved a workflow
+for **verification**.
+
+**New modules:**
+- `src/paper/models.py` — `PaperTrade` (all spec fields, all defaulted for
+  incremental build + tolerant `from_row` coercion) + `PaperLifecycleConfig`
+  (`from_env` / `from_env_and_overrides`; TP 0.50, SL 1.50, EOD 15:55, limits).
+- `src/paper/lifecycle.py` — pure engine: `make_trade_identity` (mirrors
+  run_forward's `_signal_identity` order), `spread_quote_from_row`
+  (mid=`short_mid−long_mid`, bid=`short_bid−long_ask`, ask=`short_ask−long_bid`),
+  `find_repricing_row` (match by side+strikes+expiry), `open_trade_from_signal`,
+  `can_open` (documented precedence: identity-dup → dup-strikes → multiple-per-
+  profile → per-profile-max → total-max), `update_trade_mark` (MAE/MFE, ticks),
+  `evaluate_exit` (TP→SL→EOD; EOD fires even with no quote), `close_trade`.
+  **REUSES** `manual_tracker.{unrealized,realized}_pnl_dollars` +
+  `spread_width_from_strikes` + `OPTION_MULTIPLIER` — no re-derived P&L.
+- `src/paper/ledger.py` — portfolio paths/writers (open=snapshot, closed=snapshot,
+  events=append jsonl), `compute_summary`, tolerant readers mirroring
+  `forward/review.py`, `latest` alias resolution, and `reconcile_run`
+  (local-only; `broker_position_reconciliation: "deferred"`).
+
+**New scripts:**
+- `scripts/run_portfolio_forward.py` — `--profiles A,B` / `--profiles-file` /
+  `--interval-seconds` / `--max-ticks` / `--once` / `--market-hours-only` /
+  `--output-dir` + lifecycle override flags. Runs the scanner once per profile per
+  tick in-process (`OUTPUT_DIR=run_dir/scanner/{profile_id}`, reads back
+  `latest/ranked_candidates.csv`), opens trades from `selected_trade=true` rows,
+  re-prices + exit-checks every open trade each tick, writes all portfolio
+  ledgers, reconciles in `finally`. Per-profile scanner errors are non-fatal
+  (logged in profile_tick); Ctrl+C → `stopped` (exit 0).
+- `scripts/review_portfolio_forward.py` — `--latest/--list/--run/--open/--closed/
+  --events/--reconcile`, `--limit`, `--output-dir`; missing run → exit 1.
+
+**Config:** `PAPER_*` block added to `.env.example`; example
+`config/portfolio_profiles.yaml` (profiles list + lifecycle block). **Phase 6
+profile schema UNCHANGED** (lifecycle config is env/CLI/portfolio-file only).
+`.gitignore` now ignores `outputs/portfolio_forward/*` (+ `.gitkeep`).
+
+**Streamlit:** read-only "Portfolio forward (paper lifecycle)" panel (heartbeat,
+open/closed tables, P&L metrics, event log, reconciliation). No buttons.
+
+**Tests:** `tests/test_phase9b_portfolio.py` (18) — open-from-signal, dup signal,
+multi-profile tick, total/per-profile/dup-strike limits, TP/SL/EOD exits,
+quote-unavailable-no-false-exit, ledger write/read, summary P&L, reconciliation
+(issues + clean), runner `--once` files, runner `--max-ticks 2` updates an open
+trade (`ticks_held==2`, dup-skipped≥1), review CLI commands, no-execution grep.
+Engine/ledger tests use synthetic rows + explicit ET datetimes (wall-clock
+independent); runner tests use `--no-exit-on-eod` so trades persist regardless of
+run time. Full suite **440 passed**, ruff clean.
+
+**Live-validated:** `run_portfolio_forward --once` on score_best + no_trade →
+score_best opened a CALL_CREDIT 5815/5820 @0.60, EOD-closed same tick (ran at
+16:09 ET ≥ 15:55) → realized 0.0; reconciliation OK; review CLI subcommands all
+print + exit 0.
+
+**Gotcha:** the no-execution grep tripped on my own docstrings ("never touches a
+broker.") — reworded to "brokerage" (same Phase 9A fix). The EOD-at-wall-clock
+behavior makes naive runner tests time-dependent → solved with `--no-exit-on-eod`
++ explicit-datetime engine tests.
+
+**Next:** Phase 10 = historical / snapped-data backtest adapter (replay snapshots
+through the scanner + this paper lifecycle). Phase 11 = Tastytrade execution
+readiness / live (manual_confirm → broker_paper → live), still deferred.

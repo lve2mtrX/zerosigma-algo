@@ -45,10 +45,12 @@ outputs/latest/*
 outputs/runs/*
 outputs/daily/*
 outputs/forward/*
+outputs/portfolio_forward/*
 !outputs/latest/.gitkeep
 !outputs/runs/.gitkeep
 !outputs/daily/.gitkeep
 !outputs/forward/.gitkeep
+!outputs/portfolio_forward/.gitkeep
 
 # Local data caches
 data/

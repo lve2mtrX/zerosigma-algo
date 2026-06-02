@@ -1180,3 +1180,111 @@ selected_trade_summaries (from signal_log), latest_heartbeat_status.
 `run_forward._persist_manifest` writes `latest/latest_run_pointer.json`
 (`run_id`, `run_path`, `status`, `updated_at`) on every persist. Non-breaking; the
 review module also falls back to `latest/run_manifest.json` when the pointer is absent.
+
+## 17. Phase 9A — local forward-runner process control (no execution)
+
+LOCAL PROCESS CONTROL ONLY — start/stop/inspect a background `run_forward`
+*monitoring* loop. No orders/preview/account-selection/reconciliation/auto-exec.
+`src/forward/control.py` (pure-ish, monkeypatchable I/O) + `scripts/control_forward.py`
+(CLI). Every control-state file stamps `no_execution: true` +
+`execution_mode: "disabled_local_monitoring"`.
+
+### File layout (`outputs/forward/control/`)
+`forward_runner.pid` (bare PID int) · `control_state.json` · `stop_requested.json`
+(graceful-stop sentinel) · `logs/{ts}_{profile}.out.log` / `.err.log` (captured
+child stdout/stderr). `control_dir` is overridable via `--forward-root`.
+
+### `control_state.json` fields
+`active` (bool), `pid`, `run_id`, `profile_id`, `profile_name`, `profile_hash`,
+`command` (argv string), `started_at`, `last_seen_at`,
+`status` ∈ `starting|running|stopping|stopped|stale|error`,
+`latest_heartbeat_path`, `latest_manifest_path`, `no_execution: true`,
+`execution_mode: "disabled_local_monitoring"`. The **parent** (controller) writes
+the initial `starting` state + pid; the **child** (`run_forward --control-state-path`)
+fills `run_id`/`status`/`last_seen_at`/latest paths + latest decision/selected-trade
+as it ticks, and the terminal status (`completed`/`stopped`/`error`, `active:false`)
+in its `finally`.
+
+### Non-destructive PID liveness (no psutil) — the durable technique
+- **Windows**: ctypes `kernel32.OpenProcess(0x1000 /*PROCESS_QUERY_LIMITED_INFORMATION*/,
+  False, pid)`; if the handle opens, `GetExitCodeProcess` → alive iff exit code is
+  `259` (`STILL_ACTIVE`); always `CloseHandle`. Do **NOT** use `os.kill(pid, 0)` on
+  Windows — Python maps signal 0 oddly and `CTRL_C_EVENT`/`CTRL_BREAK_EVENT` can be
+  *delivered* to the target. The OpenProcess probe only *queries*, never signals.
+- **POSIX**: `os.kill(pid, 0)` — `ESRCH` → dead, `EPERM` → alive (exists, not ours),
+  success → alive.
+- Both behind `control._pid_alive(pid)` (+ `_terminate_pid(pid)` = `os.kill(SIGTERM)`),
+  monkeypatched in tests so they never touch a real process.
+
+### Status reconciliation (`status()` is the source of truth)
+Read stored state, then probe: PID alive → `running`, `active:true`. PID dead +
+stored status was non-terminal (`starting`/`running`/`stopping`) → **`stale`**,
+`active:false`. Stored terminal status (`completed`/`stopped`/`error`) is preserved
+as-is. No state file → `{active:false, status:"stopped", pid:null}`. Status carries
+a `pid_alive` flag + `stop_requested` (sentinel present?) for display.
+
+### Stop protocol (graceful-first)
+`stop()` no-ops if no state or PID not alive (returns `(False, "…not alive")`).
+Otherwise writes `stop_requested.json` + sets state `stopping`. `run_forward` polls
+`--stop-file` at the top of each tick loop and breaks with manifest `status=stopped`
+(exit 0). `--force` *additionally* `_terminate_pid`s **only** `state["pid"]`, and
+only if alive — it never enumerates or kills anything else (locked by a test
+asserting `killed == [4242]`).
+
+### Start safety
+`start()` refuses (`already active`) if a stored PID is alive — no second runner.
+Launches with `sys.executable` (same venv) detached: Windows
+`creationflags=DETACHED_PROCESS(0x8)|CREATE_NEW_PROCESS_GROUP(0x200)`, POSIX
+`start_new_session=True`; child stdout/stderr → the `logs/` files. `cleanup-stale`
+deletes pid/state/stop files **only** when `_pid_alive` is False (refuses otherwise).
+`command` builds + prints the exact argv but never spawns.
+
+## 18. Phase 9B — local paper trade lifecycle + P&L convention (no execution)
+
+LOCAL PAPER ACCOUNTING ONLY. `src/paper/{models,lifecycle,ledger}.py` +
+`scripts/run_portfolio_forward.py` + `scripts/review_portfolio_forward.py`. No
+brokerage anywhere; ledgers stamp `no_execution=true` +
+`execution_mode="local_paper_lifecycle_only"`. The lifecycle REUSES
+`manual_tracker.{unrealized,realized}_pnl_dollars` + `spread_width_from_strikes` +
+`OPTION_MULTIPLIER` (100) — P&L is never re-derived.
+
+### Credit-spread P&L convention (the durable bit)
+- entry_credit is POSITIVE (cash received to open).
+- the current value to close is a POSITIVE debit.
+- unrealized_pnl = (entry_credit - current_debit) * 100 * contracts
+- realized_pnl   = (entry_credit - exit_debit)    * 100 * contracts
+- max_profit = entry_credit * 100 * contracts
+- max_loss (magnitude) = (spread_width - entry_credit) * 100 * contracts
+
+### Re-pricing a spread from a later scanner tick
+Match an open trade against that tick's ranked_candidates.csv by
+(side, short_strike, long_strike, selected_expiry), then from the per-leg columns:
+spread_mid = short_mid - long_mid (the MARK = current debit),
+spread_bid = short_bid - long_ask, spread_ask = short_ask - long_bid. Mark falls
+back to (bid+ask)/2 if mid legs are missing. No current mark ->
+quote_unavailable_no_exit: the trade holds (no false TP/SL); only the EOD rule can
+still close it.
+
+### Exit rules (checked TP -> SL -> EOD each tick)
+TP: debit <= entry_credit * PAPER_TAKE_PROFIT_PCT (0.50). SL:
+debit >= entry_credit * PAPER_STOP_LOSS_PCT (1.50). EOD: ET time >=
+PAPER_EOD_EXIT_TIME (15:55, via utils.time.parse_hhmm) and PAPER_EXIT_ON_EOD —
+fires even with no quote (closes at last-known mark, else entry_credit).
+exit_reason in {take_profit, stop_loss, eod_exit, manual_mark_closed,
+quote_unavailable_no_exit, error}.
+
+### Dedup identity + portfolio limits (can_open precedence, first match wins)
+identity = profile_hash|symbol|selected_expiry|side|short_strike|long_strike|
+target_dte|trade_date (mirrors run_forward _signal_identity). Order:
+(1) identity already open -> duplicate_skipped; (2) duplicate_strikes_disallowed;
+(3) multiple_open_per_profile_disabled; (4) per_profile_max_open_reached;
+(5) total_max_open_reached -> the last four emit blocked_by_limits events.
+
+### LOCAL-ONLY reconciliation
+ledger.reconcile_run compares the local ledgers against each other and flags
+open_trade_missing_open_event, closed_trade_still_in_open_file,
+duplicate_open_identity, close_without_open, non_open_status_in_open_file,
+non_closed_status_in_closed_file. The report always carries
+broker_position_reconciliation: "deferred" — there is NO broker connection in this
+phase. PAPER_* lifecycle config is env / CLI / config/portfolio_profiles.yaml
+only; the Phase 6 profile schema is unchanged.

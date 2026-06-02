@@ -1090,6 +1090,169 @@ and a copy-only code block of the `run_forward`/`review_forward` commands. **No
 start/stop buttons, no subprocess launch, no process management** — that's a later
 phase. Inspecting forward runs never reads or prints secrets.
 
+##### Phase 9A — local forward-runner process control (start / stop / status — NO execution)
+
+Phase 9A lets you start, stop, and inspect a **local background forward-run
+process** from one CLI. This is **local process control only**: it launches and
+manages a `scripts.run_forward` *monitoring* loop. It does **not** place orders,
+submit paper orders, preview orders, select a broker account, reconcile
+positions, or auto-execute anything. Every control-state file carries
+`no_execution: true` and `execution_mode: disabled_local_monitoring`.
+
+State lives under `outputs/forward/control/` (override with `--forward-root`):
+
+| File | Purpose |
+|---|---|
+| `forward_runner.pid` | PID of the launched background runner |
+| `control_state.json` | active / pid / run_id / profile (`id`/`name`/`hash`) / command / `started_at` / `last_seen_at` / `status` / `latest_heartbeat_path` / `latest_manifest_path` / `no_execution` / `execution_mode` |
+| `stop_requested.json` | graceful-stop sentinel the runner polls each tick |
+| `logs/{ts}_{profile}.out.log` / `.err.log` | captured stdout/stderr of the background runner |
+
+`status` is the source of truth and **reconciles** the stored state against a
+real, **non-destructive** PID-liveness probe (Windows `OpenProcess` +
+`GetExitCodeProcess`; POSIX `os.kill(pid, 0)` — never `psutil`, never a signal
+that could disturb the process). A stored "running" state whose PID is dead is
+reported as `stale` (not `running`); when there is no state at all the status is
+`stopped`.
+
+**Control CLI** (`scripts/control_forward.py` — Windows PowerShell, no admin):
+
+```powershell
+# Inspect current control status (safe; reconciles PID liveness)
+python -m scripts.control_forward status
+
+# Print the exact, safe run command WITHOUT launching anything (copy/paste)
+python -m scripts.control_forward command --profile vertical_wing_score_best_1dte --interval-seconds 60 --market-hours-only
+
+# Launch a DETACHED background runner (refuses if one is already live)
+python -m scripts.control_forward start --profile vertical_wing_score_best_1dte --interval-seconds 60 --market-hours-only
+python -m scripts.control_forward start --profile vertical_wing_score_best_1dte --once
+python -m scripts.control_forward start --profile vertical_wing_score_best_1dte --max-ticks 5 --interval-seconds 60
+
+# Graceful stop (writes stop sentinel; runner exits cleanly at next tick)
+python -m scripts.control_forward stop
+
+# Graceful stop + terminate ONLY the stored PID if still alive
+python -m scripts.control_forward stop --force
+
+# Remove pid/state/stop files — ONLY after confirming the PID is not alive
+python -m scripts.control_forward cleanup-stale
+```
+
+`start` uses the **same Python/venv** as the CLI (`sys.executable`) and launches a
+detached background process (Windows `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`;
+POSIX `start_new_session`). It refuses to start a second runner while one is live.
+`stop` is graceful first — it writes `stop_requested.json`, which the runner polls
+at the top of each tick and then exits with manifest `status: stopped`. `--force`
+additionally terminates **only** the PID recorded in `control_state.json`, and
+only if that PID is alive — it never scans for or kills anything else.
+`cleanup-stale` removes the control files **only** after confirming the stored PID
+is not alive (it refuses, loudly, if the process is still running). No control
+command ever reads or prints secrets or `.env` contents.
+
+**`run_forward` integration** (additive — standalone behavior is unchanged when
+absent): `--control-state-path PATH` makes the runner write live progress
+(`run_id`, `status`, `last_seen_at`, latest heartbeat/manifest paths, latest
+decision/selected-trade) into the shared control state; `--stop-file PATH` makes
+the runner check for the stop sentinel each tick and exit cleanly
+(`status: stopped`) when it appears. With neither flag, `run_forward` behaves
+exactly as in Phase 7/8 and writes no control state.
+
+**Streamlit "Forward runs (monitoring)" section** also shows a **read-only**
+control block: Runner / Active / PID metrics, a `stale` warning when the stored
+PID is dead, and a copy-only code block of the `control_forward`
+`status`/`command`/`start`/`stop`/`cleanup-stale` commands. **There are no
+start/stop buttons in the UI** — it never launches or kills a process; it only
+displays commands to copy. Live broker execution remains deferred to a later
+phase.
+
+##### Phase 9B — multi-strategy local paper trade lifecycle + P&L (NO execution)
+
+Phase 9B turns SELECTED scanner signals into **simulated** credit-spread trades,
+monitors them across forward ticks, applies take-profit / stop-loss / end-of-day
+exits, tracks realized + unrealized P&L, and runs **multiple saved strategy
+profiles together** in one local paper portfolio.
+
+This is **local paper accounting only.** No broker orders. No Tasty order
+preview. No broker paper orders. No live execution. No historical backtesting
+(that's Phase 10). Every portfolio ledger stamps `no_execution: true` /
+`execution_mode: local_paper_lifecycle_only`, and a test greps the order/broker
+vocabulary out of all five new files.
+
+**Modules:** `src/paper/models.py` (`PaperTrade` record + `PaperLifecycleConfig`),
+`src/paper/lifecycle.py` (the engine), `src/paper/ledger.py` (portfolio ledger +
+reconciliation). The engine **reuses** the existing P&L math in
+`src/paper/manual_tracker.py` — it does not re-derive it.
+
+**P&L convention (credit spread):**
+- `entry_credit` is **positive** (cash received to open).
+- the current value to close is a **positive debit**.
+- `unrealized_pnl = (entry_credit − current_debit) × 100 × contracts`
+- `realized_pnl   = (entry_credit − exit_debit)    × 100 × contracts`
+- `max_profit = entry_credit × 100 × contracts`
+- `max_loss (magnitude) = (spread_width − entry_credit) × 100 × contracts`
+
+The **mark** (current debit) is re-priced each tick from that tick's
+`ranked_candidates.csv`: an open trade is matched by `(side, short_strike,
+long_strike, selected_expiry)` and the spread mid `= short_mid − long_mid` becomes
+the mark (`spread_bid = short_bid − long_ask`, `spread_ask = short_ask −
+long_bid`). If no current quote is available the update is flagged
+`quote_unavailable_no_exit` and the trade is **not** exited (unless the EOD rule
+fires).
+
+**Exit rules (per tick):**
+- **TP** — close when `current_debit ≤ entry_credit × PAPER_TAKE_PROFIT_PCT` (0.50 → 50% of credit).
+- **SL** — close when `current_debit ≥ entry_credit × PAPER_STOP_LOSS_PCT` (1.50 → 150% of credit).
+- **EOD** — close when ET time `≥ PAPER_EOD_EXIT_TIME` (15:55) and `PAPER_EXIT_ON_EOD=true`; fires even if a quote is unavailable (closes at the last-known mark).
+- `exit_reason ∈ take_profit | stop_loss | eod_exit | manual_mark_closed | quote_unavailable_no_exit | error`.
+
+**Duplicate / conflict rules** (events `duplicate_skipped` / `blocked_by_limits`,
+machine-readable reasons): identity `= profile_hash | symbol | selected_expiry |
+side | short_strike | long_strike | target_dte | trade_date`. A new trade is
+skipped if that identity is already open; portfolio limits
+(`PAPER_MAX_OPEN_TRADES_TOTAL`, `PAPER_MAX_OPEN_TRADES_PER_PROFILE`,
+`PAPER_ALLOW_MULTIPLE_OPEN_PER_PROFILE`, `PAPER_ALLOW_DUPLICATE_STRIKES`) block
+the rest.
+
+**Configuration** comes from env (`PAPER_*`), CLI flags, or a `--profiles-file`
+`lifecycle:` block (precedence: **CLI > profiles-file > env > default**). It is
+deliberately **not** part of the Phase 6 run-profile schema — a strategy profile
+never carries execution/lifecycle intent.
+
+**Run a local paper portfolio (Windows PowerShell):**
+
+```powershell
+python -m scripts.run_portfolio_forward --profiles vertical_wing_score_best_1dte,vertical_wing_no_trade --once
+python -m scripts.run_portfolio_forward --profiles-file config/portfolio_profiles.yaml --interval-seconds 60 --market-hours-only
+python -m scripts.run_portfolio_forward --profiles A,B --max-ticks 5
+```
+
+Output lands under `outputs/portfolio_forward/runs/{portfolio_run_id}/` (mirrored
+to `latest/`): `portfolio_manifest.json`, `portfolio_tick_log.jsonl`,
+`profile_tick_log.jsonl`, `paper_trades_open.csv`, `paper_trades_closed.csv`,
+`paper_trade_events.jsonl`, `portfolio_summary.json`, `heartbeat.json`,
+`reconciliation_report.json`, and each profile's `scanner/{profile_id}/` outputs.
+
+**Local reconciliation** (no broker) cross-checks the local ledgers and flags
+`open_trade_missing_open_event`, `closed_trade_still_in_open_file`,
+`duplicate_open_identity`, and invalid status transitions; the report carries
+`broker_position_reconciliation: "deferred"`.
+
+**Review the portfolio (read-only):**
+
+```powershell
+python -m scripts.review_portfolio_forward --latest
+python -m scripts.review_portfolio_forward --list
+python -m scripts.review_portfolio_forward --open latest
+python -m scripts.review_portfolio_forward --closed latest
+python -m scripts.review_portfolio_forward --events latest --limit 20
+python -m scripts.review_portfolio_forward --reconcile latest
+```
+
+The Streamlit "Portfolio forward (paper lifecycle)" section surfaces the latest
+heartbeat, open/closed trade tables, the P&L summary, the event log, and the
+reconciliation report — **read-only, with no execution or broker controls.**
+
 ##### What's still missing under `public_only`
 
 | Field | Still None under public_only? | How to populate |

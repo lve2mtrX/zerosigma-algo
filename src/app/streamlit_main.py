@@ -27,7 +27,9 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.app.session_state import SessionConfig  # noqa: E402
 from src.config.strategy_profiles import list_profiles as list_run_profiles  # noqa: E402
+from src.forward import control as forward_control  # noqa: E402
 from src.forward import review as forward_review  # noqa: E402
+from src.paper import ledger as portfolio_ledger  # noqa: E402
 from src.paper.account import PaperAccount  # noqa: E402
 from src.paper.manual_tracker import (  # noqa: E402
     append_equity_point,
@@ -941,6 +943,30 @@ st.caption(
     "stops a run; it only inspects ledgers + shows the commands to copy."
 )
 
+# Phase 9A — control status (read-only). The UI NEVER starts/stops a process;
+# it shows status + copy-only control commands.
+_ctl = forward_control.status()
+_ccols = st.columns(3)
+_ccols[0].metric("Runner", _ctl.get("status", "stopped"))
+_ccols[1].metric("Active", str(_ctl.get("active", False)))
+_ccols[2].metric("PID", str(_ctl.get("pid") or "—"))
+if _ctl.get("status") == "stale":
+    st.warning("Control state is **stale** (PID not alive). "
+               "Run `python -m scripts.control_forward cleanup-stale` to clear it.")
+st.markdown("**Control commands (copy into a terminal — the UI never launches/stops a process):**")
+_ctl_profile = (
+    (forward_review.load_latest_manifest() or {}).get("profile_id")
+    or "vertical_wing_score_best_1dte"
+)
+st.code(
+    "python -m scripts.control_forward status\n"
+    f"python -m scripts.control_forward command --profile {_ctl_profile} --interval-seconds 60 --market-hours-only\n"
+    f"python -m scripts.control_forward start --profile {_ctl_profile} --interval-seconds 60 --market-hours-only\n"
+    "python -m scripts.control_forward stop\n"
+    "python -m scripts.control_forward cleanup-stale",
+    language="powershell",
+)
+
 # Discover runs (newest first) via the Phase 8 review module — read-only.
 _fwd_runs = forward_review.discover_runs()
 _fwd_hb = forward_review.load_latest_heartbeat()
@@ -1013,6 +1039,85 @@ st.code(
     f"python -m scripts.run_forward --profile {_prof_for_cmd} --once\n"
     f"python -m scripts.run_forward --profile {_prof_for_cmd} --max-ticks 5 --interval-seconds 60\n"
     f"python -m scripts.review_forward --latest",
+    language="powershell",
+)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Portfolio forward (multi-strategy local paper lifecycle) — Phase 9B
+# READ-ONLY. The UI never launches/stops a run, never places/previews orders.
+# ──────────────────────────────────────────────────────────────────────
+
+st.header("Portfolio forward (paper lifecycle)")
+st.caption(
+    "LOCAL PAPER ACCOUNTING ONLY — simulated credit-spread lifecycle with TP / SL "
+    "/ EOD exits across multiple profiles. No broker orders, no order preview, no "
+    "live execution. This panel is read-only; it never launches a run."
+)
+
+_pf_man = portfolio_ledger.load_manifest("latest")
+if not _pf_man:
+    st.caption("No portfolio runs yet. Run a local paper portfolio from a terminal (commands below).")
+else:
+    _pf_summ = portfolio_ledger.load_summary("latest") or {}
+    _pf_hb = portfolio_ledger.load_heartbeat("latest") or {}
+    st.caption(
+        f"latest: {_pf_man.get('portfolio_run_id')}  ·  status={_pf_man.get('status')}  ·  "
+        f"profiles={', '.join(_pf_man.get('profiles') or [])}"
+    )
+    _pc = st.columns(5)
+    _pc[0].metric("Open", _pf_summ.get("open_trade_count", 0))
+    _pc[1].metric("Closed", _pf_summ.get("closed_trade_count", 0))
+    _pc[2].metric("Realized P&L", _pf_summ.get("realized_pnl", 0.0))
+    _pc[3].metric("Unrealized P&L", _pf_summ.get("unrealized_pnl", 0.0))
+    _pc[4].metric("Total P&L", _pf_summ.get("total_pnl", 0.0))
+    _pc2 = st.columns(4)
+    _pc2[0].metric("Wins", _pf_summ.get("wins", 0))
+    _pc2[1].metric("Losses", _pf_summ.get("losses", 0))
+    _pc2[2].metric("Dup skipped", _pf_summ.get("duplicate_skipped_count", 0))
+    _pc2[3].metric("Blocked", _pf_summ.get("blocked_by_limits_count", 0))
+
+    _pf_cols = ("paper_trade_id", "profile_id", "side", "short_strike", "long_strike",
+                "entry_credit", "current_mark", "unrealized_pnl", "realized_pnl",
+                "exit_reason", "ticks_held")
+    _open_rows = portfolio_ledger.load_open_trades("latest")
+    if _open_rows:
+        st.markdown("**Open paper trades**")
+        st.dataframe([{k: r.get(k) for k in _pf_cols} for r in _open_rows],
+                     use_container_width=True, hide_index=True)
+    _closed_rows = portfolio_ledger.load_closed_trades("latest")
+    if _closed_rows:
+        st.markdown("**Closed paper trades**")
+        st.dataframe([{k: r.get(k) for k in _pf_cols} for r in _closed_rows],
+                     use_container_width=True, hide_index=True)
+    _pf_events = portfolio_ledger.load_events("latest")
+    if _pf_events:
+        st.markdown("**Trade events (latest 25)**")
+        st.dataframe(
+            [{k: e.get(k) for k in ("timestamp", "event_type", "profile_id",
+                                     "paper_trade_id", "reason")}
+             for e in _pf_events[-25:]],
+            use_container_width=True, hide_index=True,
+        )
+    _pf_rec = portfolio_ledger.load_reconciliation("latest")
+    if _pf_rec:
+        if _pf_rec.get("ok"):
+            st.success("Local reconciliation OK — no issues. "
+                       f"(broker_position_reconciliation: {_pf_rec.get('broker_position_reconciliation')})")
+        else:
+            st.warning(f"Reconciliation found {len(_pf_rec.get('issues', []))} issue(s): "
+                       f"{_pf_rec.get('issues')}")
+
+_pf_profiles = ",".join(_pf_man.get("profiles") or ["vertical_wing_score_best_1dte", "vertical_wing_no_trade"]) \
+    if _pf_man else "vertical_wing_score_best_1dte,vertical_wing_no_trade"
+st.markdown("**Run a local paper portfolio (copy into a terminal — the UI never launches it):**")
+st.code(
+    f"python -m scripts.run_portfolio_forward --profiles {_pf_profiles} --interval-seconds 60 --market-hours-only\n"
+    f"python -m scripts.run_portfolio_forward --profiles {_pf_profiles} --once\n"
+    "python -m scripts.review_portfolio_forward --latest\n"
+    "python -m scripts.review_portfolio_forward --open latest\n"
+    "python -m scripts.review_portfolio_forward --closed latest\n"
+    "python -m scripts.review_portfolio_forward --reconcile latest",
     language="powershell",
 )
 
