@@ -2138,3 +2138,54 @@ read-only in the Simple builder with a clear note, not fake-saved.
 
 **Next:** Phase 10 = historical / snapped-data backtest adapter. Phase 11 =
 Tastytrade execution readiness / live, still deferred.
+
+---
+
+## 2026-06-03 — Phase 9F: final operator pass + Zσ Strat Builder + Strategy Stats + Dashboard-style controls
+
+UI / copy / layout only. NO scanner/strategy/selector/quote/lifecycle/risk changes;
+no broker execution. Committed 9E first (44e086e) so 9F is a clean diff. (Workflow
+path: a 2-agent understand workflow mined the Dashboard control CSS + mapped the
+flat-file stats sources; then direct build; then a verify workflow.)
+
+Header-first layout: branded ZerσSigma Algo Cockpit header moved to the TOP (above
+the controls expander); Simple/Advanced toggle now sits in the header strip (not
+clipped by Streamlit chrome); subtitle = "Scanner · Zσ Strat Builder · Zσ Strat
+Tester · Paper Portfolio · Strategy Stats" (no "forward runner").
+
+operator_mode.py additions (pure): HEADER_TITLE/HEADER_SUBTITLE; renamed tab_labels
+(Zσ Strat Builder / Stats / Review); button_labels() + BTN_* constants;
+active_profile_display ("No active profile selected"); runner_busy_message;
+PRESET_DESCRIPTIONS + profile_description (4 committed profiles + generic fallback) +
+profile_info_fields; is_sandbox + symbol_health_view (sandbox → "sandbox mock/stub/
+eligible", live → real availability + reason). cockpit_helpers.py additions (read-
+only flat files): eod_export_file, latest_run_stats, historical_stats,
+common_no_trade_reasons, latest_best_candidate (graceful empties).
+
+ui_helpers.brand_css Dashboard match: primary = green pill linear-gradient(135deg,
+#00e5a8,#81ffd8)/#03130e radius 999px; secondary/danger = dark-outlined gradient;
+disabled opacity .42; SELECTBOX pill (rgba(16,24,38,.96) + caret-color:transparent +
+cursor:pointer) to kill the "text input cursor" feel. Streamlit limitation: select is
+a baseweb component (not native <select>), so the caret/cursor are tamed, not fully
+replaced; keyboard accessibility preserved.
+
+streamlit_main edits (render logic preserved): header moved up; symbol-health uses
+symbol_health_view (fixes the confusing "No ZerσSigma exposures and no Tasty market
+data for SPX" while stub structure renders below — sandbox now reads sandbox);
+Strategy Builder -> Zσ Strat Builder + preset info card + Create/Edit/Clone buttons;
+Zσ Strat Tester button relabels + runner-busy warning + active-profile display;
+Logs/Review -> Strategy Stats & Review (latest run + historical stats + downloads +
+review prompt); manual desk "Record manual paper trade" + no-broker note; Settings
+"Apply local session settings" + note.
+
+Tests: tests/test_phase9f_polish.py (16) — subtitle no "forward runner", tab renames
+(no Logs/Review), sandbox vs live symbol health, is_sandbox, preset + generic
+descriptions, profile_info_fields, button labels, active-profile, runner-busy,
+friendly EOD label, stats empties, Dashboard CSS classes (caret-color/primary pill/
+disabled), streamlit header-first import, no-exec grep. Updated one 9E assertion
+("Strategy Builder" -> "Strat Builder"). Full suite 511 passed, ruff clean.
+
+Gotcha: manual-desk note "...any broker." tripped the 9C no-exec grep -> "brokerage".
+
+Next: Phase 10 = historical / snapped-data backtest adapter. Phase 11 = Tastytrade
+execution readiness / live, still deferred.

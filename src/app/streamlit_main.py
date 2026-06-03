@@ -113,14 +113,29 @@ if "session_config" not in st.session_state:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Top controls (replaces the sidebar) — strategy / risk / providers / selector
+# Branded header (TOP of app, above all controls) — Phase 9F
 # ──────────────────────────────────────────────────────────────────────
 
-# Phase 9E — app-level Simple/Advanced operator mode (Simple ON by default).
-simple_mode = st.toggle(
+st.markdown(
+    ui.hero(
+        ui.brand_title(om.HEADER_TITLE),
+        om.HEADER_SUBTITLE,
+        right_html=(ui.pill("LOCAL · NO BROKER EXECUTION", "green")
+                    + " " + ui.pill(f"exec: {CFG.providers.execution_active}", "ghost")),
+    ),
+    unsafe_allow_html=True,
+)
+
+# ──────────────────────────────────────────────────────────────────────
+# Mode + controls (under the header) — strategy / symbol / data source
+# ──────────────────────────────────────────────────────────────────────
+
+# Phase 9E/9F — Simple/Advanced mode sits in the header strip (visible, not clipped).
+_mode_cols = st.columns([1, 4])
+simple_mode = _mode_cols[0].toggle(
     "🟢 Simple Mode", value=st.session_state.get("operator_simple_mode", om.DEFAULT_SIMPLE_MODE),
     key="operator_simple_mode", help=om.SIMPLE_MODE_HELP)
-st.caption(om.SIMPLE_MODE_HELP)
+_mode_cols[1].caption(om.SIMPLE_MODE_HELP)
 
 with st.expander("⚙  Controls & data source", expanded=not simple_mode):
     cc = st.columns(3)
@@ -277,31 +292,30 @@ def _fmt_quote(q: dict) -> str:
 # ──────────────────────────────────────────────────────────────────────
 
 def render_symbol_health() -> None:
-    """Phase 9E — compact symbol-health panel. Distinguishes Tasty MARKET DATA
-    from ZerσSigma EXPOSURES (two different engines) and overall eligibility."""
+    """Phase 9F — compact symbol-health panel. Distinguishes Tasty MARKET DATA from
+    ZerσSigma EXPOSURES, and SANDBOX from unavailable LIVE data (sandbox reads
+    'sandbox mock' / 'sandbox stub', never an alarming 'unavailable')."""
+    sandbox = om.is_sandbox(resolved_structure_name, resolved_quote_name)
     market_data_available = chain is not None
     exposures_available = (
         structure_error is None and structure is not None
-        and (resolved_structure_name == "stub"
-             or structure.exposures.da_gex_signed is not None
+        and (structure.exposures.da_gex_signed is not None
              or structure.exposures.maxvol is not None)
     )
-    health = om.symbol_health(
-        symbol=SYMBOL, accepted=True,
+    view = om.symbol_health_view(
+        symbol=SYMBOL, sandbox=sandbox,
         market_data_available=market_data_available, exposures_available=exposures_available)
     cols = st.columns(5)
-    cols[0].metric("Symbol", health["symbol"])
-    cols[1].metric("Tasty market data",
-                   "available" if health["market_data_available"] else "unavailable")
-    cols[2].metric("ZerσSigma exposures",
-                   "available" if health["exposures_available"] else "unavailable")
-    cols[3].metric("Strategy eligible", "yes" if health["eligible"] else "no")
-    cols[4].markdown("<div style='padding-top:14px'>" + ui.pill("NO BROKER EXECUTION", "green")
+    cols[0].metric("Symbol", view["symbol"])
+    cols[1].metric("Tasty market data", view["market_data"])
+    cols[2].metric("ZerσSigma exposures", view["exposures"])
+    cols[3].metric("Strategy eligible", view["eligible"])
+    cols[4].markdown("<div class='zsa-pill-cell'>" + ui.pill("NO BROKER EXECUTION", "green")
                      + "</div>", unsafe_allow_html=True)
-    if resolved_structure_name == "stub" or resolved_quote_name in ("mock", "null"):
-        st.caption("Sandbox data — prices/exposures are SPX mock regardless of the symbol entered.")
-    if not health["eligible"] and health["reason"]:
-        st.warning(health["reason"])
+    if view["note"]:
+        st.caption(view["note"])
+    if view["reason"]:
+        st.warning(view["reason"])
 
 
 def render_provider_status() -> None:
@@ -657,63 +671,71 @@ def render_candidates() -> None:
 
 
 def render_strategy_builder() -> None:
-    st.subheader("Strategy Builder")
+    st.subheader("🧱 Zσ Strat Builder")
     st.info(
-        "**Profiles are saved strategy recipes.** They define *what to scan* and "
-        "*how the daily selector chooses a candidate*. Editing them here does not "
-        "place trades."
+        "Build, save, and test local strategy profiles. Profiles define what to scan "
+        "and how the selector chooses a candidate. No orders are placed."
     )
-    st.caption(
-        "CONFIG / SELECTION ONLY — no execution, no orders, no secrets; validation "
-        "rejects execution keys + credentials. Paper lifecycle (TP/SL/EOD) lives under "
-        "**Session & Paper Settings**, not in the profile schema."
-    )
+    st.caption("CONFIG / SELECTION ONLY — no execution, no orders, no broker calls.")
 
     summaries = pb.list_summaries()
-    if summaries:
-        st.dataframe(
-            [{"profile_id": s.get("profile_id"), "name": s.get("profile_name"),
-              "strategy": s.get("strategy_id"), "selector": s.get("daily_selector"),
-              "dte": s.get("target_dte"), "enabled": s.get("enabled"),
-              "valid": s.get("ok"), "hash": s.get("profile_hash")} for s in summaries],
-            use_container_width=True, hide_index=True,
-        )
     valid_ids = [s["profile_id"] for s in summaries if s.get("ok")]
 
-    st.markdown("**Load a profile into the editor**")
-    lc = st.columns([1, 2, 1])
-    mode = lc[0].radio("Source", ["New", "Edit", "Clone"], horizontal=False, key="builder_mode")
-    if mode == "New":
-        new_id = lc[1].text_input("New profile id", value="", key="builder_new_id")
-        if lc[2].button("Load template", key="builder_load_new"):
-            st.session_state["builder_dict"] = pb.new_template_dict(new_id or "new_profile")
+    # ── A. Preset strategy profiles + selected-profile info card ──
+    st.markdown("**Preset strategy profiles**")
+    sel_id = st.selectbox("Select a profile", options=valid_ids or ["(none)"],
+                          key="builder_select")
+    sel_dict = None
+    if valid_ids and sel_id in valid_ids:
+        sel_dict, _serrs = pb.load_dict_for_edit(sel_id)
+    if sel_dict:
+        info = om.profile_info_fields(sel_dict)
+        ic = st.columns(4)
+        for _i, _k in enumerate(("Profile", "Symbol", "Strategy", "Target DTE",
+                                 "Side preference", "Selector style", "Data source",
+                                 "Risk profile")):
+            ic[_i % 4].metric(_k, ui.dash(info[_k]))
+        st.caption(f"**Designed to test:** {info['Designed to test']}")
+        st.caption(f"Enabled: `{info['Enabled']}`  ·  Safety: {info['Safety']}")
+    with st.expander("All profiles (table)", expanded=False):
+        if summaries:
+            st.dataframe(
+                [{"profile_id": s.get("profile_id"), "name": s.get("profile_name"),
+                  "strategy": s.get("strategy_id"), "selector": s.get("daily_selector"),
+                  "dte": s.get("target_dte"), "enabled": s.get("enabled"),
+                  "valid": s.get("ok"), "hash": s.get("profile_hash")} for s in summaries],
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.caption("No profiles found in profiles/.")
+
+    # ── B/C. Build or edit (clear buttons — no radio-first) ──
+    st.markdown("**Build or edit**")
+    bc = st.columns(3)
+    if bc[0].button(om.BTN_NEW_PROFILE, key="builder_new"):
+        _new = pb.new_template_dict("new_profile")
+        _new["symbol"] = st.session_state.get("active_symbol", om.DEFAULT_SYMBOL)
+        st.session_state["builder_dict"] = _new
+        st.session_state.pop("builder_built", None)
+        st.session_state.pop("builder_errors", None)
+    if bc[1].button(om.BTN_EDIT_PROFILE, key="builder_edit", disabled=not sel_dict):
+        st.session_state["builder_dict"] = sel_dict
+        st.session_state.pop("builder_built", None)
+        st.session_state.pop("builder_errors", None)
+    if bc[2].button(om.BTN_CLONE_PROFILE, key="builder_clone", disabled=not sel_dict):
+        d, errs = pb.clone_dict(sel_id, f"{sel_id}_copy")
+        if d is not None:
+            st.session_state["builder_dict"] = d
             st.session_state.pop("builder_built", None)
             st.session_state.pop("builder_errors", None)
-    elif mode == "Edit":
-        sel = lc[1].selectbox("Profile", options=valid_ids or ["(none)"], key="builder_edit_id")
-        if lc[2].button("Load for edit", key="builder_load_edit") and valid_ids:
-            d, errs = pb.load_dict_for_edit(sel)
-            if d is not None:
-                st.session_state["builder_dict"] = d
-                st.session_state.pop("builder_built", None)
-                st.session_state.pop("builder_errors", None)
-            else:
-                st.error("Load failed: " + "; ".join(errs))
-    else:  # Clone
-        src = lc[1].selectbox("Clone source", options=valid_ids or ["(none)"], key="builder_clone_src")
-        clone_id = lc[1].text_input("New id for clone", value="", key="builder_clone_id")
-        if lc[2].button("Clone", key="builder_clone_btn") and valid_ids:
-            d, errs = pb.clone_dict(src, clone_id or f"{src}_copy")
-            if d is not None:
-                st.session_state["builder_dict"] = d
-                st.session_state.pop("builder_built", None)
-                st.session_state.pop("builder_errors", None)
-            else:
-                st.error("Clone failed: " + "; ".join(errs))
+        else:
+            st.error("Clone failed: " + "; ".join(errs))
+    if not sel_dict:
+        st.caption("_Select a valid preset above to enable Edit / Clone._")
 
     base = st.session_state.get("builder_dict")
     if not base:
-        st.info("Pick a source above and load it to start editing.")
+        st.info("Choose **Create new profile**, or pick a preset above and **Edit** / **Clone** it.")
         return
 
     def _show_result_and_save() -> None:
@@ -874,7 +896,7 @@ def render_forward_runner() -> None:
     _tester_prof = next((r.profile for r in list_run_profiles()
                          if r.ok and r.profile and r.profile.profile_id == chosen_profile_id), None)
     _tc = st.columns(3)
-    _tc[0].metric("Active profile", chosen_profile_id if chosen_profile_id != "(none)" else "—")
+    _tc[0].metric("Active profile", om.active_profile_display(chosen_profile_id))
     _tc[1].metric("Symbol", (_tester_prof.symbol if _tester_prof else SYMBOL))
     _tc[2].metric("Data source", om.providers_to_data_source(
         (_tester_prof.structure_provider if _tester_prof else chosen_structure),
@@ -887,7 +909,10 @@ def render_forward_runner() -> None:
     mcols[2].metric("PID", str(view["pid"] or "—"))
     mcols[3].metric("Run id", view["run_id"] or "—")
     if view["stale"]:
-        st.warning("Control state is STALE (PID not alive). Use **Cleanup stale** below.")
+        st.warning("Control state is STALE (PID not alive). Use **Clear stale runner** below.")
+    if view["active"] or view.get("status") in ("running", "starting", "stopping"):
+        st.warning("⚠ " + om.runner_busy_message(
+            view.get("profile_id") or chosen_profile_id, view.get("status")))
     # Phase 9D — latest decision + open paper P&L at a glance.
     _rs_hb = forward_review.load_latest_heartbeat() or {}
     _rs_ps = portfolio_ledger.load_summary("latest") or {}
@@ -911,9 +936,9 @@ def render_forward_runner() -> None:
 
     can, why = control_ui.can_start(control_ui.get_status())
     bcols = st.columns(5)
-    if bcols[0].button("🔄 Refresh status", key="runner_refresh"):
+    if bcols[0].button(om.BTN_REFRESH, key="runner_refresh"):
         st.rerun()
-    if bcols[1].button("👁 Preview strategy", disabled=not runner_profiles or not can,
+    if bcols[1].button(om.BTN_PREVIEW, disabled=not runner_profiles or not can,
                        key="runner_preview",
                        help="Runs a single local paper-test tick (no broker)."):
         ok, msg, pid = control_ui.start_runner(
@@ -922,7 +947,7 @@ def render_forward_runner() -> None:
                                          + (f" (pid {pid})" if pid else ""))
         if ok:
             st.rerun()
-    if bcols[2].button("▶ Start paper test", type="primary",
+    if bcols[2].button(om.BTN_START_TEST, type="primary",
                        disabled=not runner_profiles or not can, key="runner_start"):
         ok, msg, pid = control_ui.start_runner(
             sel_profile, interval_seconds=float(interval), once=bool(once),
@@ -930,11 +955,11 @@ def render_forward_runner() -> None:
         (st.success if ok else st.error)(f"{msg}" + (f" (pid {pid})" if pid else ""))
         if ok:
             st.rerun()
-    if bcols[3].button("■ Stop test", key="runner_stop"):
+    if bcols[3].button(om.BTN_STOP_TEST, key="runner_stop"):
         ok, msg = control_ui.stop_runner(force=bool(st.session_state.get("runner_force", False)))
         (st.success if ok else st.warning)(msg)
         st.rerun()
-    if bcols[4].button("🧹 Cleanup stale", key="runner_cleanup"):
+    if bcols[4].button(om.BTN_CLEAR_STALE, key="runner_cleanup"):
         ok, msg = control_ui.cleanup()
         (st.success if ok else st.warning)(msg)
         st.rerun()
@@ -1129,7 +1154,11 @@ def render_manual_desk() -> None:
             step=0.05, format="%.2f",
         )
         notes = cols2[3].text_input("Notes", value="")
-        submit_trade = st.form_submit_button("Record trade")
+        submit_trade = st.form_submit_button(om.BTN_RECORD_MANUAL)
+    st.caption(
+        "Manual entries are local records only. They do not sync with Tastytrade or "
+        "any brokerage."
+    )
 
     if submit_trade:
         ts = now_et()
@@ -1195,17 +1224,67 @@ def render_manual_desk() -> None:
 
 
 def render_logs() -> None:
-    st.subheader("Logs & export")
+    st.subheader("📊 Strategy Stats & Review")
     st.caption(
-        "Download the latest local run artifacts, or copy a review prompt for an "
-        "external assistant. Read-only — no execution, no broker calls."
+        "Latest run, historical stats from local paper runs, exports, and a review "
+        "prompt. Read-only — no execution, no broker calls."
     )
-    _exports = ch.forward_export_files() + ch.portfolio_export_files()
+    _fwd_root = OUTPUT_ROOT / "forward"
+    _pf_root = OUTPUT_ROOT / "portfolio_forward"
+
+    # ── A. Latest run summary ──
+    st.markdown("**Latest run summary**")
+    latest = ch.latest_run_stats(_fwd_root, _pf_root)
+    la = st.columns(4)
+    la[0].metric("Run id", str(latest["run_id"]))
+    la[1].metric("Profile", str(latest["profile"]))
+    la[2].metric("Ticks", latest["ticks"])
+    la[3].metric("Selected", latest["signals"])
+    lb = st.columns(4)
+    lb[0].metric("No-trade", latest["no_trade"])
+    lb[1].metric("Open paper", latest["open_paper"])
+    lb[2].metric("Realized P&L", ch.fmt_money(latest["realized_pnl"]))
+    lb[3].metric("Total P&L", ch.fmt_money(latest["total_pnl"]))
+    if not latest["has_data"]:
+        st.caption("No runs yet — start a strategy test in **Zσ Strat Tester**.")
+
+    # ── B. Historical strategy statistics (flat files, no database) ──
+    st.markdown("**Historical strategy statistics**")
+    hist = ch.historical_stats(_fwd_root, _pf_root)
+    if not hist["has_data"]:
+        st.info("More stats will appear after additional local paper runs.")
+    else:
+        ha = st.columns(4)
+        ha[0].metric("Runs found", hist["runs_found"])
+        ha[1].metric("Total scan ticks", hist["total_ticks"])
+        ha[2].metric("Total selected", hist["total_signals"])
+        ha[3].metric("Total no-trade", hist["total_no_trade"])
+        hb = st.columns(4)
+        hb[0].metric("Paper trades", hist["paper_trades"])
+        hb[1].metric("Wins / Losses", f"{hist['wins']} / {hist['losses']}")
+        hb[2].metric("Realized P&L", ch.fmt_money(hist["realized_pnl"]))
+        hb[3].metric("Unrealized P&L", ch.fmt_money(hist["unrealized_pnl"]))
+        _reasons = ch.common_no_trade_reasons(_fwd_root)
+        if _reasons:
+            st.markdown("**Common no-trade reasons**")
+            st.dataframe([{"reason": r, "count": c} for r, c in _reasons],
+                         use_container_width=True, hide_index=True)
+        _best = ch.latest_best_candidate(OUTPUT_ROOT)
+        if _best:
+            st.caption(
+                f"Best candidate (latest EOD): {_best.get('side')} "
+                f"{ch.fmt_strike(_best.get('short_strike'))}/{ch.fmt_strike(_best.get('long_strike'))} "
+                f"· credit {_best.get('credit')} · score {_best.get('score')}")
+
+    # ── C. Downloads / exports (operator-friendly labels) ──
+    st.markdown("**Downloads / exports**")
+    _exports = (ch.forward_export_files(_fwd_root) + ch.portfolio_export_files(_pf_root)
+                + [ch.eod_export_file(OUTPUT_ROOT)])
     ecols = st.columns(3)
     _any_export = False
     for _i, _f in enumerate(_exports):
         _col = ecols[_i % 3]
-        _label = om.friendly_log_label(_f["filename"])  # Phase 9E — operator-friendly
+        _label = om.friendly_log_label(_f["filename"])
         if _f["exists"] and _f["text"] is not None:
             _any_export = True
             _col.download_button(f"⬇ {_label}", data=_f["text"],
@@ -1217,6 +1296,7 @@ def render_logs() -> None:
     if not _any_export:
         st.info("No logs yet. Run a strategy test (Zσ Strat Tester) or a paper portfolio to generate logs.")
 
+    # ── D. Review prompt ──
     st.markdown("**Copy review prompt** (paste into your assistant with the downloaded logs):")
     st.code(ch.review_prompt((forward_review.load_latest_manifest() or {}).get("run_id")),
             language="text")
@@ -1249,9 +1329,8 @@ def render_settings() -> None:
     if session.paper_only:
         st.warning(f"Risk profile **{session.profile_label}** is marked `paper_only`.")
     st.info(
-        "Session settings affect **this local Streamlit session** and paper-lifecycle "
-        "defaults. They do **not** rewrite saved strategy profiles unless you save a "
-        "profile in the **Strategy Builder** tab."
+        "These settings affect the current local Streamlit session and paper-lifecycle "
+        "defaults. Saved strategy profiles are only changed from **Zσ Strat Builder**."
     )
     with st.form("session_controls"):
         c1, c2, c3 = st.columns(3)
@@ -1312,7 +1391,7 @@ def render_settings() -> None:
             no_trade_score_threshold = f4.number_input(
                 "No-trade score threshold",
                 value=float(session.no_trade_score_threshold), step=0.05, format="%.2f")
-        submitted = st.form_submit_button("Apply session changes")
+        submitted = st.form_submit_button(om.BTN_APPLY_SESSION)
 
     if submitted:
         try:
@@ -1367,18 +1446,8 @@ def render_settings() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Command-center layout
+# Status strip + tabs (header is rendered at the TOP of the app)
 # ──────────────────────────────────────────────────────────────────────
-
-st.markdown(
-    ui.hero(
-        ui.brand_title("ZerσSigma Algo Cockpit"),
-        "Scanner · strategy builder · forward runner · paper portfolio · EOD",
-        right_html=(ui.pill("LOCAL · NO BROKER EXECUTION", "green")
-                    + " " + ui.pill(f"exec: {CFG.providers.execution_active}", "ghost")),
-    ),
-    unsafe_allow_html=True,
-)
 
 # Phase 9D — compact operational status strip (above the tabs).
 _strip_runner = control_ui.status_view(control_ui.get_status())
@@ -1398,7 +1467,7 @@ _strip_cols = st.columns(len(_strip_cells) + 1)
 for _col, (_lbl, _val) in zip(_strip_cols, _strip_cells, strict=False):
     _col.metric(_lbl, _val)
 _strip_cols[-1].markdown(
-    "<div style='padding-top:18px'>" + ui.pill("NO BROKER EXECUTION", "green") + "</div>",
+    "<div class='zsa-pill-cell'>" + ui.pill("NO BROKER EXECUTION", "green") + "</div>",
     unsafe_allow_html=True,
 )
 

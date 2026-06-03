@@ -129,7 +129,7 @@ def test_tab_labels_branded_no_forward_runner():
     assert "Zσ Strat Tester" in joined
     assert "Forward Runner" not in joined
     assert any("Paper Portfolio" in lbl for lbl in labels)
-    assert any("Strategy Builder" in lbl for lbl in labels)
+    assert any("Strat Builder" in lbl for lbl in labels)   # 9F: "Zσ Strat Builder"
 
 
 def test_strict_dte_visible_label_replaced():

@@ -1403,6 +1403,57 @@ the structure provider is the **Exposure source** and the quote provider is the
   export**, **No-trade reasons export**, **Paper trade events**, **Portfolio
   summary**, **Reconciliation report**); raw filenames show only in Advanced Mode.
 
+##### Phase 9F — final operator pass + Zσ Strat Builder + Strategy Stats + Dashboard-style controls
+
+Phase 9F is the clean operator pass before live use: a header-first layout, the
+**Zσ Strat Builder** rename with preset info cards, a **Strategy Stats & Review**
+tab, a sandbox-vs-live symbol-health fix, button/copy cleanup, and
+**Dashboard-matched control styling**. **UI / copy / layout only — no trading
+logic changes, no broker execution.** New pure helpers live in
+`src/app/operator_mode.py` + `src/app/cockpit_helpers.py`.
+
+- **Header-first layout.** The branded **ZerσSigma Algo Cockpit** header now renders
+  at the very top, with the Simple/Advanced toggle in the header strip (no longer
+  clipped) and the *Controls & data source* expander *below* it. Subtitle:
+  *"Scanner · Zσ Strat Builder · Zσ Strat Tester · Paper Portfolio · Strategy Stats"*
+  (no "forward runner"). Safety badges (`LOCAL · NO BROKER EXECUTION`,
+  `exec: local_paper`) kept.
+- **🧱 Zσ Strat Builder.** Renamed tab + page. Pick a **preset** → an **info card**
+  explains it (symbol, strategy, DTE, side, selector style, data source, risk
+  profile, *what it's designed to test*, enabled, safety) with friendly
+  descriptions for the four committed profiles (+ a generic fallback). Clear
+  **Create new / Edit selected / Clone selected** buttons (no radio-first); the
+  profile table is tucked into an expander.
+- **🧪 Zσ Strat Tester.** A clearer 5-step flow; **Start local paper test** /
+  **Preview strategy** / **Stop test** / **Clear stale runner** / **Refresh
+  status**; an obvious warning when a runner is already active (Start/Preview
+  disabled with a plain reason); "No active profile selected" when blank.
+- **📊 Strategy Stats & Review** (was Logs / Review). Latest-run summary +
+  historical stats aggregated from existing flat files (runs, ticks, selected
+  signals, paper trades, win/loss, realized/unrealized P&L, common no-trade
+  reasons, latest EOD best candidate) with a *"More stats will appear after
+  additional local paper runs"* empty state; friendly download labels (+ EOD
+  summary); review prompt.
+- **Symbol-health fix.** In **Sandbox** the panel reads *Tasty market data: sandbox
+  mock · ZerσSigma exposures: sandbox stub · Strategy eligible: sandbox eligible*
+  with a "Sandbox uses SPX mock/stub data regardless of ticker" note — no more
+  alarming "unavailable/unavailable" when stub/mock is intentionally selected.
+  **Live** mode still reports real availability + a reason when not eligible.
+- **Manual desk / Settings copy.** "Record manual paper trade" (+ "local records
+  only… do not sync with Tastytrade or any brokerage"); "Apply local session
+  settings"; Settings note clarifies saved profiles change only from Zσ Strat
+  Builder.
+
+**Dashboard-style controls.** Shared CSS in `ui_helpers.brand_css()` matches the
+ZerσSigma Dashboard: primary actions are bright **green pills**
+(`linear-gradient(135deg,#00e5a8,#81ffd8)`), secondary/restrained-danger are
+**dark outlined**, disabled buttons dim to `opacity .42`, and **selectboxes are
+pill-styled with the typing-caret hidden** (`caret-color: transparent` +
+`cursor: pointer`) so they read as dropdowns, not text fields. *Streamlit
+limitation:* its select is a baseweb component (not a native `<select>`), so the
+caret/cursor are tamed rather than fully replaced — keyboard accessibility is
+preserved.
+
 ##### What's still missing under `public_only`
 
 | Field | Still None under public_only? | How to populate |

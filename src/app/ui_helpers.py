@@ -85,16 +85,55 @@ code, pre, .stCode {{ font-family: "IBM Plex Mono", ui-monospace, Menlo, monospa
   box-shadow: 0 2px 10px rgba(0,229,168,.14);
 }}
 
-/* primary buttons → accent; default buttons → dark control */
+/* ── Dashboard-matched controls (Phase 9F) ── */
+/* secondary / default + restrained danger button: dark subtle outlined */
 .stButton > button {{
-  border-radius: 12px; border: 1px solid {b['line']};
-  background: rgba(20,30,48,.58); color: {b['text']};
+  border-radius: 12px; font-weight: 600; line-height: 1;
+  border: 1px solid rgba(88,124,182,.42);
+  background: linear-gradient(180deg, rgba(31,50,76,.92) 0%, rgba(20,33,52,.88) 100%);
+  color: rgba(229,238,250,.94);
 }}
-.stButton > button:hover {{ border-color: {b['blue']}; color: #fff; }}
+.stButton > button:hover {{
+  border-color: rgba(112,151,214,.55); color: #fff;
+  background: linear-gradient(180deg, rgba(38,61,93,.96) 0%, rgba(24,39,62,.94) 100%);
+}}
+.stButton > button:disabled, .stButton > button[disabled] {{
+  opacity: .42; cursor: not-allowed; box-shadow: none;
+}}
+.stButton > button:disabled:hover {{
+  border-color: rgba(88,124,182,.42); color: rgba(229,238,250,.94);
+  background: linear-gradient(180deg, rgba(31,50,76,.92) 0%, rgba(20,33,52,.88) 100%);
+}}
+/* primary action: bright ZerσSigma green pill */
 .stButton > button[kind="primary"] {{
-  background: {b['accent']}; color: #04110d; border: 1px solid {b['accent2']};
-  font-weight: 700;
+  background: linear-gradient(135deg, #00e5a8, #81ffd8); color: #03130e;
+  border: 1px solid transparent; border-radius: 999px; font-weight: 700;
+  box-shadow: 0 8px 22px rgba(0,229,168,.18);
 }}
+.stButton > button[kind="primary"]:hover {{
+  transform: translateY(-1px); color: #03130e;
+  background: linear-gradient(135deg, #19f5b2, #9bffe0);
+  box-shadow: 0 12px 28px rgba(0,229,168,.24);
+}}
+/* selectbox / dropdown: pill style, NOT an editable text field. The caret is
+   hidden + cursor:pointer so it reads as a dropdown, not a typing field.
+   (Streamlit uses a baseweb <select> rendered with an input; we can't fully
+   remove the input, but caret-color:transparent + cursor:pointer fix the feel.) */
+.stSelectbox div[data-baseweb="select"] > div {{
+  background: rgba(16,24,38,.96); border: 1px solid rgba(82,102,136,.82);
+  border-radius: 12px; cursor: pointer;
+}}
+.stSelectbox div[data-baseweb="select"] > div:hover {{
+  background: rgba(22,32,50,.96); border-color: rgba(100,122,160,.9);
+}}
+.stSelectbox div[data-baseweb="select"] input {{
+  caret-color: transparent !important; cursor: pointer !important;
+}}
+div[data-baseweb="popover"] [role="listbox"] {{
+  background: rgba(16,24,38,.98); border: 1px solid {b['line']};
+}}
+.stSelectbox label, .stTextInput label, .stNumberInput label, .stRadio label,
+.stMultiSelect label {{ color: {b['muted']}; font-size: 12px; font-weight: 600; }}
 
 /* dataframes + expanders blend into the dark theme */
 [data-testid="stExpander"] {{ border: 1px solid {b['line']}; border-radius: 12px; }}
@@ -129,6 +168,7 @@ code, pre, .stCode {{ font-family: "IBM Plex Mono", ui-monospace, Menlo, monospa
 .zsa-pill.red {{ color: #fff; background: {b['danger']}; border-color: {b['danger']}; }}
 .zsa-pill.amber {{ color: #1a1406; background: {b['warn']}; border-color: {b['warn']}; }}
 .zsa-pill.ghost {{ color: {b['muted']}; }}
+.zsa-pill-cell {{ padding-top: 14px; }}  /* vertical-center a pill in a metric column */
 </style>
 """
 

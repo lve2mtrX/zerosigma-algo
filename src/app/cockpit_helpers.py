@@ -287,3 +287,111 @@ def portfolio_export_files(root: Path | str | None = None) -> list[dict[str, Any
         _entry("Portfolio summary", paths["summary"]),
         _entry("Reconciliation report", paths["reconciliation"]),
     ]
+
+
+# ── Phase 9F — EOD export + strategy-stats aggregation (read-only flat files) ──
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    import json
+    txt = _read_text_or_none(path)
+    if not txt:
+        return None
+    try:
+        d = json.loads(txt)
+        return d if isinstance(d, dict) else None
+    except ValueError:
+        return None
+
+
+def eod_export_file(output_root: Path | str | None = None) -> dict[str, Any]:
+    """The latest EOD summary JSON for download (graceful when missing)."""
+    base = Path(output_root) if output_root else (_REPO_ROOT / "outputs")
+    return _entry("EOD summary", base / "latest" / "eod_summary.json")
+
+
+def latest_run_stats(forward_root: Path | str | None = None,
+                     portfolio_root: Path | str | None = None) -> dict[str, Any]:
+    """Section A — latest forward run + latest portfolio P&L (existing flat files)."""
+    from src.forward import review as fr
+    from src.paper import ledger
+    man = fr.load_latest_manifest(forward_root) or {}
+    summ = fr.summarize_run("latest", forward_root) or {}
+    psum = ledger.load_latest_summary(portfolio_root) or {}
+    return {
+        "run_id": summ.get("run_id") or man.get("run_id") or "—",
+        "profile": summ.get("profile_name") or man.get("profile_name") or "—",
+        "ticks": summ.get("tick_count", 0),
+        "signals": summ.get("signal_count", 0),
+        "no_trade": summ.get("no_trade_count", 0),
+        "open_paper": psum.get("open_trade_count", 0),
+        "realized_pnl": psum.get("realized_pnl", 0.0),
+        "total_pnl": psum.get("total_pnl", 0.0),
+        "has_data": bool(man or summ or psum),
+    }
+
+
+def historical_stats(forward_root: Path | str | None = None,
+                     portfolio_root: Path | str | None = None) -> dict[str, Any]:
+    """Section B — aggregates across all discovered runs (no database; flat files)."""
+    from src.forward import review as fr
+    from src.paper import ledger
+    fwd = fr.list_run_summaries(root=forward_root) or []
+    pruns = ledger.list_portfolio_run_summaries(root=portfolio_root) or []
+    paper_trades = wins = losses = 0
+    realized = unrealized = 0.0
+    for prun in pruns:
+        rid = prun.get("portfolio_run_id")
+        if not rid:
+            continue
+        for c in ledger.load_closed_trades(rid, portfolio_root) or []:
+            paper_trades += 1
+            try:
+                rp = float(c.get("realized_pnl") or 0.0)
+            except (TypeError, ValueError):
+                rp = 0.0
+            if rp > 0:
+                wins += 1
+            elif rp < 0:
+                losses += 1
+        s = ledger.load_summary(rid, portfolio_root) or {}
+        realized += float(s.get("realized_pnl") or 0.0)
+        unrealized += float(s.get("unrealized_pnl") or 0.0)
+    return {
+        "runs_found": len(fwd),
+        "portfolio_runs": len(pruns),
+        "total_ticks": sum(int(r.get("tick_count") or 0) for r in fwd),
+        "total_signals": sum(int(r.get("signal_count") or 0) for r in fwd),
+        "total_no_trade": sum(int(r.get("no_trade_count") or 0) for r in fwd),
+        "paper_trades": paper_trades,
+        "wins": wins,
+        "losses": losses,
+        "realized_pnl": round(realized, 2),
+        "unrealized_pnl": round(unrealized, 2),
+        "has_data": bool(fwd or pruns),
+    }
+
+
+def common_no_trade_reasons(forward_root: Path | str | None = None,
+                            limit: int = 5) -> list[tuple[str, int]]:
+    """Top no-trade reasons aggregated across forward runs (from no_trade_log)."""
+    from src.forward import review as fr
+    counts: dict[str, int] = {}
+    for p in fr.discover_runs(forward_root):
+        for row in fr.load_no_trade_log(p.name, forward_root) or []:
+            reason = (row.get("no_trade_reason") or "").strip()
+            if reason:
+                counts[reason] = counts.get(reason, 0) + 1
+    return sorted(counts.items(), key=lambda kv: -kv[1])[:limit]
+
+
+def latest_best_candidate(output_root: Path | str | None = None) -> dict[str, Any] | None:
+    """best_candidate_of_day from the latest EOD summary JSON, if present."""
+    base = Path(output_root) if output_root else (_REPO_ROOT / "outputs")
+    data = _read_json_file(base / "latest" / "eod_summary.json")
+    if not data:
+        return None
+    bc = data.get("best_candidate_of_day")
+    return bc if isinstance(bc, dict) else None

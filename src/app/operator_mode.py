@@ -28,20 +28,25 @@ DEFAULT_SYMBOL = "SPX"
 STRAT_TESTER_TAB = "Zσ Strat Tester"
 PAPER_PORTFOLIO_TAB = "Paper Portfolio"
 LIVE_COCKPIT_TAB = "Live Cockpit"
-STRATEGY_BUILDER_TAB = "Strategy Builder"
-LOGS_TAB = "Logs / Review"
+STRATEGY_BUILDER_TAB = "Zσ Strat Builder"   # Phase 9F rename
+STATS_TAB = "Stats / Review"                 # Phase 9F rename (was Logs / Review)
 SETTINGS_TAB = "Settings"
+
+# Phase 9F — branded header subtitle (no "forward runner" wording).
+HEADER_TITLE = "ZerσSigma Algo Cockpit"
+HEADER_SUBTITLE = "Scanner · Zσ Strat Builder · Zσ Strat Tester · Paper Portfolio · Strategy Stats"
 
 
 def tab_labels() -> list[str]:
-    """The six cockpit tab labels. Uses the branded 'Zσ Strat Tester' — never
-    'Forward Runner' as a visible tab name."""
+    """The six cockpit tab labels. Uses the branded 'Zσ Strat Builder' / 'Zσ Strat
+    Tester' / 'Stats / Review' — never 'Forward Runner' or 'Logs / Review' as a
+    visible tab name."""
     return [
         f"🛰 {LIVE_COCKPIT_TAB}",
         f"🧱 {STRATEGY_BUILDER_TAB}",
         f"🧪 {STRAT_TESTER_TAB}",
         f"💼 {PAPER_PORTFOLIO_TAB}",
-        f"🗒 {LOGS_TAB}",
+        f"📊 {STATS_TAB}",
         f"⚙ {SETTINGS_TAB}",
     ]
 
@@ -217,9 +222,158 @@ LOG_EXPORT_LABELS = {
     "paper_trade_events.jsonl": "Paper trade events",
     "portfolio_summary.json": "Portfolio summary",
     "reconciliation_report.json": "Reconciliation report",
+    "eod_summary.json": "EOD summary",
 }
 
 
 def friendly_log_label(filename: str) -> str:
     """Operator-friendly label for an export file (filename shown under Advanced)."""
     return LOG_EXPORT_LABELS.get(filename, filename)
+
+
+# ── Phase 9F — button labels (verb-first, consistent) ────────────────────────
+
+BTN_PREVIEW = "👁 Preview strategy"
+BTN_START_TEST = "▶ Start local paper test"
+BTN_STOP_TEST = "■ Stop test"
+BTN_CLEAR_STALE = "🧹 Clear stale runner"
+BTN_REFRESH = "🔄 Refresh status"
+BTN_RECORD_MANUAL = "Record manual paper trade"
+BTN_APPLY_SESSION = "Apply local session settings"
+BTN_NEW_PROFILE = "Create new profile"
+BTN_EDIT_PROFILE = "Edit selected profile"
+BTN_CLONE_PROFILE = "Clone selected profile"
+BTN_LOAD_PROFILE = "Load selected profile"
+BTN_SAVE_PROFILE = "💾 Save profile"
+BTN_VALIDATE = "Validate strategy"
+
+
+def button_labels() -> dict[str, str]:
+    """All operator button labels (pure — for tests + reuse)."""
+    return {
+        "preview": BTN_PREVIEW, "start": BTN_START_TEST, "stop": BTN_STOP_TEST,
+        "clear_stale": BTN_CLEAR_STALE, "refresh": BTN_REFRESH,
+        "record_manual": BTN_RECORD_MANUAL, "apply_session": BTN_APPLY_SESSION,
+        "new": BTN_NEW_PROFILE, "edit": BTN_EDIT_PROFILE, "clone": BTN_CLONE_PROFILE,
+        "load": BTN_LOAD_PROFILE, "save": BTN_SAVE_PROFILE, "validate": BTN_VALIDATE,
+    }
+
+
+def active_profile_display(profile_id: Any) -> str:
+    """Display string for the active profile; clear when none."""
+    pid = str(profile_id).strip() if profile_id is not None else ""
+    if not pid or pid in ("(none)", "None"):
+        return "No active profile selected"
+    return pid
+
+
+def runner_busy_message(profile_id: Any, status: Any) -> str:
+    """Warning shown when a runner is already active/stopping."""
+    who = active_profile_display(profile_id)
+    state = str(status or "running")
+    return (f"A local paper test is already {state} for {who}. "
+            "Stop it before starting another.")
+
+
+# ── Phase 9F — preset strategy descriptions ──────────────────────────────────
+
+PRESET_DESCRIPTIONS: dict[str, str] = {
+    "vertical_wing_score_best_1dte": (
+        "Baseline Vertical Wing profile. Scans both call-credit and put-credit "
+        "candidates, then selects the highest-scoring valid setup for 1DTE testing."),
+    "vertical_wing_best_credit_1dte": (
+        "Credit-focused Vertical Wing profile. Prioritizes the valid candidate with "
+        "the best credit after filters."),
+    "vertical_wing_call_only_1dte": (
+        "Call-credit-only Vertical Wing profile. Tests the call-credit side without "
+        "allowing put-credit selections."),
+    "vertical_wing_no_trade": (
+        "Observation-only profile. Runs the scan and logs candidate data without "
+        "selecting a trade."),
+}
+
+
+def profile_description(profile_id: str, fields: dict[str, Any] | None = None) -> str:
+    """Friendly description for a preset; falls back to a generic one from fields."""
+    known = PRESET_DESCRIPTIONS.get(profile_id)
+    if known:
+        return known
+    f = fields or {}
+    if f.get("daily_selector") == "no_trade":
+        side = "observe only (no trade)"
+    elif f.get("allow_call_credit") and not f.get("allow_put_credit"):
+        side = "call-credit only"
+    elif f.get("allow_put_credit") and not f.get("allow_call_credit"):
+        side = "put-credit only"
+    else:
+        side = "both sides"
+    sym = f.get("symbol") or "SPX"
+    dte = f.get("target_dte")
+    sel = f.get("daily_selector") or "score_best_valid"
+    return (f"{f.get('strategy_type') or 'Strategy'} profile on {sym}, target DTE "
+            f"{dte}, {side}, selector `{sel}`.")
+
+
+def profile_info_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Pure: the info-card field set for a profile (for the Zσ Strat Builder)."""
+    f = fields or {}
+    if f.get("daily_selector") == "no_trade":
+        side = "Observe only"
+    elif f.get("allow_call_credit") and not f.get("allow_put_credit"):
+        side = "Calls only"
+    elif f.get("allow_put_credit") and not f.get("allow_call_credit"):
+        side = "Puts only"
+    else:
+        side = "Both sides"
+    return {
+        "Profile": f.get("profile_name") or f.get("profile_id") or "—",
+        "Symbol": f.get("symbol") or "—",
+        "Strategy": f.get("strategy_type") or f.get("strategy_id") or "—",
+        "Target DTE": f.get("target_dte"),
+        "Side preference": side,
+        "Selector style": selector_to_style(f.get("daily_selector") or "score_best_valid"),
+        "Data source": providers_to_data_source(
+            f.get("structure_provider") or "stub",
+            f.get("quote_provider") or "mock").split(":")[0],
+        "Risk profile": f.get("risk_profile") or "—",
+        "Enabled": bool(f.get("enabled")),
+        "Designed to test": profile_description(str(f.get("profile_id") or ""), f),
+        "Safety": "local paper / no broker execution",
+    }
+
+
+# ── Phase 9F — sandbox-aware symbol-health view ──────────────────────────────
+
+def is_sandbox(structure_provider: str | None, quote_provider: str | None) -> bool:
+    """True when the active data source is the sandbox (stub exposures / mock|null
+    market data)."""
+    return (structure_provider == "stub") or (quote_provider in ("mock", "null"))
+
+
+def symbol_health_view(*, symbol: str, sandbox: bool,
+                       market_data_available: bool, exposures_available: bool) -> dict[str, Any]:
+    """Display-ready symbol health that distinguishes SANDBOX from unavailable LIVE
+    data. In sandbox the engines read 'sandbox mock' / 'sandbox stub' / 'sandbox
+    eligible' (never an alarming 'unavailable')."""
+    if sandbox:
+        return {
+            "symbol": symbol,
+            "market_data": "sandbox mock",
+            "exposures": "sandbox stub",
+            "eligible": "sandbox eligible",
+            "eligible_ok": True,
+            "note": "Sandbox uses SPX mock/stub data regardless of ticker.",
+            "reason": "",
+        }
+    h = symbol_health(symbol=symbol, accepted=True,
+                      market_data_available=market_data_available,
+                      exposures_available=exposures_available)
+    return {
+        "symbol": symbol,
+        "market_data": "available" if h["market_data_available"] else "unavailable",
+        "exposures": "available" if h["exposures_available"] else "unavailable",
+        "eligible": "yes" if h["eligible"] else "no",
+        "eligible_ok": h["eligible"],
+        "note": "",
+        "reason": h["reason"],
+    }
