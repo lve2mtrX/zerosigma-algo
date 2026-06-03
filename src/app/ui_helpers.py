@@ -53,16 +53,22 @@ h1, h2, h3, h4 {{ color: {b['text']}; letter-spacing: .2px; }}
 a, a:visited {{ color: {b['accent']}; }}
 code, pre, .stCode {{ font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; }}
 
+/* tighter overall density (Phase 9D) */
+.block-container {{ padding-top: 2.4rem; padding-bottom: 2rem; max-width: 1500px; }}
+[data-testid="stVerticalBlock"] {{ gap: 0.5rem; }}
+[data-testid="stHorizontalBlock"] {{ gap: 0.5rem; }}
+
 /* compact native metric cards */
 [data-testid="stMetric"] {{
   background: {b['panel']};
   border: 1px solid {b['line']};
-  border-radius: 14px;
-  padding: 12px 14px;
+  border-radius: 12px;
+  padding: 7px 11px;
   box-shadow: 0 1px 0 rgba(255,255,255,.02) inset;
 }}
-[data-testid="stMetricLabel"] p {{ color: {b['muted']}; font-size: 12px; }}
-[data-testid="stMetricValue"] {{ color: {b['text']}; font-weight: 800; }}
+[data-testid="stMetricLabel"] p {{ color: {b['muted']}; font-size: 11px; }}
+[data-testid="stMetricValue"] {{ color: {b['text']}; font-weight: 800; font-size: 1.15rem; }}
+[data-testid="stMetricDelta"] {{ font-size: 11px; }}
 
 /* tabs: branded pill bar with a green active underline + subtle glow */
 .stTabs [data-baseweb="tab-list"] {{

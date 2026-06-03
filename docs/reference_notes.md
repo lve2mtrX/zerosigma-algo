@@ -1324,3 +1324,35 @@ verbatim inside `render_candidates()`. Sidebar selectors moved to a top
 runs headless under pytest (`importlib.import_module`) — bare-mode ScriptRunContext
 warnings are expected and harmless. Forward Runner buttons call `control_ui` (real
 Phase 9A local process control); force-stop is gated behind an explicit checkbox.
+
+## 20. Phase 9D — display units, spot fallback, provider-configured detection
+
+Durable facts for any UI/formatting work (`src/app/cockpit_helpers.py`, pure).
+
+### Exposure / structure units (ExposureContext)
+- `da_gex_signed`, `total_gex_bn`, `total_vex_bn` are ALREADY IN BILLIONS (stub
+  uses `da_gex_signed=1.8`, ZS maps `total_da_gex_1pct`). Format `≥1 → "4.18B"`,
+  `<1 → "735M"` (`fmt_exposure`).
+- `maxvol`, `call_wall`, `put_wall`, `put_ceiling_{2k,5k}`, `call_floor_{2k,5k}`,
+  `ddoi_pin`, `gamma_flip` are PLAIN STRIKE PRICES (e.g. 5815.0) → `fmt_strike`.
+  `ddoi_pin` is currently ALWAYS None (placeholder).
+- `gamma_regime` is `str|None` ("positive"/"negative"); derive from `sign(da_gex)`
+  when None (`gamma_regime_badge`).
+
+### Spot fallback
+Prefer `chain.spot` (quote-time) → `structure.spot` (compute-time, always present)
+→ `spot_quote.last`. Treat `0.0` as a MISSING sentinel (the ZS provider falls back
+to `spot=0.0` when all spot fields fail). `spot_with_source` returns
+`(value, badge)` with badge ∈ `quote | Zσ structure | quote (last) | —`.
+
+### Provider "configured" detection (env PRESENCE only — never secret values)
+- Tasty: (`TASTY_CLIENT_ID` + `TASTY_CLIENT_SECRET` + `TASTY_REFRESH_TOKEN`) OR
+  (`TASTY_USERNAME` + `TASTY_PASSWORD`).
+- ZS: `ZS_API_BASE_URL` present AND `ZS_API_AUTH_MODE` present and not `none`
+  (`public_only` counts as configured).
+The UI defaults the provider selectbox to the live provider when configured, else a
+sandbox-labeled one; the factories still fall back gracefully (resolved name `mock`/
+`stub`) with a visible warning. A missing quote chain manifests as
+`get_option_chain()` → None (or an `OptionChainSnapshot` whose legs all fail
+validation); `quote_provider.status()` carries `connected` + sanitized `last_error`/
+`notes` safe to display.

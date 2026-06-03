@@ -1306,6 +1306,52 @@ force-terminate of the stored PID. Every control surface is labeled **LOCAL
 MONITORING ONLY — NO BROKER EXECUTION**, and copy-paste terminal equivalents are
 shown alongside the buttons.
 
+##### Phase 9D — cockpit UX polish + clearer operational workflow
+
+Phase 9D makes the cockpit tighter, more readable, and easier to operate. **UX +
+operational-workflow only — no scanner / selector / quote / lifecycle / risk
+changes, no broker execution.** New pure helpers live in
+`src/app/cockpit_helpers.py` (formatting, spot fallback, provider defaults, log
+export, review prompt).
+
+**Launch:** `streamlit run .\src\app\streamlit_main.py` (or
+`python -m streamlit run .\src\app\streamlit_main.py`).
+
+- **Realistic provider defaults.** Structure defaults to `zerosigma_api` and
+  quotes to `tastytrade` **when configured** (detected via env-var *presence*
+  only — never secret values), otherwise the sandbox provider; `mock`/`stub`/
+  `null` are labeled *(sandbox)* / *(manual marks)*. Execution stays
+  `local_paper` — **NO BROKER EXECUTION**.
+- **Spot fallback.** If the quote spot is missing (or `0.0`), the Market panel
+  shows `structure.spot` with a `Zσ structure` source badge instead of a blank.
+  When the chain is unavailable it prints a compact reason + suggested actions
+  (try during RTH, switch to `mock`, check Tasty auth).
+- **Compact formatting.** DA-GEX renders `4.18B` / `735M`; strikes/walls/floors
+  as plain numbers; spot `7,609.78`; P&L `$1,234.56`. Tighter metric cards, less
+  padding, and a top **operational status strip** (run profile · structure ·
+  quote · runner · selected trade · open paper · realized P&L · NO BROKER
+  EXECUTION badge).
+- **Run Strategy.** The Forward Runner tab is now a *Run Strategy* panel: select a
+  profile, **👁 Preview scan once**, **▶ Start / ■ Stop / 🧹 Cleanup / 🔄 Refresh**,
+  the **exact copyable command**, current control status, the latest decision, and
+  open-paper P&L at a glance.
+- **Strategy Builder vs Session & Paper Settings.** The Builder explains *"profiles
+  are saved strategy recipes…"*; **Settings** is renamed **Session & Paper
+  Settings** with *"…affect this local session… do not rewrite saved profiles
+  unless you save one in Strategy Builder."* Advanced fields are tucked behind
+  **Advanced selector filters / expiry controls / risk fields / strategy params**
+  expanders. **Strict target DTE** is renamed **"Require exact DTE match"** (with a
+  tooltip) under Advanced expiry controls.
+- **Logs / export.** Download buttons for the latest forward `tick_log.jsonl` /
+  `signal_log.jsonl` / `no_trade_log.jsonl` and portfolio `paper_trade_events.jsonl`
+  / `portfolio_summary.json` / `reconciliation_report.json`, plus a **Copy review
+  prompt** block (forward run / selection / quote / no-trade / P&L language). Files
+  missing → graceful empty state. (No in-app LLM — export/review helpers only.)
+- **Portfolio Paper** leads with **open trades + unrealized P&L**, then closed /
+  realized / total, events, and reconciliation, with clear empty states ("No open
+  paper trades. Start a portfolio forward run or wait for a selected signal.") and
+  setup steps when no run exists.
+
 ##### What's still missing under `public_only`
 
 | Field | Still None under public_only? | How to populate |

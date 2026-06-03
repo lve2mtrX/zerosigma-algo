@@ -52,7 +52,11 @@ PROFILE_FIELDS: list[dict[str, Any]] = [
     {"name": "daily_selector", "label": "Daily selector", "kind": "select",
      "options": list(ALLOWED_SELECTORS), "section": "Selector"},
     {"name": "target_dte", "label": "Target DTE", "kind": "int", "section": "Selector"},
-    {"name": "strict_target_dte", "label": "Strict target DTE", "kind": "bool", "section": "Selector"},
+    {"name": "strict_target_dte", "label": "Require exact DTE match", "kind": "bool",
+     "section": "Selector",
+     "help": ("If enabled, a 1DTE profile will not fall back to 0DTE or the nearest "
+              "expiry. If the exact DTE is unavailable, the scanner returns no trade. "
+              "Most strategies should define their own target DTE.")},
     {"name": "max_trades_per_day", "label": "Max trades/day", "kind": "int", "section": "Selector"},
     {"name": "allow_call_credit", "label": "Allow call credit", "kind": "bool", "section": "Selector"},
     {"name": "allow_put_credit", "label": "Allow put credit", "kind": "bool", "section": "Selector"},
@@ -77,6 +81,56 @@ PROFILE_FIELDS: list[dict[str, Any]] = [
 ]
 
 _FIELDS_BY_NAME = {f["name"]: f for f in PROFILE_FIELDS}
+
+# Phase 9D — fields hidden behind "Advanced ..." expanders so the basic form stays
+# short. Grouping metadata only; does NOT change validation or any behavior.
+ADVANCED_FIELDS: frozenset[str] = frozenset({
+    # advanced selector filters
+    "require_selector_eligible_base", "require_quote_validation", "require_score_edge",
+    "min_selector_score", "min_selector_credit",
+    "min_selector_distance_from_spot", "max_selector_distance_from_spot",
+    # advanced expiry controls
+    "strict_target_dte",
+    # advanced strategy params
+    "wing_threshold", "spread_width", "entry_window_start", "entry_window_end",
+    "no_trade_score_threshold", "min_credit",
+    # advanced risk fields
+    "max_planned_stop_risk_dollars", "max_theoretical_loss_dollars",
+})
+
+
+def is_advanced(name: str) -> bool:
+    return name in ADVANCED_FIELDS
+
+
+def section_fields(section: str, *, advanced: bool) -> list[dict[str, Any]]:
+    """Fields in a section, split into basic (advanced=False) vs advanced."""
+    return [f for f in PROFILE_FIELDS
+            if f["section"] == section and is_advanced(f["name"]) == advanced]
+
+
+# Phase 9D — named "Advanced ..." expander groups for the builder UI.
+ADVANCED_GROUPS: dict[str, tuple[str, ...]] = {
+    "Advanced selector filters": (
+        "require_selector_eligible_base", "require_quote_validation", "require_score_edge",
+        "min_selector_score", "min_selector_credit",
+        "min_selector_distance_from_spot", "max_selector_distance_from_spot",
+    ),
+    "Advanced expiry controls": ("strict_target_dte",),
+    "Advanced risk fields": ("max_planned_stop_risk_dollars", "max_theoretical_loss_dollars"),
+    "Advanced strategy params": (
+        "wing_threshold", "spread_width", "entry_window_start", "entry_window_end",
+        "no_trade_score_threshold", "min_credit",
+    ),
+}
+
+
+def advanced_group_fields(group: str) -> list[dict[str, Any]]:
+    return [_FIELDS_BY_NAME[n] for n in ADVANCED_GROUPS.get(group, ()) if n in _FIELDS_BY_NAME]
+
+
+def basic_fields() -> list[dict[str, Any]]:
+    return [f for f in PROFILE_FIELDS if not is_advanced(f["name"])]
 
 
 def new_template_dict(profile_id: str) -> dict[str, Any]:

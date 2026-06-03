@@ -2020,3 +2020,63 @@ on stub/mock (bare-mode ScriptRunContext warnings only); `manage_profiles
 
 **Next:** Phase 10 = historical / snapped-data backtest adapter. Phase 11 =
 Tastytrade execution readiness / live, still deferred.
+
+---
+
+## 2026-06-02 — Phase 9D: cockpit UX polish + clearer operational workflow
+
+UX / operational only. NO scanner / selector / quote / lifecycle / risk-cap
+changes, NO broker execution. Committed 9C first (`4625f45`) so 9D is a clean diff.
+(Workflow path: a 2-agent understand workflow confirmed exposure units + provider-
+configured detection; then direct build; then verify workflow.)
+
+**Key facts the understand workflow pinned:** `da_gex_signed` is ALREADY in
+billions (stub=1.8) → format `4.18B`/`735M`; walls/floors/maxvol/ddoi_pin are plain
+STRIKE prices; `gamma_regime` is `str|None` (derive from DA-GEX sign if None); spot
+fallback = `chain.spot` → `structure.spot` (always present) → `spot_quote.last`,
+with `0.0` treated as a missing sentinel. Provider "configured" is detectable via
+env-var PRESENCE only (no secret values): `TASTY_CLIENT_ID/SECRET/REFRESH_TOKEN`
+or `TASTY_USERNAME/PASSWORD`; `ZS_API_BASE_URL` + non-`none` `ZS_API_AUTH_MODE`.
+
+**New module `src/app/cockpit_helpers.py` (pure, stdlib + read-only review/ledger):**
+`fmt_exposure`/`fmt_strike`/`fmt_price`/`fmt_pct`/`fmt_money`/`fmt_count`,
+`gamma_regime_badge`, `spot_with_source` (returns (val, source_badge)),
+`tasty_configured`/`zs_configured`/`default_provider`/`provider_index`/
+`provider_label`, `chain_unavailable_actions`, `STRICT_DTE_LABEL`/`strict_dte_help`,
+`status_strip_cells`, `review_prompt`, `forward_export_files`/`portfolio_export_files`
+(graceful when the run dir/files are missing).
+
+**streamlit_main.py polish (targeted edits, render logic preserved):**
+- provider selectboxes default to zerosigma_api/tastytrade WHEN configured (env
+  presence) else sandbox; `format_func=provider_label` marks sandbox/live.
+- top operational status strip above the tabs (7 metrics + NO BROKER EXECUTION pill).
+- `render_market`: spot fallback w/ source badge; DA-GEX `fmt_exposure`; strikes
+  `fmt_strike`; chain-unavailable reason + actions.
+- Run Strategy panel: 👁 Preview scan once (start once) + ▶ Start / ■ Stop / 🧹
+  Cleanup / 🔄 Refresh + `control_ui.safe_command` exact command + latest decision +
+  open-paper P&L line.
+- Logs: download_buttons for the latest forward/portfolio artifacts + Copy review
+  prompt; graceful empty state.
+- Portfolio: open-trades + unrealized first; empty state + no-run setup steps.
+- Strategy Builder: "profiles are saved strategy recipes" explainer + basics-then-
+  Advanced-expanders form (Advanced selector filters / expiry controls / risk
+  fields / strategy params). Settings → "Session & Paper Settings" + explanation +
+  advanced expanders.
+
+**ui_helpers.py:** tighter CSS (metric padding 12→7px, value 22px→1.15rem, block
+gaps, `.block-container` padding). **profile_builder.py:** additive advanced-group
+metadata (`ADVANCED_FIELDS`, `is_advanced`, `ADVANCED_GROUPS`, `advanced_group_fields`,
+`basic_fields`) + strict_target_dte label→"Require exact DTE match" with help.
+
+**Tests:** `tests/test_phase9d_polish.py` (20) — formatting (4.181966→4.18B), spot
+fallback, provider configured/default, strict-DTE label, advanced grouping, log
+export missing+seeded, review prompt language, streamlit import, no-exec grep. Full
+suite **480 passed**, ruff clean.
+
+**Gotchas:** (1) `zip(strip_cols, strip_cells)` length mismatch (extra badge col) →
+`strict=False`. (2) removed unused `forward_control` import already done in 9C.
+Candidate table left functionally intact (reformatting every cell risks the dense
+display logic the spec says not to touch).
+
+**Next:** Phase 10 = historical / snapped-data backtest adapter. Phase 11 =
+Tastytrade execution readiness / live, still deferred.
