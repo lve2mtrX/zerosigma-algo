@@ -1352,6 +1352,57 @@ export, review prompt).
   paper trades. Start a portfolio forward run or wait for a selected signal.") and
   setup steps when no run exists.
 
+##### Phase 9E — Operator Mode + Zσ Strat Tester + first-class symbols
+
+Phase 9E makes the cockpit operable without a law degree: a **Simple/Advanced
+mode** toggle, a much simpler **Strategy Builder**, the **Zσ Strat Tester** rename,
+and **first-class ticker/symbol selection**. **UX + symbol/profile wiring only — no
+trading-logic / scanner / selector / quote / lifecycle changes, no broker
+execution.** Pure helpers live in `src/app/operator_mode.py`.
+
+**Data engines (conceptual split):** **ZerσSigma API = the *exposure* engine**
+(DA-GEX / VEX / DEX / CEX / TEX, gamma regime, walls / floors, MaxVol / DDOI,
+exposure context). **Tastytrade = the *market-data* engine** (quotes, option chain,
+bid/ask/mid/mark, volume, open interest, contract metadata). In prominent UI copy
+the structure provider is the **Exposure source** and the quote provider is the
+**Market data source** (internal names + CLI flags unchanged).
+
+- **Simple Mode (default ON).** Hides advanced fields; shows the core workflow:
+  pick/create a strategy → choose ticker → DTE → side preference → selector style →
+  data source → risk profile → save → preview → start a local paper test → review
+  P&L. *"Simple Mode gets you running. Advanced Mode exposes filters, exact DTE
+  behavior, quote validation rules, and selector constraints."*
+- **Strategy Builder (simple first).** Simple fields — Profile name, Ticker,
+  Strategy type, Target DTE, **Side preference** (Both / Calls only / Puts only /
+  Observe only), **Selector style** (Best score / Best credit / Conservative
+  (lowest breach risk) / No trade), **Data source** (Live / Sandbox), Risk profile.
+  They map to existing Phase 6 fields (`allow_call_credit` / `allow_put_credit` /
+  `daily_selector` / `structure_provider` / `quote_provider`). Advanced Mode shows
+  the full field set behind **Advanced selector filters / expiry controls / risk
+  fields / strategy params** expanders. "Require exact DTE match" lives only under
+  *Advanced expiry controls* (no "Strict DTE" wording anywhere visible).
+- **Data source simplification.** Simple Mode replaces the provider dropdowns with
+  one choice: **Live: ZerσSigma exposures + Tasty market data** (→ `zerosigma_api`
+  + `tastytrade`) or **Sandbox: Stub exposures + Mock market data** (→ `stub` +
+  `mock`). Advanced Mode keeps the explicit Exposure-source / Market-data-source
+  dropdowns.
+- **First-class symbol.** Type any ticker (uppercased, default `SPX`). It's saved
+  into the profile's `symbol` and flows to the scanner/runner via profile loading
+  (`run_forward` / `run_portfolio_forward` read the symbol from the profile). A
+  compact **symbol-health panel** distinguishes four things: *symbol accepted*,
+  *Tasty market data available*, *ZerσSigma exposures available*, and *strategy
+  eligible*, with a clear reason when not. **Not every ticker has ZerσSigma
+  exposure coverage** — Tasty may serve quotes for a symbol that has no ZerσSigma
+  exposures; **Sandbox prices SPX regardless of the symbol entered.**
+- **Zσ Strat Tester.** The former "Forward Runner" tab, reframed as a 5-step paper
+  test: select profile → **👁 Preview strategy** → **▶ Start paper test** → **■ Stop
+  test** → review. Shows active profile / symbol / data source / runner status /
+  latest decision / open paper P&L + the **NO BROKER EXECUTION** badge; terminal
+  commands move to an *Advanced / terminal commands* expander.
+- **Logs.** Operator-friendly labels (**Strategy test log**, **Selected trades
+  export**, **No-trade reasons export**, **Paper trade events**, **Portfolio
+  summary**, **Reconciliation report**); raw filenames show only in Advanced Mode.
+
 ##### What's still missing under `public_only`
 
 | Field | Still None under public_only? | How to populate |

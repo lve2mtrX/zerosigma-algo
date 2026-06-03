@@ -26,6 +26,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.app import cockpit_helpers as ch  # noqa: E402
 from src.app import control_ui  # noqa: E402
+from src.app import operator_mode as om  # noqa: E402
 from src.app import profile_builder as pb  # noqa: E402
 from src.app import ui_helpers as ui  # noqa: E402
 from src.app.session_state import SessionConfig  # noqa: E402
@@ -115,7 +116,13 @@ if "session_config" not in st.session_state:
 # Top controls (replaces the sidebar) — strategy / risk / providers / selector
 # ──────────────────────────────────────────────────────────────────────
 
-with st.expander("⚙  Controls & providers", expanded=False):
+# Phase 9E — app-level Simple/Advanced operator mode (Simple ON by default).
+simple_mode = st.toggle(
+    "🟢 Simple Mode", value=st.session_state.get("operator_simple_mode", om.DEFAULT_SIMPLE_MODE),
+    key="operator_simple_mode", help=om.SIMPLE_MODE_HELP)
+st.caption(om.SIMPLE_MODE_HELP)
+
+with st.expander("⚙  Controls & data source", expanded=not simple_mode):
     cc = st.columns(3)
     with cc[0]:
         new_strategy = st.selectbox(
@@ -126,12 +133,17 @@ with st.expander("⚙  Controls & providers", expanded=False):
         )
         if new_strategy != st.session_state["active_strategy"]:
             st.session_state["active_strategy"] = new_strategy
-
+        # Phase 9E — first-class ticker/symbol drives the Live Cockpit preview.
+        symbol_input = st.text_input(
+            "Ticker / symbol", value=st.session_state.get("active_symbol", om.DEFAULT_SYMBOL),
+            help="Any ticker. SPX has full ZerσSigma exposure coverage; others may be "
+                 "Tasty market-data only. Sandbox prices SPX regardless of symbol.")
+        st.session_state["active_symbol"] = om.normalize_symbol(symbol_input)
         new_profile = st.selectbox(
             "Risk profile (session default)",
             options=profile_names,
             index=profile_names.index(st.session_state["active_profile"]),
-            help="Profiles are TEMPLATES — edit them in the Settings tab to override.",
+            help="Profiles are TEMPLATES — edit them in Session & Paper Settings.",
         )
         if new_profile != st.session_state["active_profile"]:
             st.session_state["active_profile"] = new_profile
@@ -142,59 +154,73 @@ with st.expander("⚙  Controls & providers", expanded=False):
             st.rerun()
 
     with cc[1]:
-        # Phase 9D — default to the REALISTIC providers when configured (env
-        # presence only — never reads secret values), else the sandbox provider.
-        available_structure = ["zerosigma_api", "stub"]
-        _struct_default = ch.default_provider(
-            available_structure, preferred="zerosigma_api", sandbox="stub",
-            configured=ch.zs_configured())
-        chosen_structure = st.selectbox(
-            "Structure provider", options=available_structure,
-            index=ch.provider_index(available_structure, _struct_default),
-            format_func=ch.provider_label,
-            help="zerosigma_api = read-only LIVE ZS structure (needs ZS_API_* in .env). "
-                 "stub = deterministic sandbox. Not-configured live → falls back with a warning.",
-        )
-        available_quotes = ["tastytrade", "mock", "null"]
-        _quote_default = ch.default_provider(
-            available_quotes, preferred="tastytrade", sandbox="mock",
-            configured=ch.tasty_configured())
-        chosen_quote = st.selectbox(
-            "Quote provider", options=available_quotes,
-            index=ch.provider_index(available_quotes, _quote_default),
-            format_func=ch.provider_label,
-            help="tastytrade = LIVE Tasty REST quotes (needs TASTY_* in .env). "
-                 "mock = deterministic sandbox chain. null = manual marks. "
-                 "Misconfigured tasty → falls back to mock with a warning.",
-        )
+        # Phase 9E — Simple Mode: one Live/Sandbox data-source control. Advanced
+        # Mode: explicit Exposure-source + Market-data-source dropdowns.
+        # ZerσSigma = EXPOSURE engine; Tastytrade = MARKET-DATA engine.
+        if simple_mode:
+            _ds_default = om.providers_to_data_source(
+                "zerosigma_api" if ch.zs_configured() else "stub",
+                "tastytrade" if ch.tasty_configured() else "mock")
+            data_source = st.radio(
+                "Data source", list(om.DATA_SOURCES),
+                index=list(om.DATA_SOURCES).index(_ds_default),
+                help="Live = ZerσSigma exposures + Tasty market data. "
+                     "Sandbox = stub exposures + mock market data (prices SPX regardless of symbol).")
+            _dsp = om.data_source_to_providers(data_source)
+            chosen_structure, chosen_quote = _dsp["structure_provider"], _dsp["quote_provider"]
+            st.caption(f"{om.EXPOSURE_SOURCE_LABEL}: `{om.exposure_engine_label(chosen_structure)}`  ·  "
+                       f"{om.MARKET_DATA_SOURCE_LABEL}: `{om.market_data_engine_label(chosen_quote)}`")
+        else:
+            available_structure = ["zerosigma_api", "stub"]
+            _struct_default = ch.default_provider(
+                available_structure, preferred="zerosigma_api", sandbox="stub",
+                configured=ch.zs_configured())
+            chosen_structure = st.selectbox(
+                f"{om.EXPOSURE_SOURCE_LABEL} (structure provider)", options=available_structure,
+                index=ch.provider_index(available_structure, _struct_default),
+                format_func=ch.provider_label,
+                help="ZerσSigma exposures = DA-GEX / VEX / DEX / walls / floors / MaxVol "
+                     "(needs ZS_API_* in .env). stub = deterministic sandbox.")
+            available_quotes = ["tastytrade", "mock", "null"]
+            _quote_default = ch.default_provider(
+                available_quotes, preferred="tastytrade", sandbox="mock",
+                configured=ch.tasty_configured())
+            chosen_quote = st.selectbox(
+                f"{om.MARKET_DATA_SOURCE_LABEL} (quote provider)", options=available_quotes,
+                index=ch.provider_index(available_quotes, _quote_default),
+                format_func=ch.provider_label,
+                help="Tasty market data = quotes / chain / bid-ask / volume / OI "
+                     "(needs TASTY_* in .env). mock = sandbox chain. null = manual marks.")
         st.caption(f"Execution mode: `{CFG.providers.execution_active}`  ·  no live execution")
 
     with cc[2]:
         _prof_results = [r for r in list_run_profiles() if r.ok and r.profile]
         _prof_options = ["(none)"] + [r.profile.profile_id for r in _prof_results]
         chosen_profile_id = st.selectbox(
-            "Run profile (Phase 6)", options=_prof_options, index=0,
-            help="Saved run-profiles (profiles/*.yaml). Selecting one prefills the "
-                 "daily-selector default below. Build/edit them in the Strategy Builder tab.",
+            "Active run profile", options=_prof_options, index=0,
+            help="Saved run-profiles (profiles/*.yaml). Build/edit them in the Strategy Builder tab.",
         )
         _active_profile = next(
             (r.profile for r in _prof_results if r.profile.profile_id == chosen_profile_id), None,
         )
         if _active_profile is not None:
             st.caption(
-                f"`{_active_profile.profile_id}` · selector=`{_active_profile.daily_selector}` · "
-                f"dte={_active_profile.target_dte} · hash `{_active_profile.profile_hash()}`"
+                f"`{_active_profile.profile_id}` · symbol=`{_active_profile.symbol}` · "
+                f"selector=`{_active_profile.daily_selector}` · dte={_active_profile.target_dte}"
             )
         _sel_yaml = (
             (CFG.scanner.get("selector") or {}).get("daily_trade_selector")
             if isinstance(CFG.scanner, dict) else None
         ) or DEFAULT_SELECTOR_MODE
         _sel_default = _active_profile.daily_selector if _active_profile else _sel_yaml
-        chosen_selector = st.selectbox(
-            "Daily selector", options=list(SELECTOR_MODES),
-            index=(list(SELECTOR_MODES).index(_sel_default) if _sel_default in SELECTOR_MODES else 0),
-            help="Chooses AT MOST ONE candidate. Selection only — never executes.",
-        )
+        if simple_mode:
+            chosen_selector = _sel_default if _sel_default in SELECTOR_MODES else DEFAULT_SELECTOR_MODE
+        else:
+            chosen_selector = st.selectbox(
+                "Daily selector", options=list(SELECTOR_MODES),
+                index=(list(SELECTOR_MODES).index(_sel_default) if _sel_default in SELECTOR_MODES else 0),
+                help="Chooses AT MOST ONE candidate. Selection only — never executes.",
+            )
 
 
 # Acquire snapshots — explicit separation of structure vs quotes.
@@ -213,7 +239,8 @@ except TastytradeConfigurationError as exc:
     from src.providers.quotes.mock_provider import MockQuoteProvider
     quote_provider, resolved_quote_name = MockQuoteProvider(), "mock"
 
-SYMBOL = CFG.scanner.get("symbols", ["SPX"])[0]
+# Phase 9E — the scanned symbol is the user-selected ticker (default SPX).
+SYMBOL = st.session_state.get("active_symbol") or CFG.scanner.get("symbols", ["SPX"])[0]
 try:
     structure = structure_provider.get_snapshot(SYMBOL)
     structure_error: str | None = None
@@ -249,8 +276,36 @@ def _fmt_quote(q: dict) -> str:
 # Section renderers (each renders one cockpit panel)
 # ──────────────────────────────────────────────────────────────────────
 
+def render_symbol_health() -> None:
+    """Phase 9E — compact symbol-health panel. Distinguishes Tasty MARKET DATA
+    from ZerσSigma EXPOSURES (two different engines) and overall eligibility."""
+    market_data_available = chain is not None
+    exposures_available = (
+        structure_error is None and structure is not None
+        and (resolved_structure_name == "stub"
+             or structure.exposures.da_gex_signed is not None
+             or structure.exposures.maxvol is not None)
+    )
+    health = om.symbol_health(
+        symbol=SYMBOL, accepted=True,
+        market_data_available=market_data_available, exposures_available=exposures_available)
+    cols = st.columns(5)
+    cols[0].metric("Symbol", health["symbol"])
+    cols[1].metric("Tasty market data",
+                   "available" if health["market_data_available"] else "unavailable")
+    cols[2].metric("ZerσSigma exposures",
+                   "available" if health["exposures_available"] else "unavailable")
+    cols[3].metric("Strategy eligible", "yes" if health["eligible"] else "no")
+    cols[4].markdown("<div style='padding-top:14px'>" + ui.pill("NO BROKER EXECUTION", "green")
+                     + "</div>", unsafe_allow_html=True)
+    if resolved_structure_name == "stub" or resolved_quote_name in ("mock", "null"):
+        st.caption("Sandbox data — prices/exposures are SPX mock regardless of the symbol entered.")
+    if not health["eligible"] and health["reason"]:
+        st.warning(health["reason"])
+
+
 def render_provider_status() -> None:
-    with st.expander("Provider status", expanded=True):
+    with st.expander("Exposure + market-data status", expanded=False):
         cols = st.columns(3)
         cols[0].metric(
             "StructureProvider", f"{structure_provider.name}",
@@ -661,6 +716,103 @@ def render_strategy_builder() -> None:
         st.info("Pick a source above and load it to start editing.")
         return
 
+    def _show_result_and_save() -> None:
+        built = st.session_state.get("builder_built")
+        errs = st.session_state.get("builder_errors")
+        if built is None:
+            return
+        if errs:
+            st.error("Validation failed — fix these before saving:")
+            for e in errs:
+                st.markdown(f"- `{e}`")
+        else:
+            st.success(f"Valid ✓  ·  deterministic profile hash: `{pb.hash_for(built)}`")
+            st.json(built, expanded=False)
+        st.markdown("**Save**")
+        sc = st.columns([2, 1])
+        overwrite = sc[0].checkbox(
+            "Overwrite existing profile", value=False, key="builder_overwrite",
+            help="Required to replace a profile file that already exists.")
+        target = pb.resolve_profile_target(str(built.get("profile_id") or "new_profile"))
+        sc[0].caption(f"saves to: `{target}`")
+        if sc[1].button("💾 Save profile", type="primary", key="builder_save", disabled=bool(errs)):
+            ok, msg, phash = pb.save_profile(built, overwrite=overwrite)
+            if ok:
+                st.success(f"Saved ✓  {msg}  ·  hash `{phash}`")
+                st.session_state.pop("builder_built", None)
+                st.session_state.pop("builder_errors", None)
+            else:
+                st.error(msg)
+
+    # ── Simple Mode: compact builder mapping to existing profile fields ──
+    if simple_mode:
+        _cur_id = str(base.get("profile_id") or "my_strategy")
+        if base.get("daily_selector") == "no_trade":
+            _cur_side = "Observe only"
+        elif base.get("allow_call_credit", True) and not base.get("allow_put_credit", True):
+            _cur_side = "Calls only"
+        elif base.get("allow_put_credit", True) and not base.get("allow_call_credit", True):
+            _cur_side = "Puts only"
+        else:
+            _cur_side = "Both sides"
+        with st.form("simple_profile_editor"):
+            r1 = st.columns(2)
+            s_name = r1[0].text_input(
+                "Profile name", value=base.get("profile_name") or _cur_id.replace("_", " ").title())
+            s_symbol = r1[1].text_input(
+                "Ticker / symbol",
+                value=base.get("symbol") or st.session_state.get("active_symbol", om.DEFAULT_SYMBOL),
+                help="SPX has full ZerσSigma exposure coverage; other tickers may be "
+                     "Tasty market-data only.")
+            r2 = st.columns(2)
+            s_type = r2[0].text_input("Strategy type",
+                                      value=base.get("strategy_type") or "vertical_credit_spread")
+            s_dte = r2[1].number_input("Target DTE", value=int(base.get("target_dte") or 0),
+                                       step=1, min_value=0)
+            r3 = st.columns(2)
+            s_side = r3[0].radio("Side preference", list(om.SIDE_PREFERENCES),
+                                 index=list(om.SIDE_PREFERENCES).index(_cur_side))
+            s_style = r3[1].radio(
+                "Selector style", list(om.SELECTOR_STYLES),
+                index=list(om.SELECTOR_STYLES).index(
+                    om.selector_to_style(base.get("daily_selector") or "score_best_valid")))
+            r4 = st.columns(2)
+            _ds_idx = list(om.DATA_SOURCES).index(om.providers_to_data_source(
+                base.get("structure_provider") or "stub", base.get("quote_provider") or "mock"))
+            s_ds = r4[0].radio("Data source", list(om.DATA_SOURCES), index=_ds_idx)
+            s_risk = r4[1].selectbox(
+                "Risk profile", options=profile_names,
+                index=(profile_names.index(base.get("risk_profile"))
+                       if base.get("risk_profile") in profile_names else 0))
+            s_validate = st.form_submit_button("Validate strategy")
+        try:
+            from src.paper.models import PaperLifecycleConfig
+            _plc = PaperLifecycleConfig.from_env()
+            st.caption(
+                "Paper test defaults (from PAPER_* env, applied at test time — not saved in "
+                f"the profile): contracts={_plc.contracts} · TP={_plc.take_profit_pct} · "
+                f"SL={_plc.stop_loss_pct} · EOD={_plc.eod_exit_time if _plc.exit_on_eod else 'off'}")
+        except Exception:
+            pass
+        if s_validate:
+            _pid = _cur_id if _cur_id not in ("", "new_profile") else (
+                "".join((c if c.isalnum() else "_") for c in s_name.lower()).strip("_")
+                or "my_strategy")
+            vals = {
+                "profile_id": _pid, "profile_name": s_name,
+                "symbol": om.normalize_symbol(s_symbol), "strategy_type": s_type,
+                "target_dte": int(s_dte), "risk_profile": s_risk, "enabled": True,
+                **om.build_simple_fields(side_preference=s_side, selector_style=s_style),
+                **om.data_source_to_providers(s_ds),
+            }
+            built = pb.build_profile_dict(vals, base=base)
+            st.session_state["builder_dict"] = built
+            st.session_state["builder_built"] = built
+            st.session_state["builder_errors"] = pb.validate_dict(built)
+        _show_result_and_save()
+        return
+
+    # ── Advanced Mode: full detailed form (basics + advanced expanders) ──
     st.markdown(f"**Editing `{base.get('profile_id', '?')}`** — basics shown; advanced behind expanders")
     vals: dict = {}
 
@@ -704,47 +856,29 @@ def render_strategy_builder() -> None:
 
     if validated:
         built = pb.build_profile_dict(vals, base=base)
-        errs = pb.validate_dict(built)
         st.session_state["builder_dict"] = built
         st.session_state["builder_built"] = built
-        st.session_state["builder_errors"] = errs
-
-    built = st.session_state.get("builder_built")
-    errs = st.session_state.get("builder_errors")
-    if built is not None:
-        if errs:
-            st.error("Validation failed — fix these before saving:")
-            for e in errs:
-                st.markdown(f"- `{e}`")
-        else:
-            st.success(f"Valid ✓  ·  deterministic profile hash: `{pb.hash_for(built)}`")
-            st.json(built, expanded=False)
-        st.markdown("**Save**")
-        sc = st.columns([2, 1])
-        overwrite = sc[0].checkbox(
-            "overwrite existing profile", value=False, key="builder_overwrite",
-            help="Required to replace a profile file that already exists.")
-        target = pb.resolve_profile_target(str(built.get("profile_id") or "new_profile"))
-        sc[0].caption(f"target: `{target}`")
-        if sc[1].button("Save profile", type="primary", key="builder_save",
-                        disabled=bool(errs)):
-            ok, msg, phash = pb.save_profile(built, overwrite=overwrite)
-            if ok:
-                st.success(f"Saved ✓  {msg}  ·  hash `{phash}`")
-                st.session_state.pop("builder_built", None)
-                st.session_state.pop("builder_errors", None)
-            else:
-                st.error(msg)
+        st.session_state["builder_errors"] = pb.validate_dict(built)
+    _show_result_and_save()
 
 
 def render_forward_runner() -> None:
-    st.subheader("Run Strategy — local forward runner")
+    st.subheader("🧪 Zσ Strat Tester — local paper strategy test")
     st.markdown(ui.pill(control_ui.EXECUTION_BANNER, "green"), unsafe_allow_html=True)
     st.caption(
-        "Pick a saved profile and **preview a scan**, **start/stop** a LOCAL background "
-        "`run_forward` monitor (Phase 9A), or **clean up** stale state. Local process "
-        "control only — no broker orders, no order preview, no live execution."
+        "**Step 1** select a strategy profile → **Step 2** preview → **Step 3** start a "
+        "local paper test → **Step 4** stop → **Step 5** review the latest result. "
+        "LOCAL PAPER TEST ONLY — no broker orders, no order preview, no live execution."
     )
+    # Phase 9E — active profile / symbol / data source context.
+    _tester_prof = next((r.profile for r in list_run_profiles()
+                         if r.ok and r.profile and r.profile.profile_id == chosen_profile_id), None)
+    _tc = st.columns(3)
+    _tc[0].metric("Active profile", chosen_profile_id if chosen_profile_id != "(none)" else "—")
+    _tc[1].metric("Symbol", (_tester_prof.symbol if _tester_prof else SYMBOL))
+    _tc[2].metric("Data source", om.providers_to_data_source(
+        (_tester_prof.structure_provider if _tester_prof else chosen_structure),
+        (_tester_prof.quote_provider if _tester_prof else chosen_quote)).split(":")[0])
 
     view = control_ui.status_view(control_ui.get_status())
     mcols = st.columns(4)
@@ -769,7 +903,7 @@ def render_forward_runner() -> None:
     runner_profiles = [s["profile_id"] for s in pb.list_summaries() if s.get("ok")]
     rc = st.columns([2, 1, 1, 1])
     sel_profile = rc[0].selectbox(
-        "Profile to run", options=runner_profiles or ["(no profiles)"], key="runner_profile")
+        "Strategy profile", options=runner_profiles or ["(no profiles)"], key="runner_profile")
     interval = rc[1].number_input("Interval (s)", value=60.0, step=10.0, min_value=0.0, key="runner_interval")
     max_ticks = rc[2].number_input("Max ticks (0=∞)", value=0, step=1, min_value=0, key="runner_max_ticks")
     once = rc[3].checkbox("Once", value=False, key="runner_once")
@@ -777,18 +911,18 @@ def render_forward_runner() -> None:
 
     can, why = control_ui.can_start(control_ui.get_status())
     bcols = st.columns(5)
-    if bcols[0].button("🔄 Refresh", key="runner_refresh"):
+    if bcols[0].button("🔄 Refresh status", key="runner_refresh"):
         st.rerun()
-    if bcols[1].button("👁 Preview scan once", disabled=not runner_profiles or not can,
+    if bcols[1].button("👁 Preview strategy", disabled=not runner_profiles or not can,
                        key="runner_preview",
-                       help="Launches a single-tick local monitor run (no broker)."):
+                       help="Runs a single local paper-test tick (no broker)."):
         ok, msg, pid = control_ui.start_runner(
             sel_profile, once=True, market_hours_only=bool(market_hours_only))
-        (st.success if ok else st.error)(("Preview scan launched. " if ok else "") + str(msg)
+        (st.success if ok else st.error)(("Preview launched. " if ok else "") + str(msg)
                                          + (f" (pid {pid})" if pid else ""))
         if ok:
             st.rerun()
-    if bcols[2].button("▶ Start runner", type="primary",
+    if bcols[2].button("▶ Start paper test", type="primary",
                        disabled=not runner_profiles or not can, key="runner_start"):
         ok, msg, pid = control_ui.start_runner(
             sel_profile, interval_seconds=float(interval), once=bool(once),
@@ -796,7 +930,7 @@ def render_forward_runner() -> None:
         (st.success if ok else st.error)(f"{msg}" + (f" (pid {pid})" if pid else ""))
         if ok:
             st.rerun()
-    if bcols[3].button("■ Stop runner", key="runner_stop"):
+    if bcols[3].button("■ Stop test", key="runner_stop"):
         ok, msg = control_ui.stop_runner(force=bool(st.session_state.get("runner_force", False)))
         (st.success if ok else st.warning)(msg)
         st.rerun()
@@ -811,19 +945,20 @@ def render_forward_runner() -> None:
         value=False, key="runner_force",
     )
 
-    st.caption("Exact command (copy into a terminal — equivalent to the buttons):")
-    _ctl_profile = sel_profile if runner_profiles else "vertical_wing_score_best_1dte"
-    st.code(
-        control_ui.safe_command(_ctl_profile, interval_seconds=float(interval),
-                                once=bool(once), market_hours_only=bool(market_hours_only)) + "\n"
-        "python -m scripts.control_forward stop\n"
-        "python -m scripts.control_forward cleanup-stale\n"
-        "python -m scripts.review_forward --latest",
-        language="powershell",
-    )
+    with st.expander("Advanced / terminal commands", expanded=False):
+        _ctl_profile = sel_profile if runner_profiles else "vertical_wing_score_best_1dte"
+        st.caption("Exact command (copy into a terminal — equivalent to the buttons):")
+        st.code(
+            control_ui.safe_command(_ctl_profile, interval_seconds=float(interval),
+                                    once=bool(once), market_hours_only=bool(market_hours_only)) + "\n"
+            "python -m scripts.control_forward stop\n"
+            "python -m scripts.control_forward cleanup-stale\n"
+            "python -m scripts.review_forward --latest",
+            language="powershell",
+        )
 
     st.divider()
-    st.markdown("**Forward run review (read-only)**")
+    st.markdown("**Strategy test review (read-only)**")
     _fwd_runs = forward_review.discover_runs()
     _fwd_hb = forward_review.load_latest_heartbeat()
     if _fwd_hb:
@@ -884,12 +1019,12 @@ def render_forward_runner() -> None:
 
 
 def render_portfolio() -> None:
-    st.subheader("Portfolio forward (paper lifecycle)")
+    st.subheader("💼 Zσ Paper Portfolio")
     st.markdown(ui.pill("LOCAL PAPER ACCOUNTING ONLY — NO BROKER EXECUTION", "green"),
                 unsafe_allow_html=True)
     st.caption(
-        "Simulated credit-spread lifecycle with TP / SL / EOD exits across multiple "
-        "profiles. No broker orders, no order preview, no live execution. Read-only review."
+        "Open/closed paper trades + P&L from your strategy test runs (TP / SL / EOD "
+        "exits across profiles). No broker orders, no order preview, no live execution."
     )
     _pf_man = portfolio_ledger.load_manifest("latest")
     if not _pf_man:
@@ -1070,14 +1205,17 @@ def render_logs() -> None:
     _any_export = False
     for _i, _f in enumerate(_exports):
         _col = ecols[_i % 3]
+        _label = om.friendly_log_label(_f["filename"])  # Phase 9E — operator-friendly
         if _f["exists"] and _f["text"] is not None:
             _any_export = True
-            _col.download_button(f"⬇ {_f['label']}", data=_f["text"],
+            _col.download_button(f"⬇ {_label}", data=_f["text"],
                                  file_name=_f["filename"], key=f"dl_{_i}")
+            if not simple_mode:
+                _col.caption(f"_{_f['filename']}_")
         else:
-            _col.caption(f"{_f['label']}: _none yet_")
+            _col.caption(f"{_label}: _none yet_")
     if not _any_export:
-        st.info("No log files yet. Start a forward run or a portfolio run to generate logs.")
+        st.info("No logs yet. Run a strategy test (Zσ Strat Tester) or a paper portfolio to generate logs.")
 
     st.markdown("**Copy review prompt** (paste into your assistant with the downloaded logs):")
     st.code(ch.review_prompt((forward_review.load_latest_manifest() or {}).get("run_id")),
@@ -1264,18 +1402,17 @@ _strip_cols[-1].markdown(
     unsafe_allow_html=True,
 )
 
-tab_live, tab_builder, tab_forward, tab_portfolio, tab_logs, tab_settings = st.tabs([
-    "🛰 Live Cockpit", "🧱 Strategy Builder", "▶ Forward Runner",
-    "💼 Portfolio Paper", "🗒 Logs / Review", "⚙ Settings",
-])
+# Phase 9E — branded tab labels (Zσ Strat Tester / Paper Portfolio; no "Forward Runner").
+tab_live, tab_builder, tab_tester, tab_portfolio, tab_logs, tab_settings = st.tabs(om.tab_labels())
 
 with tab_live:
+    render_symbol_health()
     render_provider_status()
     render_market()
     render_candidates()
 with tab_builder:
     render_strategy_builder()
-with tab_forward:
+with tab_tester:
     render_forward_runner()
 with tab_portfolio:
     render_portfolio()

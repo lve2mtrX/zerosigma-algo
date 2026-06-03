@@ -1356,3 +1356,37 @@ sandbox-labeled one; the factories still fall back gracefully (resolved name `mo
 `get_option_chain()` → None (or an `OptionChainSnapshot` whose legs all fail
 validation); `quote_provider.status()` carries `connected` + sanitized `last_error`/
 `notes` safe to display.
+
+## 21. Phase 9E — symbol support + the two data engines (durable)
+
+### Two engines, two roles (do NOT conflate them)
+- **ZerσSigma API = EXPOSURE engine ONLY**: DA-GEX / VEX / DEX / CEX / TEX, gamma
+  regime, walls / floors, MaxVol / DDOI, exposure context. NOT a source of option
+  chains / quotes / volume.
+- **Tastytrade = MARKET-DATA engine**: underlying/option quotes, option chain,
+  bid/ask/mid/mark, volume, open interest, contract metadata (and eventual order
+  routing — deferred). NOT a source of ZerσSigma proprietary exposure fields.
+- UI display aliases: structure provider → "Exposure source"; quote provider →
+  "Market data source". Internal provider names + CLI flags are UNCHANGED.
+
+### Symbol support — the UI accepts arbitrary symbols, availability varies
+- The UI accepts ANY ticker (`operator_mode.normalize_symbol` uppercases, defaults
+  SPX) and saves it to the Phase 6 `profile.symbol` field.
+- `profile.symbol` flows to the scanner via precedence `--symbol` (CLI) >
+  `profile.symbol` > `cfg.scanner.symbols[0]` (SPX). `run_forward` /
+  `run_portfolio_forward` have NO `--symbol` flag, so **the saved profile is the
+  only way to set the scanned symbol** for a paper test.
+- `profile.symbol` is EXCLUDED from `profile_hash()` by design — two profiles
+  differing only in symbol share a hash (the hash identifies the *strategy setup*).
+- Availability differs by engine and is NOT guaranteed:
+  - **Tasty market data** may serve quotes/chain/volume/OI for many symbols.
+  - **ZerσSigma exposures** depend on ZS API/worker coverage — may be unavailable
+    for a symbol even when Tasty market data works. Not every ticker has ZerσSigma
+    exposure support.
+  - **Sandbox (stub exposures + mock market data) is effectively SPX-only**: it
+    accepts any symbol string but returns/prices SPX data regardless (labels the
+    symbol, prices SPX). The UI says so explicitly.
+- The symbol-health panel distinguishes FOUR things and never crashes:
+  *symbol accepted* · *Tasty market data available* (`chain is not None`) ·
+  *ZerσSigma exposures available* (structure present + no error + has exposure
+  data, or stub) · *strategy eligible* (needs BOTH) — with a human reason when not.

@@ -2080,3 +2080,61 @@ display logic the spec says not to touch).
 
 **Next:** Phase 10 = historical / snapped-data backtest adapter. Phase 11 =
 Tastytrade execution readiness / live, still deferred.
+
+---
+
+## 2026-06-02 — Phase 9E: Operator Mode + Zσ Strat Tester + first-class symbols
+
+UX + symbol/profile wiring only. NO trading-logic / scanner / selector / quote /
+lifecycle / risk changes, NO broker execution. Committed 9D first (`bc4aaf7`) so 9E
+is a clean diff. (Workflow path: a 2-agent understand workflow traced symbol flow +
+mapped the post-9D cockpit; then direct build; then verify workflow.)
+
+**Architecture clarification (mid-phase):** ZerσSigma API = **exposure** engine only
+(DA-GEX/VEX/DEX/CEX/TEX, gamma regime, walls/floors, MaxVol/DDOI); Tastytrade =
+**market-data** engine (quotes/chain/bid-ask/mid/mark/volume/OI/contract metadata,
+eventual order routing — not this phase). UI copy uses "Exposure source" /
+"Market data source" (internal names + CLI flags unchanged).
+
+**Symbol flow facts (understand workflow):** `profile.symbol` IS used by the scanner
+(precedence `--symbol` > profile.symbol > cfg.scanner.symbols[0]=SPX); `run_forward`
+/ `run_portfolio_forward` have NO `--symbol`, so the profile is the ONLY way to set
+symbol — perfect for the save-to-profile approach. BUT: Sandbox (stub+mock) ignores
+the symbol and returns SPX data (labels QQQ, prices SPX); Live (ZS+Tasty) is
+symbol-specific but ZS exposure coverage may be missing even when Tasty serves
+quotes. The UI is honest about all of this (symbol-health panel + sandbox caveat).
+
+**New module `src/app/operator_mode.py` (pure, stdlib only):** Simple/Advanced copy
++ `DEFAULT_SIMPLE_MODE`; `tab_labels()` (🧪 Zσ Strat Tester / 💼 Paper Portfolio — no
+"Forward Runner"); `side_preference_to_fields` + `selector_style_to_selector` +
+`build_simple_fields` (selector style overrides side default; Observe forces
+no_trade); `data_source_to_providers`/`providers_to_data_source` (Live→
+zerosigma_api+tastytrade, Sandbox→stub+mock) + the corrected exposure/market-data
+labels + engine-label helpers; `normalize_symbol` (uppercase, default SPX, arbitrary
+OK); `symbol_health` (market_data_available vs exposures_available vs eligible +
+reason) + the two unavailable-warnings; `friendly_log_label`.
+
+**streamlit_main.py edits (render logic preserved):** app-level `simple_mode` toggle
+(default ON); Controls expander → Live/Sandbox radio (Simple) or Exposure-source /
+Market-data-source dropdowns (Advanced) + first-class ticker text input → `SYMBOL`;
+`render_symbol_health()` at the top of Live Cockpit; Strategy Builder Simple compact
+form (maps to profile fields via operator_mode) vs the existing Advanced form
+(shared `_show_result_and_save`); "Forward Runner" → **🧪 Zσ Strat Tester** (Preview
+strategy / Start paper test / Stop test; commands under an expander; active profile /
+symbol / data-source metrics); "Portfolio forward" → **Zσ Paper Portfolio**; logs use
+`friendly_log_label` (raw filenames only in Advanced).
+
+**Tests:** `tests/test_phase9e_operator.py` (15) — side/selector/data-source mappings,
+`build_simple_fields` combine + observe-override, symbol normalization, arbitrary
+symbol accepted + saved at the builder layer, symbol_health engine split, branded
+tab labels (no "Forward Runner"), strict-DTE label replaced, friendly log labels,
+streamlit clean import + `om.tab_labels()` used, no-exec grep. Full suite **495
+passed**, ruff clean.
+
+**Gotchas:** none new — `operator_mode` is pure; `streamlit_main` imports headless;
+`build_profile_dict` only copies known profile fields, so the simple-form extras map
+cleanly. Paper TP/SL/contracts/EOD are PAPER_* env (not profile fields) → shown
+read-only in the Simple builder with a clear note, not fake-saved.
+
+**Next:** Phase 10 = historical / snapped-data backtest adapter. Phase 11 =
+Tastytrade execution readiness / live, still deferred.
