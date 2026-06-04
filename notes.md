@@ -2447,3 +2447,68 @@ Next: Phase 10 implementation (capture_exposures ETL over SPX_RAW CSVs →
 ReplayStructure/QuoteProvider → run_backtest per preset → review_backtest comparison vs
 wingonomics). Phase 11 = per-profile TP/SL + dynamic-exit lifecycle wiring + Tastytrade
 execution readiness, still deferred.
+
+## 2026-06-03 — Phase 9J: true Wing Dominance Score (WDS) + Phase 10A SPX_RAW loader
+
+9H/9I cockpit was already committed (69e1662, "Phase 9H-9I: refine trader cockpit and
+prepare backtesting"; clean tree, in sync with origin) — Step A satisfied. Built 9J on
+top. NO scanner/selector/risk/paper-P&L MATH change; no broker execution.
+
+WHY: the operator read over-emphasised the nearest 2K wing. Dan's wing logic is true
+**Wing Dominance Score** — a 10K wing (W1) is only strong if it DOMINATES the adjacent
+strike (W2):  WSR = W2_vol / W1_vol ;  WDS = 1 - WSR  (higher = cleaner). This is NOT a
+generic tier-strength (10K=1.0/5K=0.7) — that was explicitly rejected.
+
+Source-of-truth review (Step B): read the real
+`…/0 - Strategies_Backtesting/wingonomics/scripts/wingonomics.py`. Its `compute_wing`
+selects CW1 = min strike where CALL Volume ≥ 10000 and PW1 = max strike where PUT Volume
+≥ 10000 — EXACTLY our mapper. But wingonomics does NOT compute WDS/WSR/adjacent-strike at
+all → WDS is a NEW concept. Implemented per Dan's spec with documented assumptions:
+  • W2 = the next AVAILABLE strike in the series (CALL → one LOWER than CW1; PUT → one
+    HIGHER than PW1); no fixed 5/10-pt assumption.
+  • WSR uses SIDE-SPECIFIC volume (CALL vol for calls; PUT vol for puts).
+  • No clipping: WSR may exceed 1 → WDS < 0 → Tier 4 (very weak).
+  • Tiers: ≥0.75 T1, 0.50–0.75 T2, 0.30–0.50 T3, <0.30 T4.
+  • Missing W1 or W2 volume → true WDS UNAVAILABLE (never invented; no proxy used).
+  • Dominant side = higher WDS, tie-broken by larger W1 volume (NOT nearest distance).
+
+Structure model (Step D): ExposureContext gained call_floor_10k_w2_strike/volume (one
+LOWER) + put_ceiling_10k_w2_strike/volume (one HIGHER) — optional/defaulted (backward
+compatible). ZS mapper derives W2 from the SAME call/put volume series via a new
+`_adjacent_strike(strikes, w1, direction)` (next available neighbour). Stub stays 10K=None
+(mock peaks ~5.5K) → WDS unavailable in sandbox (honest).
+
+WDS helper (Step C, cockpit_helpers): `wds_tier`, `wds_pct`, `compute_wds(w1s,w1v,w2s,w2v)`
+(→ wsr/wds/wds_pct/tier/source/reason; source 'true'|'unavailable'), `wing_dominance(ex,
+spot)` → all required fields (call_*, put_*, dominant_wing_*, nearest_wing_*, wds_source,
+wds_reason). Example reasons match the spec: dominant → "…adjacent strike volume is only
+30% of W1"; weak → "…weak because adjacent strike volume is 82% of W1".
+
+Operator read (Step E) + Wing Stack (Step F): `operator_decision_layer` now takes `wds`
+and leads Structure Read with the dominant 10K WDS wing AS THE PRIMARY STRUCTURE, then
+frames the nearest 2K/5K wing as "immediate breach risk but not the primary structure";
+Candidate Risk names the dominant 10K (not the tier-based primary_wing) as primary
+structure. render_market Wing Stack gained a "Dominant wing (WDS)" block (W1 vol, W2
+strike+vol, WSR, WDS %, Tier) + the dominant-vs-nearest caption. When W2 missing: "10K
+wing exists, but true WDS is unavailable because adjacent W2 volume is missing."
+
+Selector (Step G): DISPLAY-ONLY this pass. Candidate rows don't carry W2 volume yet, so
+WDS is NOT fed into the selector — selector weighting by WDS is DEFERRED to Phase 10/11
+(documented). `balanced_structure_premium_valid` math untouched.
+
+Phase 10A (Step J): src/replay/spx_raw_loader.py reads `SPX_RAW_*.csv` (RTH filter,
+group by timestamp, build {strikes,calls,puts,spot}) and maps ONE timestamp →
+StructureSnapshot via the SHARED `map_payload_to_snapshot` (no fork) → 2K/5K/10K wings +
+W2 derive identically. `scripts/backtest_spx_raw.py` (HOME/env paths, no hardcoded user)
+prints available dates + a sample mapped structure incl. WDS. VALIDATED on REAL data:
+145 dates (2025-10-31 → 2026-06-03); midday 2026-06-03 12:45 → call_floor_10k 7560 / put_
+ceiling_10k 7600, CALL W1=15734 vs W2=8264, dominant = PUT_CEILING 10K WDS 60% Tier 2.
+Loader-only — no runner, no execution.
+
+Tests: test_phase9j_wds.py (17) + test_phase9j_ui.py (3) + test_phase9j_backtest.py (6).
+Updated test_phase9h_ui (Wing Stack "Primary wing"→"Dominant wing (WDS)"). Full suite 678
+passed, ruff clean, manage_profiles 14/14, streamlit import OK.
+
+Next: Phase 10B — ReplayStructureProvider/ReplayQuoteProvider + run_backtest per preset
+(reusing run_scanner.main + paper lifecycle) + per-preset comparison vs
+wingonomics_daily_stats.csv. WDS→selector weighting still deferred (Phase 10/11).

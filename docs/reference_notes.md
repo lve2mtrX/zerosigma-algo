@@ -1527,3 +1527,34 @@ Backtest discovery (`scripts/discover_backtest_sources.py`): roots resolve `--ro
 `ZSA_TRADING_ROOT` → `Path.home()/Dropbox/Trading` (no hardcoded username; the SPX_RAW
 CSVs carry `Strike`/`CALL Volume`/`PUT Volume`, so the "usable" verdict is real). The
 example paths in docs are illustrative only.
+
+### Phase 9J — true Wing Dominance Score (WDS) + SPX_RAW loader
+
+WDS is Dan's wing-quality measure — NOT a generic tier-strength (10K=1.0/5K=0.7, which
+was explicitly rejected). A 10K wing (W1) is strong only if it dominates the ADJACENT
+strike (W2):  `WSR = W2_volume / W1_volume` ;  `WDS = 1 - WSR`. CALL floor → W2 is one
+strike LOWER than W1; PUT ceiling → W2 is one HIGHER. Side-specific volume.
+
+Source-of-truth: the real `wingonomics.py` `compute_wing` selects CW1 = `df[CALL Volume ≥
+10000].Strike.min()` and PW1 = `df[PUT Volume ≥ 10000].Strike.max()` — identical to our
+`_lowest/_highest_strike_where(..., 10000)`. Wingonomics does NOT compute WDS, so WDS is
+implemented per Dan's spec with documented assumptions: W2 = next AVAILABLE strike (no
+fixed 5/10-pt assumption; `zerosigma_api._adjacent_strike`), no clipping (WSR>1 → WDS<0 →
+Tier 4), tiers ≥0.75 T1 / 0.50 T2 / 0.30 T3 / else T4, missing W1 **or** W2 → WDS
+UNAVAILABLE (never invented, no proxy). Dominant side = higher WDS, tie-broken by larger
+W1 volume — NOT nearest distance.
+
+Data model: `ExposureContext.{call_floor_10k_w2_strike/volume, put_ceiling_10k_w2_strike/
+volume}` (Phase 9J, optional/defaulted). The ZS mapper derives them from the SAME volume
+series as the 10K W1. Helpers (`cockpit_helpers`): `wds_tier`, `wds_pct`, `compute_wds`,
+`wing_dominance`. `operator_decision_layer(..., wds=…)` presents the dominant 10K WDS wing
+as the PRIMARY structure and the nearest 2K/5K wing as immediate breach risk (not
+primary). **Selector weighting by WDS is DEFERRED** (candidate rows don't carry W2 volume
+yet) — WDS is display-only in 9J; `balanced_structure_premium_valid` math is untouched.
+
+SPX_RAW loader (`src/replay/spx_raw_loader.py`, Phase 10A): reads `SPX_RAW_<date>.csv`
+(RTH filter, group-by-timestamp, build `{strikes,calls,puts,spot}`) and maps one
+timestamp → StructureSnapshot via the SHARED `map_payload_to_snapshot` — so wings + W2
+derive identically to live. `scripts/backtest_spx_raw.py` prints available dates + a
+sample mapped structure (incl. WDS); validated on real data (145 days; midday 10K wings +
+true WDS confirmed). Loader-only scaffold — no runner, no execution.

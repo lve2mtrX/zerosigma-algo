@@ -237,3 +237,22 @@ in code; the example paths in this doc are illustrative only.
 4. `scripts/review_backtest.py` — per-preset P&L / drawdown / win-rate / expectancy
    / no-trade-reason table; cross-check wing levels + entry/exit vs
    `wingonomics_daily_stats.csv`.
+
+## 14. Phase 10A landed (Phase 9J) — SPX_RAW loader + WDS
+
+The first ETL step is built and validated on real data:
+
+- `src/replay/spx_raw_loader.py` — reads `SPX_RAW_<date>.csv` (RTH filter,
+  group-by-timestamp, builds `{strikes, calls, puts, spot}`) and maps ONE timestamp
+  to a `StructureSnapshot` via the SHARED `map_payload_to_snapshot` (no fork). So
+  2K/5K/10K wings AND the Phase 9J W2/WDS inputs derive identically to live.
+- `scripts/backtest_spx_raw.py` — read-only CLI (HOME/env paths, no hardcoded
+  username) that prints available dates + a sample mapped structure with its true
+  **WDS**. Validated: 145 dates (2025-10-31 → 2026-06-03); a midday tick yields
+  formed 10K wings and a real dominant-wing WDS read.
+
+This is loader-only — no `run_backtest`, no scanner/lifecycle run yet (that is
+Phase 10B). Next: `ReplayStructureProvider` (sequence the snapshots) +
+`ReplayQuoteProvider` (build the chain from the CSV `CALL/PUT BID/ASK` columns) →
+`run_scanner.main(argv)` per preset → paper lifecycle → per-preset comparison vs
+`wingonomics_daily_stats.csv`.

@@ -104,6 +104,21 @@ def _volume_at(strikes: list[float], series: list[float], strike: float | None) 
     return None
 
 
+def _adjacent_strike(strikes: list[float], w1: float | None, *, direction: str) -> float | None:
+    """Phase 9J — the next AVAILABLE strike below ('lower') or above ('higher')
+    `w1` in the chain (NOT assuming a fixed 5/10-pt increment — uses the actual
+    neighbouring strike present in the series). None when `w1` is missing or
+    there is no neighbour in that direction (→ true WDS unavailable)."""
+    if w1 is None:
+        return None
+    nums = [s for s in strikes if isinstance(s, (int, float))]
+    if direction == "lower":
+        below = [s for s in nums if s < w1]
+        return max(below) if below else None
+    above = [s for s in nums if s > w1]
+    return min(above) if above else None
+
+
 def _parse_ts(value: Any) -> datetime:
     """Parse an ISO timestamp; fall back to current ET time if unparseable."""
     if isinstance(value, datetime):
@@ -478,6 +493,9 @@ class ZeroSigmaApiStructureProvider:
         call_floor_2k = call_floor_5k = call_floor_10k = None
         put_ceiling_2k_volume = put_ceiling_5k_volume = put_ceiling_10k_volume = None
         call_floor_2k_volume  = call_floor_5k_volume  = call_floor_10k_volume = None
+        # Phase 9J — adjacent (W2) strike + side-specific volume for the 10K wing.
+        call_floor_10k_w2_strike = call_floor_10k_w2_volume = None
+        put_ceiling_10k_w2_strike = put_ceiling_10k_w2_volume = None
         maxvol = None
         maxvol_volume: float | None = None
         if vol_series:
@@ -498,6 +516,12 @@ class ZeroSigmaApiStructureProvider:
                 call_floor_2k_volume  = _volume_at(strikes, calls, call_floor_2k)
                 call_floor_5k_volume  = _volume_at(strikes, calls, call_floor_5k)
                 call_floor_10k_volume = _volume_at(strikes, calls, call_floor_10k)
+                # Phase 9J — W2 = adjacent strike (call floor: one LOWER; put
+                # ceiling: one HIGHER), with side-specific volume → WDS inputs.
+                call_floor_10k_w2_strike = _adjacent_strike(strikes, call_floor_10k, direction="lower")
+                call_floor_10k_w2_volume = _volume_at(strikes, calls, call_floor_10k_w2_strike)
+                put_ceiling_10k_w2_strike = _adjacent_strike(strikes, put_ceiling_10k, direction="higher")
+                put_ceiling_10k_w2_volume = _volume_at(strikes, puts, put_ceiling_10k_w2_strike)
                 combined = [(c or 0) + (p or 0) for c, p in zip(calls, puts, strict=False)]
                 if combined:
                     maxvol_idx = combined.index(max(combined))
@@ -570,6 +594,10 @@ class ZeroSigmaApiStructureProvider:
             call_floor_5k_volume=call_floor_5k_volume,
             call_floor_10k_volume=call_floor_10k_volume,
             maxvol_volume=maxvol_volume,
+            call_floor_10k_w2_strike=call_floor_10k_w2_strike,
+            call_floor_10k_w2_volume=call_floor_10k_w2_volume,
+            put_ceiling_10k_w2_strike=put_ceiling_10k_w2_strike,
+            put_ceiling_10k_w2_volume=put_ceiling_10k_w2_volume,
             gamma_primary=gamma_primary,
             gamma_secondary=gamma_secondary,
             ddoi_pin=ddoi_pin,

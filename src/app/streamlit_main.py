@@ -427,10 +427,12 @@ def render_operator_decision() -> None:
     ex = structure.exposures
     gamma = ch.primary_secondary_gamma(ex, spot_val)
     wings = ch.wing_stack(ex, spot_val)
+    wds = ch.wing_dominance(ex, spot_val)   # Phase 9J — dominant 10K WDS wing
     best = _compute_best_eligible()
     layer = ch.operator_decision_layer(
         spot=spot_val, gamma_regime=ex.gamma_regime, da_gex=ex.da_gex_signed,
         gamma=gamma, wings=wings, best_eligible=best, chain_available=chain is not None,
+        wds=wds,
     )
     left, right = st.columns(2)
     left.markdown(f"**Structure Read**  \n{layer['structure_read']}")
@@ -476,15 +478,38 @@ def render_market() -> None:
     for _i, _e in enumerate(ws["call_floors"]):
         cf[_i].metric(_e["label"], _e["strike_fmt"],
                       f"{_e['distance_fmt']} pts" if _e["available"] else None)
-    near, prim = ws["nearest_wing"], ws["primary_wing"]
+    # ── Dominant wing (Phase 9J — true WDS, NOT nearest distance) ──
+    wd = ch.wing_dominance(ex, spot_val)
+    st.markdown("**Dominant wing (WDS)** — how clean the 10K wing is vs the adjacent strike (W2)")
+    if wd["wds_source"] == "true":
+        _side = wd["dominant_wing_side"]
+        _w1v = wd["call_w1_volume"] if _side == "CALL" else wd["put_w1_volume"]
+        _w2s = wd["call_w2_strike"] if _side == "CALL" else wd["put_w2_strike"]
+        _w2v = wd["call_w2_volume"] if _side == "CALL" else wd["put_w2_volume"]
+        _wsr = wd["call_wsr"] if _side == "CALL" else wd["put_wsr"]
+        dcols = st.columns(4)
+        dcols[0].metric(f"Dominant {wd['dominant_wing_label']}",
+                        ch.fmt_strike(wd["dominant_wing_strike"]),
+                        f"WDS {wd['dominant_wing_wds_pct']} · Tier {wd['dominant_wing_tier']}")
+        dcols[1].metric("W1 volume", ch.fmt_count(_w1v))
+        dcols[2].metric(f"W2 @ {ch.fmt_strike(_w2s)}", ch.fmt_count(_w2v))
+        dcols[3].metric("WSR (W2/W1)", f"{round(_wsr * 100)}%" if _wsr is not None else "—")
+        st.caption(wd["wds_reason"])
+    else:
+        st.caption(f"True WDS unavailable — {wd['wds_reason']}")
+    near = ws["nearest_wing"]
     near_txt = (f"{near['label']} {near['strike_fmt']} ({near['distance_fmt']} pts)"
                 if near else "unavailable")
-    prim_txt = (f"{prim['label']} {prim['strike_fmt']} ({prim['distance_fmt']} pts)"
-                if prim else "unavailable")
-    st.caption(f"Nearest wing: **{near_txt}**  ·  Primary wing: **{prim_txt}**")
+    _dom_txt = (f"{wd['dominant_wing_label']} {ch.fmt_strike(wd['dominant_wing_strike'])} "
+                f"(WDS {wd['dominant_wing_wds_pct']}, Tier {wd['dominant_wing_tier']})"
+                if wd["wds_source"] == "true" else "unavailable")
+    _brd = (f"{wd['nearest_wing_distance_points']:.2f} pts"
+            if wd["nearest_wing_distance_points"] is not None else "—")
+    st.caption(f"Dominant wing (WDS): **{_dom_txt}**  ·  Nearest wing (immediate breach risk): "
+               f"**{near_txt}** — {_brd} from spot")
     if not (ws["put_ceilings"][2]["available"] or ws["call_floors"][2]["available"]):
-        st.caption("10K wings require upstream exposure volume ≥ 10,000 (subscription "
-                   "series); unavailable in sandbox / mock data.")
+        st.caption("10K wings (and true WDS) require upstream exposure volume ≥ 10,000 "
+                   "(subscription series); unavailable in sandbox / mock data.")
 
     if chain is None:
         # Phase 9I — say WHY (concise in Simple, raw provider state in Advanced).

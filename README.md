@@ -1818,6 +1818,44 @@ rule this repo uses, so it's the validation ground-truth — see
 
 ---
 
+## Wing Dominance Score — WDS (Phase 9J)
+
+A 10K wing is **not** automatically strong. Dan's wing logic scores how *dominant*
+the wing (W1) is versus the adjacent next strike (W2):
+
+```
+WSR = W2_volume / W1_volume          (side-specific volume)
+WDS = 1 - WSR                        (higher = cleaner / more dominant)
+```
+
+- **CALL floor:** W1 = lowest strike with CALL volume ≥ 10,000; W2 = one strike
+  *lower*.
+- **PUT ceiling:** W1 = highest strike with PUT volume ≥ 10,000; W2 = one strike
+  *higher*.
+- **Tiers:** WDS ≥ 0.75 = **Tier 1** (clean/dominant), 0.50–0.75 = **Tier 2**
+  (usable), 0.30–0.50 = **Tier 3** (mixed/caution), < 0.30 = **Tier 4** (weak).
+- Displayed as a percent: *"WDS: 82% — Tier 1"*. A weak wing reads *"10K wing is
+  weak because adjacent strike volume is 82% of W1."*
+
+The Live Cockpit now leads with the **dominant WDS wing as the primary structure**,
+and explicitly frames the nearest 2K/5K wing as *immediate breach risk but not the
+primary structure*:
+
+> *"Dominant wing is CALL_FLOOR 10K at 7600 with WDS 70% — Tier 2 (usable). … Nearest
+> wing is CALL_FLOOR 2K at 7570, only 3.68 pts from spot — immediate breach risk but
+> not the primary structure."*
+
+True WDS needs both W1 and W2 volume; when W2 is missing it is never invented —
+*"10K wing exists, but true WDS is unavailable because the adjacent W2 volume is
+missing from the current payload."* WDS is **display-only** in this phase; weighting
+the selector by WDS is deferred. (This matches the real `wingonomics.py` wing
+selection; Wingonomics itself does not compute WDS — we add it per Dan's spec.)
+
+`python -m scripts.backtest_spx_raw` maps real `SPX_RAW_*.csv` exposures through the
+same mapper and prints a sample structure with its WDS — the first Phase 10A step.
+
+---
+
 ## Safety guardrails
 
 - No code in this repo connects to a broker. The `ExecutionProvider` interface

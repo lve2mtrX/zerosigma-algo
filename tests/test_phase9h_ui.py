@@ -42,9 +42,11 @@ def test_ddoi_removed_from_prime_cards():
 def test_wing_stack_section_present():
     assert "Wing Stack" in _SRC
     assert "wing_stack(" in _SRC
-    assert "Nearest wing" in _SRC and "Primary wing" in _SRC
+    # Phase 9J — the tier-based "Primary wing" caption was replaced by the
+    # true-WDS "Dominant wing"; the nearest wing is still shown as breach risk.
+    assert "Nearest wing" in _SRC and "Dominant wing (WDS)" in _SRC
     # 10K unavailability is explained, not silently blank
-    assert "10K wings require upstream exposure" in _SRC
+    assert "10K wings" in _SRC and "require upstream exposure" in _SRC
 
 
 # ── mismatch + grouping ──────────────────────────────────────────────────────

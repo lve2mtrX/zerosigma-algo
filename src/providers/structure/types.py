@@ -60,6 +60,20 @@ class ExposureContext:
     call_floor_10k_volume: float | None = None
     maxvol_volume:         float | None = None   # combined volume at maxvol strike
 
+    # ── 10K Wing-Dominance inputs (Phase 9J) ──
+    # The ADJACENT strike used to judge whether the 10K wing (W1) is clean/
+    # dominant. For the CALL floor, W2 is the strike one step LOWER than the
+    # floor; for the PUT ceiling, W2 is the strike one step HIGHER than the
+    # ceiling. Volumes are side-specific (CALL volume for the call wing, PUT
+    # volume for the put wing). WSR = W2_volume / W1_volume; WDS = 1 - WSR.
+    # None when there is no qualifying 10K wing OR no adjacent strike in the
+    # series (→ true WDS unavailable; never invented). See
+    # `cockpit_helpers.wing_dominance`.
+    call_floor_10k_w2_strike:  float | None = None
+    call_floor_10k_w2_volume:  float | None = None
+    put_ceiling_10k_w2_strike: float | None = None
+    put_ceiling_10k_w2_volume: float | None = None
+
     # ── Gamma clusters (Phase 9H) ──
     # The most/next-most relevant gamma levels influencing spot. Mapped from
     # the ZS payload `gamma.cluster_primary` / `gamma.cluster_secondary` when

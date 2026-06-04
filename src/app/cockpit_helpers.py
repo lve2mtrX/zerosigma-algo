@@ -550,21 +550,36 @@ def _spot_vs_level(spot: float | None, level: float | None, near_pts: float = 8.
 def operator_decision_layer(*, spot: Any, gamma_regime: Any, da_gex: Any,
                             gamma: dict[str, Any], wings: dict[str, Any],
                             best_eligible: dict[str, Any] | None = None,
-                            chain_available: bool = True) -> dict[str, str]:
+                            chain_available: bool = True,
+                            wds: dict[str, Any] | None = None) -> dict[str, str]:
     """Translate structure into the 5-part operator summary. Pure; every part is
     guarded so missing data reads 'unavailable' rather than inventing context.
 
-    `gamma` = output of `primary_secondary_gamma`; `wings` = output of `wing_stack`.
+    `gamma` = output of `primary_secondary_gamma`; `wings` = `wing_stack`;
+    `wds` = `wing_dominance` (Phase 9J). When a valid dominant 10K WDS wing
+    exists it is presented as the PRIMARY structure, and the nearest 2K/5K wing is
+    framed as immediate breach risk — NOT the primary structure.
     """
     sp = _num_or_none(spot)
     regime = gamma_regime if isinstance(gamma_regime, str) and gamma_regime else None
     g_primary = gamma.get("primary")
     near = wings.get("nearest_wing")
     primary_wing = wings.get("primary_wing")
+    wds = wds or {}
+    has_dominant = (wds.get("dominant_wing_side") in ("CALL", "PUT")
+                    and wds.get("wds_source") == "true")
+    _has_10k = wds.get("call_w1_strike") is not None or wds.get("put_w1_strike") is not None
 
-    # ── Structure Read ──
+    # ── Structure Read (dominant WDS wing FIRST = the primary structure) ──
     parts: list[str] = []
     parts.append(f"Spot {fmt_price(sp)}." if sp is not None else "Spot unavailable.")
+    if has_dominant:
+        parts.append(
+            f"Dominant wing is {wds['dominant_wing_label']} at "
+            f"{fmt_strike(wds['dominant_wing_strike'])} with WDS {wds['dominant_wing_wds_pct']} — "
+            f"Tier {wds['dominant_wing_tier']} ({WDS_TIER_MEANING.get(wds['dominant_wing_tier'], '')}).")
+    elif _has_10k and wds.get("wds_reason"):
+        parts.append(wds["wds_reason"])
     if gamma.get("available"):
         rel = _spot_vs_level(sp, g_primary)
         seg = f"Primary gamma {gamma['primary_fmt']}"
@@ -576,8 +591,14 @@ def operator_decision_layer(*, spot: Any, gamma_regime: Any, da_gex: Any,
     else:
         parts.append("Primary/secondary gamma unavailable from current structure payload.")
     if near:
-        parts.append(f"Nearest wing: {near['label']} at {near['strike_fmt']} "
-                     f"({near['distance_fmt']} pts).")
+        _npts = str(near["distance_fmt"]).lstrip("+-")
+        if has_dominant:
+            parts.append(f"Nearest wing is {near['label']} at {near['strike_fmt']}, only "
+                         f"{_npts} pts from spot — immediate breach risk but not the "
+                         "primary structure.")
+        else:
+            parts.append(f"Nearest wing: {near['label']} at {near['strike_fmt']} "
+                         f"({near['distance_fmt']} pts).")
     parts.append(f"Gamma regime is {regime}." if regime else "Gamma regime unavailable.")
     structure_read = " ".join(parts)
 
@@ -601,7 +622,11 @@ def operator_decision_layer(*, spot: Any, gamma_regime: Any, da_gex: Any,
                 f"{near['distance_fmt']} pts).")
         if regime == "negative":
             risk += " Negative gamma can accelerate a breach of that level."
-        if primary_wing and primary_wing is not near:
+        if has_dominant:
+            risk += (f" Primary structure is the dominant {wds['dominant_wing_label']} at "
+                     f"{fmt_strike(wds['dominant_wing_strike'])} (WDS {wds['dominant_wing_wds_pct']}, "
+                     f"Tier {wds['dominant_wing_tier']}).")
+        elif primary_wing and primary_wing is not near:
             risk += f" Primary wing: {primary_wing['label']} {primary_wing['strike_fmt']}."
     else:
         risk = "Wing structure unavailable — candidate breach risk cannot be assessed."
@@ -933,3 +958,149 @@ def eod_summary_status(output_root: Path | str | None = None,
         note = "EOD summary is up to date with the latest run."
     return {"exists": exists, "generated_at": generated_at, "date": date,
             "latest_run_at": latest_run_at, "stale": stale, "note": note}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 9J — true Wing Dominance Score (WDS)
+#
+# Dan's WDS is NOT a generic tier-strength ("10K=1.0, 5K=0.7"). A 10K wing (W1)
+# is only strong if it DOMINATES the adjacent next strike (W2):
+#     WSR = W2_volume / W1_volume   (side-specific volume)
+#     WDS = 1 - WSR                 (higher = cleaner / more dominant)
+# CALL floor → W2 is one strike LOWER than W1; PUT ceiling → W2 is one HIGHER.
+# Wingonomics (source of truth) selects W1 exactly as our mapper does
+# (call_floor = min strike where CALL vol ≥ 10000; put_ceiling = max strike where
+# PUT vol ≥ 10000) but does NOT itself compute WDS — so WDS is implemented per
+# Dan's spec, with documented assumptions (see notes.md / reference_notes.md):
+#   • W2 = the next AVAILABLE strike in the series (no fixed 5/10-pt assumption).
+#   • WSR uses SIDE-SPECIFIC volume (CALL vol for calls, PUT vol for puts).
+#   • No clipping: WSR may exceed 1 → WDS negative → Tier 4 (very weak).
+#   • Missing W1 or W2 volume → true WDS UNAVAILABLE (never invented).
+# ══════════════════════════════════════════════════════════════════════════════
+
+WDS_TIER_MEANING = {
+    1: "clean / dominant wing", 2: "usable / strong enough",
+    3: "mixed / caution", 4: "weak / avoid or observe",
+}
+
+
+def wds_tier(wds: Any) -> int | None:
+    """Tier from a WDS value: ≥0.75 → 1, ≥0.50 → 2, ≥0.30 → 3, else 4. None when
+    wds is None (unavailable)."""
+    w = _f(wds)
+    if w is None:
+        return None
+    if w >= 0.75:
+        return 1
+    if w >= 0.50:
+        return 2
+    if w >= 0.30:
+        return 3
+    return 4
+
+
+def wds_pct(wds: Any) -> str:
+    """WDS as a percent string: 0.82 → '82%'. None → '—'."""
+    w = _f(wds)
+    return f"{round(w * 100)}%" if w is not None else "—"
+
+
+def compute_wds(w1_strike: Any, w1_volume: Any, w2_strike: Any, w2_volume: Any) -> dict[str, Any]:
+    """True WDS for ONE wing from its W1 (10K wing) + adjacent W2 strike.
+    WSR = W2_volume / W1_volume; WDS = 1 - WSR. ``source`` is 'unavailable' (never
+    invents) when W1 strike/volume or W2 strike/volume is missing or W1 vol ≤ 0."""
+    w1s, w1v = _f(w1_strike), _f(w1_volume)
+    w2s, w2v = _f(w2_strike), _f(w2_volume)
+    out = {
+        "w1_strike": w1s, "w1_volume": w1v, "w2_strike": w2s, "w2_volume": w2v,
+        "wsr": None, "wds": None, "wds_pct": "—", "wds_tier": None,
+        "source": "unavailable", "reason": "",
+    }
+    if w1s is None or w1v is None or w1v <= 0:
+        out["reason"] = "10K wing (W1) volume missing or zero — true WDS unavailable."
+        return out
+    if w2s is None or w2v is None:
+        out["reason"] = ("10K wing exists, but true WDS is unavailable because the "
+                         "adjacent W2 volume is missing from the current payload.")
+        return out
+    wsr = w2v / w1v
+    wds = 1.0 - wsr
+    tier = wds_tier(wds)
+    pct_w2 = round(wsr * 100)
+    out.update(wsr=round(wsr, 4), wds=round(wds, 4), wds_pct=wds_pct(wds),
+               wds_tier=tier, source="true")
+    if tier == 1:
+        out["reason"] = f"10K wing is dominant because adjacent strike volume is only {pct_w2}% of W1."
+    elif tier == 2:
+        out["reason"] = f"10K wing is reasonably clean — adjacent strike volume is {pct_w2}% of W1."
+    elif tier == 3:
+        out["reason"] = f"10K wing is mixed (caution) — adjacent strike volume is {pct_w2}% of W1."
+    else:
+        out["reason"] = f"10K wing is weak because adjacent strike volume is {pct_w2}% of W1."
+    return out
+
+
+def wing_dominance(exposures: Any, spot: Any = None) -> dict[str, Any]:
+    """Operator Wing-Dominance read: per-side WDS (call/put), the DOMINANT wing
+    (chosen by WDS quality + W1 volume — NOT nearest distance), and the NEAREST
+    wing (immediate breach risk, computed separately). Pure; never invents WDS."""
+    ex = exposures
+    call = compute_wds(getattr(ex, "call_floor_10k", None),
+                       getattr(ex, "call_floor_10k_volume", None),
+                       getattr(ex, "call_floor_10k_w2_strike", None),
+                       getattr(ex, "call_floor_10k_w2_volume", None))
+    put = compute_wds(getattr(ex, "put_ceiling_10k", None),
+                      getattr(ex, "put_ceiling_10k_volume", None),
+                      getattr(ex, "put_ceiling_10k_w2_strike", None),
+                      getattr(ex, "put_ceiling_10k_w2_volume", None))
+
+    call_true, put_true = call["source"] == "true", put["source"] == "true"
+    if call_true and put_true:
+        # higher WDS wins; tie-break by larger W1 volume (more dominant).
+        dom_side = "CALL" if (call["wds"], call["w1_volume"]) >= (put["wds"], put["w1_volume"]) else "PUT"
+    elif call_true:
+        dom_side = "CALL"
+    elif put_true:
+        dom_side = "PUT"
+    else:
+        dom_side = "unavailable"
+    dom = call if dom_side == "CALL" else put if dom_side == "PUT" else None
+
+    nearest = wing_stack(ex, spot).get("nearest_wing")
+    near_dist = (abs(nearest["distance"]) if nearest and nearest.get("distance") is not None
+                 else None)
+
+    out: dict[str, Any] = {
+        "call_w1_strike": call["w1_strike"], "call_w1_volume": call["w1_volume"],
+        "call_w2_strike": call["w2_strike"], "call_w2_volume": call["w2_volume"],
+        "call_wsr": call["wsr"], "call_wds": call["wds"], "call_wds_pct": call["wds_pct"],
+        "call_wds_tier": call["wds_tier"],
+        "put_w1_strike": put["w1_strike"], "put_w1_volume": put["w1_volume"],
+        "put_w2_strike": put["w2_strike"], "put_w2_volume": put["w2_volume"],
+        "put_wsr": put["wsr"], "put_wds": put["wds"], "put_wds_pct": put["wds_pct"],
+        "put_wds_tier": put["wds_tier"],
+        "dominant_wing_side": dom_side,
+        "dominant_wing_label": None, "dominant_wing_strike": None,
+        "dominant_wing_volume": None, "dominant_wing_wds": None,
+        "dominant_wing_wds_pct": "—", "dominant_wing_tier": None,
+        "nearest_wing_label": nearest["label"] if nearest else None,
+        "nearest_wing_strike": nearest["strike"] if nearest else None,
+        "nearest_wing_distance_points": near_dist,
+        "wds_source": "true" if dom is not None else "unavailable",
+        "wds_reason": "",
+    }
+    if dom is not None:
+        label = "CALL_FLOOR 10K" if dom_side == "CALL" else "PUT_CEILING 10K"
+        out.update(
+            dominant_wing_label=label, dominant_wing_strike=dom["w1_strike"],
+            dominant_wing_volume=dom["w1_volume"], dominant_wing_wds=dom["wds"],
+            dominant_wing_wds_pct=dom["wds_pct"], dominant_wing_tier=dom["wds_tier"],
+            wds_reason=(f"Dominant wing is {label} at {fmt_strike(dom['w1_strike'])} with "
+                        f"WDS {dom['wds_pct']} — {WDS_TIER_MEANING.get(dom['wds_tier'], '')} "
+                        f"(Tier {dom['wds_tier']}). {dom['reason']}"),
+        )
+    elif call["w1_strike"] is not None or put["w1_strike"] is not None:
+        out["wds_reason"] = (call["reason"] if call["w1_strike"] is not None else put["reason"])
+    else:
+        out["wds_reason"] = "No qualifying 10K wing in the current structure payload."
+    return out
