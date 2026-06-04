@@ -256,3 +256,98 @@ Phase 10B). Next: `ReplayStructureProvider` (sequence the snapshots) +
 `ReplayQuoteProvider` (build the chain from the CSV `CALL/PUT BID/ASK` columns) →
 `run_scanner.main(argv)` per preset → paper lifecycle → per-preset comparison vs
 `wingonomics_daily_stats.csv`.
+
+## 15. Phase 10A landed — multi-symbol backtesting module + wing corridor
+
+The Phase 9J single-symbol `spx_raw_loader` is generalised into a **pure,
+multi-symbol** backtesting package and a small CLI surface. Everything still maps
+into the SAME live shapes (no strategy/selector fork); nothing here runs a scanner,
+hits a broker, previews an order, or calls a live API.
+
+### `src/backtesting/` (new pure package)
+
+- **`schemas.py`** — `SymbolConfig` (per-symbol spot column + wing thresholds +
+  note), `symbol_config(symbol)` for `SPX/SPY/QQQ`, required structure cols
+  (`timestamp`, `Strike`, `CALL Volume`, `PUT Volume`, `<SYM>_Spot`) + pricing cols
+  (`CALL/PUT BID/ASK`) + optional metric cols, `ENTRY_WINDOWS` (Morning `11:00`
+  ±5 min, EOD `15:00/15:15/15:30` ±15/±30 min), `RTH` bounds, `DTE_0`/`DTE_1`, and
+  the `<SYM>` / `<SYM>_1DTE` sub-folder + `<SYM>_RAW[_1DTE]_*.csv` glob rules.
+  Thresholds default to 2K/5K/10K for ALL symbols, with SPY/QQQ explicitly flagged
+  **provisional** (symbol-specific calibration is a Phase 10B task).
+- **`raw_snapshot_loader.py`** — `trading_root(cli)` resolves `--trading-root` →
+  `ZSA_TRADING_ROOT` env → `~/Dropbox/Trading` (no hardcoded username);
+  `parse_timestamp` handles mixed forms (ISO-offset / `YYYY-MM-DD HH:MM:SS` /
+  compact) and normalises tz-aware values to America/New_York wall time; RTH filter
+  (by `session=="RTH"` or the 09:30–16:00 window); symbol-aware spot column; 0DTE
+  globs exclude the `1DTE` files. Pure: `available_dates`, `file_for_date`,
+  `available_timestamps`.
+- **`mappers.py`** — `select_snapshot(timestamps, target)` (closest |delta| inside
+  the entry window; ties prefer **at-or-after** via `abs(delta)*2 + (delta<0)`),
+  `map_structure` → `StructureSnapshot` and `map_option_chain` → `OptionChainSnapshot`
+  (both via the SHARED live mapper / bid-ask quotes, `source="backtest_raw"`),
+  `vertical_credit` (mid-to-mid), `corridor_wds` (= `ch.wing_dominance`), and
+  repo-local `output_base/latest_dir/run_dir` (honor `OUTPUT_DIR`/`DATA_DIR`, else
+  `<repo>/outputs`, ALWAYS under `…/backtests/`; never the raw data folders).
+
+### MANDATORY wing-corridor validity (CW1 < Spot < PW1)
+
+A 10K wing structure is **ACTIVE only when the call floor is below spot AND the put
+ceiling is above spot** — i.e. `CW1 (call_floor_10k) < spot < PW1 (put_ceiling_10k)`.
+A call floor priced ABOVE spot is NOT an active floor; a put ceiling BELOW spot is NOT
+an active ceiling. This is encoded once, in pure code, and reused live + in backtest:
+
+- `cockpit_helpers.wing_corridor_status(spot, cw1, pw1)` →
+  `{corridor_valid, cw1, pw1, spot, reason, side_read}`. Missing CW1/PW1 → invalid;
+  `CW1 >= spot` → `"CW1 is not below spot."`; `PW1 <= spot` → `"PW1 is not above spot."`;
+  `CW1 < spot < PW1` → valid.
+- `wing_dominance` GATES the dominant wing on the corridor: `wds_active =
+  corridor_valid and raw_dominant is not None`. When the corridor is not formed the
+  raw WDS is still computed but surfaced as **context-only** (`raw_wds_source="true"`,
+  `dominant_wing_side="unavailable"`, `wds_source="unavailable"`) — never as active
+  structure.
+- Operator read leads with **"Structure status: Active corridor"** /
+  **"Inactive — corridor not formed"**; the nearest 2K/5K wing is framed as immediate
+  breach risk, NOT the primary structure, when the corridor is invalid.
+- The selector receives `corridor_valid` + `wds_active` metadata and grants **no
+  positive structure credit** when the corridor is invalid (display-only/deferred this
+  pass; WDS→selector weighting stays a Phase 10B item).
+- The scan CSV records `corridor_valid / cw1 / pw1 / corridor_reason / raw_wds /
+  active_wds` per snapshot, so corridor state is auditable per date.
+
+### CLIs (all read-only, HOME/env paths, no hardcoded username)
+
+```
+python -m scripts.discover_backtest_sources --symbols SPX SPY QQQ --include-1dte
+python -m scripts.backtest_dry_run   --symbol SPX --profile morning_5k_dynamic_tp75 --latest --entry 11:00
+python -m scripts.backtest_scan_dates --symbol SPX --profile eod_5k_dynamic_sl150_no_tp --start 2026-05-01 --end 2026-06-03 --entry 15:15 --limit 10
+```
+
+Discovery reports per symbol×DTE: folder, file count, date range, sample file, spot
+column presence, structure/pricing/optional column coverage, and usable-for-structure /
+usable-for-pricing. **1DTE is DISCOVERY-ONLY in Phase 10A** (SPX 1DTE is found and
+reported; full 1DTE strategy logic is future). Dry-run maps ONE entry snapshot and
+prints spot, 2K/5K/10K wings, corridor + WDS, gamma, candidate vertical spreads and
+chain priceability. Scan-dates writes one row per entry snapshot to
+`outputs/backtests/latest/scan_<SYM>_<DTE>_<HHMM>.csv` AND a timestamped run dir.
+
+### Validated on real data (no fixtures)
+
+`SPX` 145×0DTE (2025-10-31 → 2026-06-03) + 78×1DTE; `SPY`/`QQQ` 66 each. SPX
+2026-06-03 @ 11:00:15 → corridor **ACTIVE** (`7575 < 7578.55 < 7600`), dominant
+**PUT_CEILING 10K WDS 58% Tier 2**, both candidate spreads priceable (162 chain
+quotes). The exact bug the corridor rule fixes is real in this data: an earlier SPX
+midday tick had `call_floor_10k 7560 > spot 7557.74` → correctly reported **INACTIVE
+— corridor not formed** instead of "dominant CALL_FLOOR 10K".
+
+Tests: `tests/test_phase10a_corridor.py` (12 — corridor valid/invalid/missing, WDS
+raw-not-active when invalid, operator read inactive vs active) +
+`tests/test_phase10a_backtest.py` (15 — discovery, mixed timestamps, symbol spot col,
+RTH, snapshot selection/ties, structure+WDS mapping, chain pricing, dry-run + scan CLIs
+on a synthetic root, 1DTE discovered-but-future, no-hardcoded-username, no-execution
+tokens).
+
+Still loader/mapping-only — **no** `run_backtest`, no scanner/selector/lifecycle run
+(that is Phase 10B): `ReplayStructureProvider`/`ReplayQuoteProvider` over these mapped
+snapshots → `run_scanner.main(argv)` per preset → paper lifecycle → per-preset P&L /
+drawdown / win-rate comparison vs `wingonomics_daily_stats.csv`, plus SPY/QQQ wing
+calibration and full 1DTE support.

@@ -135,16 +135,73 @@ def _report_one(root: Path, label: str, relpath: str, kind: str, note: str) -> d
     return out
 
 
+def _symbol_report(symbol: str, dte: str, root) -> dict:
+    """Per-symbol/DTE report: folder, file count, date range, sample, required
+    structure + pricing columns, usable-for-structure / usable-for-pricing."""
+    from src.backtesting import raw_snapshot_loader as L
+    from src.backtesting import schemas
+    d = L.exposures_dir(symbol, dte, root=root)
+    files = L.list_raw_files(symbol, dte, root=root)
+    cfg = schemas.symbol_config(symbol)
+    out = {"symbol": symbol, "dte": dte, "path": str(d), "files": len(files),
+           "structure_ok": False, "pricing_ok": False}
+    print(f"  {symbol} {dte}: {d}")
+    if not d.is_dir():
+        print("        NOT FOUND")
+        return out
+    if not files:
+        print("        0 raw files (folder exists but empty)")
+        return out
+    dates = L.available_dates(symbol, dte, root=root)
+    cols = L.header_columns(files[0])
+    req_struct = [c for c in schemas.REQUIRED_STRUCTURE_COLS if c in cols]
+    req_price = [c for c in schemas.REQUIRED_PRICING_COLS if c in cols]
+    opt = [c for c in schemas.OPTIONAL_METRIC_COLS if c in cols]
+    spot_ok = cfg.spot_col in cols
+    struct_ok = spot_ok and len(req_struct) == len(schemas.REQUIRED_STRUCTURE_COLS)
+    price_ok = len(req_price) == len(schemas.REQUIRED_PRICING_COLS)
+    out.update(structure_ok=struct_ok, pricing_ok=price_ok)
+    print(f"        files={len(files)}  dates={dates[0]} → {dates[-1]}  sample={files[0].name}")
+    print(f"        spot column {cfg.spot_col}: {'present' if spot_ok else 'MISSING'}")
+    print(f"        structure cols {len(req_struct)}/{len(schemas.REQUIRED_STRUCTURE_COLS)}  ·  "
+          f"pricing cols {len(req_price)}/{len(schemas.REQUIRED_PRICING_COLS)}  ·  optional {len(opt)}")
+    print(f"        usable for STRUCTURE: {'yes' if struct_ok else 'no'}  ·  "
+          f"usable for PRICING: {'yes' if price_ok else 'no'}")
+    if cfg.note:
+        print(f"        note: {cfg.note}")
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Read-only backtest-source discovery (Phase 10 prep).")
     ap.add_argument("--root", action="append", default=None,
                     help="Override the trading root (repeatable). Default: $ZSA_TRADING_ROOT "
                          "or ~/Dropbox/Trading.")
+    ap.add_argument("--symbols", nargs="+", default=None,
+                    help="Per-symbol report (e.g. --symbols SPX SPY QQQ).")
+    ap.add_argument("--include-1dte", action="store_true",
+                    help="Also report the 1DTE buckets (discovery only — future implementation).")
     args = ap.parse_args(argv)
 
     roots = [trading_root(r) for r in (args.root or [None])]
     extra = os.environ.get("ZSA_BACKTEST_DIRS")
     print("ZerσSigma Algo — backtest source discovery (read-only)")
+
+    # ── Phase 10A — multi-symbol report ──
+    if args.symbols:
+        from src.backtesting import schemas
+        buckets = [schemas.DTE_0] + ([schemas.DTE_1] if args.include_1dte else [])
+        for root in roots:
+            print(f"\nTrading root: {root}  ({'exists' if root.exists() else 'NOT FOUND'})")
+            for sym in args.symbols:
+                for dte in buckets:
+                    _symbol_report(sym.strip().upper(), dte, root)
+        if args.include_1dte:
+            print("\n1DTE buckets are DISCOVERY-ONLY in Phase 10A — full 1DTE strategy logic is a "
+                  "future implementation (see plan.md / docs/phase10_backtest_plan.md).")
+        print("\nNote: paths are derived from your HOME / env — nothing is hardcoded, "
+              "nothing was written, no network was used.")
+        return 0
     for root in roots:
         print(f"\nTrading root: {root}  ({'exists' if root.exists() else 'NOT FOUND'})")
         usable_primary = False

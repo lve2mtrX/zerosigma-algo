@@ -1837,22 +1837,81 @@ WDS = 1 - WSR                        (higher = cleaner / more dominant)
 - Displayed as a percent: *"WDS: 82% — Tier 1"*. A weak wing reads *"10K wing is
   weak because adjacent strike volume is 82% of W1."*
 
-The Live Cockpit now leads with the **dominant WDS wing as the primary structure**,
-and explicitly frames the nearest 2K/5K wing as *immediate breach risk but not the
-primary structure*:
+The Live Cockpit leads with the **dominant WDS wing as the primary structure** — but
+only when the wing **corridor is active** (see the next section). It explicitly frames
+the nearest 2K/5K wing as *immediate breach risk, not the primary structure*:
 
-> *"Dominant wing is CALL_FLOOR 10K at 7600 with WDS 70% — Tier 2 (usable). … Nearest
-> wing is CALL_FLOOR 2K at 7570, only 3.68 pts from spot — immediate breach risk but
-> not the primary structure."*
+> *"Structure status: Active corridor. Dominant wing is PUT_CEILING 10K at 7600 with
+> WDS 58% — Tier 2 (usable)."*
 
 True WDS needs both W1 and W2 volume; when W2 is missing it is never invented —
 *"10K wing exists, but true WDS is unavailable because the adjacent W2 volume is
-missing from the current payload."* WDS is **display-only** in this phase; weighting
-the selector by WDS is deferred. (This matches the real `wingonomics.py` wing
-selection; Wingonomics itself does not compute WDS — we add it per Dan's spec.)
+missing from the current payload."* WDS is **display-only**; weighting the selector by
+WDS is deferred. (This matches the real `wingonomics.py` wing selection; Wingonomics
+itself does not compute WDS — we add it per Dan's spec.)
 
-`python -m scripts.backtest_spx_raw` maps real `SPX_RAW_*.csv` exposures through the
-same mapper and prints a sample structure with its WDS — the first Phase 10A step.
+---
+
+## Wing corridor validity — CW1 < Spot < PW1 (Phase 10A)
+
+A wing structure is only **active** when the call floor is below spot **and** the put
+ceiling is above spot — i.e. spot sits *inside* the corridor:
+
+```
+corridor active  ⇔  CW1 (call floor 10K)  <  Spot  <  PW1 (put ceiling 10K)
+```
+
+A call floor priced **above** spot is not a floor; a put ceiling **below** spot is not a
+ceiling. When the corridor is not formed, the cockpit says so plainly and does **not**
+promote any wing to "active dominant structure":
+
+> *"Structure status: Inactive — corridor not formed. CALL_FLOOR 10K at 7600 is above
+> spot, so it is not acting as the active floor. Raw WDS for CALL_FLOOR 10K at 7600 is
+> 69% (raw context only — NOT active structure)."*
+
+The raw WDS is still computed (useful context) but clearly labelled raw/inactive, the
+dominant side reads `unavailable`, and the nearest local wing is breach risk only. The
+corridor status (`✅ Active` / `⛔ Inactive`), CW1/Spot/PW1, and the active-or-raw WDS all
+show in the **Wing Stack** panel. The rule lives in one pure helper
+(`cockpit_helpers.wing_corridor_status`) reused by the live cockpit and the backtester.
+
+---
+
+## Local historical backtester (Phase 10A)
+
+Phase 10A maps Dan's saved per-strike exposure CSVs into the **same** structure + chain
+objects the live path uses — **no separate strategy, no broker, no order preview, no live
+API calls**. It is the data-mapping foundation for the Phase 10B replay runner.
+
+```powershell
+# 1) Discover what data exists (SPX/SPY/QQQ, 0DTE + 1DTE), read-only
+python -m scripts.discover_backtest_sources --symbols SPX SPY QQQ --include-1dte
+
+# 2) Map ONE entry snapshot for one symbol/date and read out the structure
+python -m scripts.backtest_dry_run --symbol SPX --profile morning_5k_dynamic_tp75 --latest --entry 11:00
+
+# 3) Map the entry snapshot for every date in a range -> repo-local CSV (one row/date)
+python -m scripts.backtest_scan_dates --symbol SPX --profile eod_5k_dynamic_sl150_no_tp `
+    --start 2026-05-01 --end 2026-06-03 --entry 15:15 --limit 10
+```
+
+- **Multi-symbol:** SPX, SPY, QQQ (each `<SYM>_RAW_*.csv` under `TOS Data/Daily
+  Exposures/<SYM>`); 1DTE is **discovered but deferred** (full 1DTE logic is future).
+  SPY/QQQ wing thresholds default to the SPX 2K/5K/10K and are flagged provisional
+  (symbol-specific calibration is Phase 10B).
+- **Same mapping, no fork:** raw rows go through the SHARED `map_payload_to_snapshot`
+  (2K/5K/10K wings + Phase 9J W2/WDS) and a bid/ask `OptionChainSnapshot`, then the same
+  profile + selector shapes.
+- **Entry windows:** Morning `11:00` (10:55–11:05), EOD `15:00/15:15/15:30` (±15/±30);
+  the closest snapshot in-window wins, ties prefer at-or-after.
+- **Corridor recorded:** every scan row carries `corridor_valid / cw1 / pw1 /
+  corridor_reason / raw_wds / active_wds`, so corridor state is auditable per date.
+- **Outputs are repo-local:** only under `outputs/backtests/latest/` and
+  `outputs/backtests/runs/<stamp>_<label>/` — **never** inside the raw `TOS Data` folders.
+  (`OUTPUT_DIR` / `DATA_DIR` relocate the `outputs` root if set.)
+
+The replay RUNNER (drive these mapped snapshots through `run_scanner.main(argv)` + the
+paper lifecycle, then compare presets vs `wingonomics_daily_stats.csv`) is **Phase 10B**.
 
 ---
 

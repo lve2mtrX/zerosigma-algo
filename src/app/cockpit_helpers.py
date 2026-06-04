@@ -566,19 +566,26 @@ def operator_decision_layer(*, spot: Any, gamma_regime: Any, da_gex: Any,
     near = wings.get("nearest_wing")
     primary_wing = wings.get("primary_wing")
     wds = wds or {}
+    # ACTIVE dominant requires a VALID corridor (CW1 < spot < PW1) — Phase 10A.
     has_dominant = (wds.get("dominant_wing_side") in ("CALL", "PUT")
                     and wds.get("wds_source") == "true")
+    corridor_valid = bool(wds.get("corridor_valid"))
     _has_10k = wds.get("call_w1_strike") is not None or wds.get("put_w1_strike") is not None
+    _has_wing_ctx = _has_10k or wds.get("raw_dominant_side") in ("CALL", "PUT")
 
-    # ── Structure Read (dominant WDS wing FIRST = the primary structure) ──
+    # ── Structure Read (corridor status FIRST — only an active corridor is the
+    # primary structure; a call floor above spot is NEVER an active floor) ──
     parts: list[str] = []
     parts.append(f"Spot {fmt_price(sp)}." if sp is not None else "Spot unavailable.")
+    if _has_wing_ctx:
+        parts.append("Structure status: Active corridor." if corridor_valid
+                     else "Structure status: Inactive — corridor not formed.")
     if has_dominant:
         parts.append(
             f"Dominant wing is {wds['dominant_wing_label']} at "
             f"{fmt_strike(wds['dominant_wing_strike'])} with WDS {wds['dominant_wing_wds_pct']} — "
             f"Tier {wds['dominant_wing_tier']} ({WDS_TIER_MEANING.get(wds['dominant_wing_tier'], '')}).")
-    elif _has_10k and wds.get("wds_reason"):
+    elif _has_wing_ctx and wds.get("wds_reason"):
         parts.append(wds["wds_reason"])
     if gamma.get("available"):
         rel = _spot_vs_level(sp, g_primary)
@@ -592,10 +599,17 @@ def operator_decision_layer(*, spot: Any, gamma_regime: Any, da_gex: Any,
         parts.append("Primary/secondary gamma unavailable from current structure payload.")
     if near:
         _npts = str(near["distance_fmt"]).lstrip("+-")
+        _nd = near.get("distance")
+        _dir = ("below spot" if (_nd is not None and _nd < 0)
+                else "above spot" if (_nd is not None and _nd > 0) else "from spot")
         if has_dominant:
             parts.append(f"Nearest wing is {near['label']} at {near['strike_fmt']}, only "
                          f"{_npts} pts from spot — immediate breach risk but not the "
                          "primary structure.")
+        elif _has_wing_ctx and not corridor_valid:
+            parts.append(f"Nearest local wing is {near['label']} at {near['strike_fmt']}, "
+                         f"{_npts} pts {_dir} — immediate breach risk, but the full 10K wing "
+                         "corridor is not formed.")
         else:
             parts.append(f"Nearest wing: {near['label']} at {near['strike_fmt']} "
                          f"({near['distance_fmt']} pts).")
@@ -626,7 +640,9 @@ def operator_decision_layer(*, spot: Any, gamma_regime: Any, da_gex: Any,
             risk += (f" Primary structure is the dominant {wds['dominant_wing_label']} at "
                      f"{fmt_strike(wds['dominant_wing_strike'])} (WDS {wds['dominant_wing_wds_pct']}, "
                      f"Tier {wds['dominant_wing_tier']}).")
-        elif primary_wing and primary_wing is not near:
+        elif _has_wing_ctx and not corridor_valid:
+            risk += " The 10K wing corridor is not formed, so treat this as local risk only."
+        elif corridor_valid and primary_wing and primary_wing is not near:
             risk += f" Primary wing: {primary_wing['label']} {primary_wing['strike_fmt']}."
     else:
         risk = "Wing structure unavailable — candidate breach risk cannot be assessed."
@@ -1040,11 +1056,55 @@ def compute_wds(w1_strike: Any, w1_volume: Any, w2_strike: Any, w2_volume: Any) 
     return out
 
 
+def wing_corridor_status(spot: Any, cw1: Any, pw1: Any) -> dict[str, Any]:
+    """Phase 10A — Dan's wing CORRIDOR validity. The structure is ONLY active when
+    the call floor (CW1) is below spot AND the put ceiling (PW1) is above spot:
+
+        CW1 < spot < PW1
+
+    A call floor at/above spot is NOT an active floor; a put ceiling at/below spot
+    is NOT an active ceiling — either way the corridor is not formed. Returns
+    {corridor_valid, cw1, pw1, spot, reason, side_read}. Pure; never raises."""
+    sp, c, p = _f(spot), _f(cw1), _f(pw1)
+    out = {"corridor_valid": False, "cw1": c, "pw1": p, "spot": sp,
+           "reason": "", "side_read": ""}
+    if c is None and p is None:
+        out["reason"] = "missing CW1 and PW1 (no 10K wings)"
+        return out
+    if c is None:
+        out["reason"] = "missing CW1 (call floor)"
+        return out
+    if p is None:
+        out["reason"] = "missing PW1 (put ceiling)"
+        return out
+    if sp is None:
+        out["reason"] = "spot unavailable"
+        return out
+    if c >= sp:
+        out["reason"] = "CW1 is not below spot."
+        out["side_read"] = (f"CALL_FLOOR 10K at {fmt_strike(c)} is above spot, "
+                            "so it is not acting as the active floor")
+        return out
+    if p <= sp:
+        out["reason"] = "PW1 is not above spot."
+        out["side_read"] = (f"PUT_CEILING 10K at {fmt_strike(p)} is below spot, "
+                            "so it is not acting as the active ceiling")
+        return out
+    out["corridor_valid"] = True
+    out["reason"] = "spot is between CW1 and PW1"
+    out["side_read"] = "spot is inside the active wing corridor"
+    return out
+
+
 def wing_dominance(exposures: Any, spot: Any = None) -> dict[str, Any]:
-    """Operator Wing-Dominance read: per-side WDS (call/put), the DOMINANT wing
-    (chosen by WDS quality + W1 volume — NOT nearest distance), and the NEAREST
-    wing (immediate breach risk, computed separately). Pure; never invents WDS."""
+    """Operator Wing-Dominance read: per-side raw WDS (call/put), the **corridor
+    status** (CW1 < spot < PW1), the ACTIVE dominant wing (only when the corridor
+    is valid — never calls a call-floor-above-spot an active floor), the raw
+    dominant wing (context, may be inactive), and the NEAREST wing (immediate
+    breach risk). Pure; never invents WDS, never claims active structure when the
+    corridor is not formed."""
     ex = exposures
+    sp = _num_or_none(spot)
     call = compute_wds(getattr(ex, "call_floor_10k", None),
                        getattr(ex, "call_floor_10k_volume", None),
                        getattr(ex, "call_floor_10k_w2_strike", None),
@@ -1054,17 +1114,27 @@ def wing_dominance(exposures: Any, spot: Any = None) -> dict[str, Any]:
                       getattr(ex, "put_ceiling_10k_w2_strike", None),
                       getattr(ex, "put_ceiling_10k_w2_volume", None))
 
+    cw1 = _f(getattr(ex, "call_floor_10k", None))    # primary call wing = call floor
+    pw1 = _f(getattr(ex, "put_ceiling_10k", None))   # primary put wing = put ceiling
+    corridor = wing_corridor_status(sp, cw1, pw1)
+    corridor_valid = corridor["corridor_valid"]
+
     call_true, put_true = call["source"] == "true", put["source"] == "true"
     if call_true and put_true:
-        # higher WDS wins; tie-break by larger W1 volume (more dominant).
-        dom_side = "CALL" if (call["wds"], call["w1_volume"]) >= (put["wds"], put["w1_volume"]) else "PUT"
+        raw_side = "CALL" if (call["wds"], call["w1_volume"]) >= (put["wds"], put["w1_volume"]) else "PUT"
     elif call_true:
-        dom_side = "CALL"
+        raw_side = "CALL"
     elif put_true:
-        dom_side = "PUT"
+        raw_side = "PUT"
     else:
-        dom_side = "unavailable"
-    dom = call if dom_side == "CALL" else put if dom_side == "PUT" else None
+        raw_side = "unavailable"
+    raw_dom = call if raw_side == "CALL" else put if raw_side == "PUT" else None
+    raw_label = ("CALL_FLOOR 10K" if raw_side == "CALL"
+                 else "PUT_CEILING 10K" if raw_side == "PUT" else None)
+
+    # ACTIVE dominant wing exists ONLY inside a valid corridor.
+    wds_active = corridor_valid and raw_dom is not None
+    active_dom = raw_dom if wds_active else None
 
     nearest = wing_stack(ex, spot).get("nearest_wing")
     near_dist = (abs(nearest["distance"]) if nearest and nearest.get("distance") is not None
@@ -1079,28 +1149,51 @@ def wing_dominance(exposures: Any, spot: Any = None) -> dict[str, Any]:
         "put_w2_strike": put["w2_strike"], "put_w2_volume": put["w2_volume"],
         "put_wsr": put["wsr"], "put_wds": put["wds"], "put_wds_pct": put["wds_pct"],
         "put_wds_tier": put["wds_tier"],
-        "dominant_wing_side": dom_side,
+        # ── corridor validity (Phase 10A) ──
+        "corridor_valid": corridor_valid,
+        "corridor_reason": corridor["reason"],
+        "corridor_side_read": corridor["side_read"],
+        "corridor_cw1": cw1, "corridor_pw1": pw1, "corridor_spot": sp,
+        "wds_active": wds_active,
+        # ── raw WDS dominance (context; may be INACTIVE if corridor invalid) ──
+        "raw_wds_source": "true" if raw_dom is not None else "unavailable",
+        "raw_dominant_side": raw_side,
+        "raw_dominant_label": raw_label if raw_dom is not None else None,
+        "raw_dominant_strike": raw_dom["w1_strike"] if raw_dom else None,
+        "raw_dominant_wds": raw_dom["wds"] if raw_dom else None,
+        "raw_dominant_wds_pct": raw_dom["wds_pct"] if raw_dom else "—",
+        "raw_dominant_tier": raw_dom["wds_tier"] if raw_dom else None,
+        # ── ACTIVE dominant wing (only inside a valid corridor) ──
+        "dominant_wing_side": raw_side if wds_active else "unavailable",
         "dominant_wing_label": None, "dominant_wing_strike": None,
         "dominant_wing_volume": None, "dominant_wing_wds": None,
         "dominant_wing_wds_pct": "—", "dominant_wing_tier": None,
         "nearest_wing_label": nearest["label"] if nearest else None,
         "nearest_wing_strike": nearest["strike"] if nearest else None,
         "nearest_wing_distance_points": near_dist,
-        "wds_source": "true" if dom is not None else "unavailable",
+        "wds_source": "true" if active_dom is not None else "unavailable",
         "wds_reason": "",
     }
-    if dom is not None:
-        label = "CALL_FLOOR 10K" if dom_side == "CALL" else "PUT_CEILING 10K"
+    if active_dom is not None:
         out.update(
-            dominant_wing_label=label, dominant_wing_strike=dom["w1_strike"],
-            dominant_wing_volume=dom["w1_volume"], dominant_wing_wds=dom["wds"],
-            dominant_wing_wds_pct=dom["wds_pct"], dominant_wing_tier=dom["wds_tier"],
-            wds_reason=(f"Dominant wing is {label} at {fmt_strike(dom['w1_strike'])} with "
-                        f"WDS {dom['wds_pct']} — {WDS_TIER_MEANING.get(dom['wds_tier'], '')} "
-                        f"(Tier {dom['wds_tier']}). {dom['reason']}"),
+            dominant_wing_label=raw_label, dominant_wing_strike=active_dom["w1_strike"],
+            dominant_wing_volume=active_dom["w1_volume"], dominant_wing_wds=active_dom["wds"],
+            dominant_wing_wds_pct=active_dom["wds_pct"], dominant_wing_tier=active_dom["wds_tier"],
+            wds_reason=(f"Active corridor — dominant wing is {raw_label} at "
+                        f"{fmt_strike(active_dom['w1_strike'])} with WDS {active_dom['wds_pct']} — "
+                        f"{WDS_TIER_MEANING.get(active_dom['wds_tier'], '')} "
+                        f"(Tier {active_dom['wds_tier']}). {active_dom['reason']}"),
         )
-    elif call["w1_strike"] is not None or put["w1_strike"] is not None:
-        out["wds_reason"] = (call["reason"] if call["w1_strike"] is not None else put["reason"])
+    elif raw_dom is not None:
+        # a 10K WDS could be computed, but the corridor is NOT formed → raw only.
+        _detail = corridor["side_read"] or corridor["reason"]
+        out["wds_reason"] = (
+            f"{_detail.rstrip('.')}. Raw WDS for {raw_label} at "
+            f"{fmt_strike(raw_dom['w1_strike'])} is {raw_dom['wds_pct']} "
+            "(raw context only — NOT active structure).")
+    elif cw1 is not None or pw1 is not None:
+        out["wds_reason"] = (call["reason"] if call["w1_strike"] is not None else put["reason"]) \
+            or "10K wing exists, but true WDS is unavailable (adjacent W2 volume missing)."
     else:
         out["wds_reason"] = "No qualifying 10K wing in the current structure payload."
     return out

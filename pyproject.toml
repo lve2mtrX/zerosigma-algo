@@ -49,7 +49,9 @@ target-version = "py311"
 select = ["E", "F", "I", "B", "UP", "N", "RUF"]
 # RUF001/002/003: keep the Greek sigma in the "ZerσSigma" brand name and
 # the "×" multiplication sign in code comments — these are deliberate.
-ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+# N812: short uppercase module aliases (`mappers as M`, `raw_snapshot_loader as L`)
+# are a deliberate, readable convention in the backtesting scripts/tests.
+ignore = ["E501", "N812", "RUF001", "RUF002", "RUF003"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

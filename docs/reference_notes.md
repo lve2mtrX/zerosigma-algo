@@ -1558,3 +1558,81 @@ timestamp → StructureSnapshot via the SHARED `map_payload_to_snapshot` — so 
 derive identically to live. `scripts/backtest_spx_raw.py` prints available dates + a
 sample mapped structure (incl. WDS); validated on real data (145 days; midday 10K wings +
 true WDS confirmed). Loader-only scaffold — no runner, no execution.
+
+## 24. Phase 10A — wing corridor validity + multi-symbol backtesting module (durable)
+
+### Wing corridor validity (the mandatory rule)
+
+A 10K wing structure is **ACTIVE only when `CW1 < Spot < PW1`** — where `CW1 =
+call_floor_10k` (the call floor) and `PW1 = put_ceiling_10k` (the put ceiling). A call
+floor priced ABOVE spot is NOT acting as a floor; a put ceiling BELOW spot is NOT acting as
+a ceiling. This is the durable invariant — encode it once, never describe a wing as active
+unless it holds.
+
+`cockpit_helpers.wing_corridor_status(spot, cw1, pw1)` is the single pure source of truth:
+
+| Input | `corridor_valid` | `reason` |
+|---|---|---|
+| CW1 and PW1 both None | False | `missing CW1 and PW1 (no 10K wings)` |
+| CW1 None | False | `missing CW1 (call floor)` |
+| PW1 None | False | `missing PW1 (put ceiling)` |
+| spot None | False | `spot unavailable` |
+| `CW1 >= spot` | False | `CW1 is not below spot.` (+ side_read: floor is above spot) |
+| `PW1 <= spot` | False | `PW1 is not above spot.` (+ side_read: ceiling is below spot) |
+| `CW1 < spot < PW1` | True | `spot is between CW1 and PW1` |
+
+`wing_dominance` is corridor-gated: `wds_active = corridor_valid and (raw dominant wing
+exists)`. When the corridor is NOT formed it still computes the raw WDS but flags it
+context-only — `raw_wds_source="true"`, `raw_dominant_*` populated, but
+`dominant_wing_side="unavailable"` and `wds_source="unavailable"`. So a corridor-invalid
+structure can report "raw WDS 69% for CALL_FLOOR 10K at 7600 (context only — NOT active
+structure)" and NEVER "dominant CALL_FLOOR 10K". The operator read leads with **"Structure
+status: Active corridor"** / **"Inactive — corridor not formed"**; when invalid the nearest
+2K/5K wing is framed as immediate breach risk, not primary structure. The selector receives
+`corridor_valid` + `wds_active` and grants no positive structure credit when invalid
+(display-only this pass; WDS→selector weighting remains a later item). Backtests record
+`corridor_valid / cw1 / pw1 / corridor_reason / raw_wds / active_wds` per snapshot.
+
+This fixes a real data case: an SPX midday tick where `call_floor_10k 7600 > spot 7553.68`
+previously read "Dominant wing is CALL_FLOOR 10K at 7600 with WDS 69% — Tier 2", which is
+wrong — that floor is above spot. It now reads "Inactive — corridor not formed."
+
+### `src/backtesting/` — multi-symbol mapping (no fork)
+
+Pure package mapping saved `SPX/SPY/QQQ_RAW_*.csv` into the SAME live shapes:
+
+- **`schemas.py`** — `symbol_config(symbol)` → `SymbolConfig(spot_col="<SYM>_Spot",
+  thresholds={2k:2000,5k:5000,10k:10000}, note)`. Thresholds default to 2K/5K/10K for ALL
+  symbols; SPY/QQQ carry an explicit "provisional — needs calibration" note (calibration is
+  Phase 10B). Entry windows: Morning `11:00` → 10:55–11:05; EOD `15:00/15:15/15:30` →
+  ±15/±30. Folder/glob: `<SYM>` + `<SYM>_RAW_*.csv` (0DTE), `<SYM>_1DTE` +
+  `<SYM>_RAW_1DTE_*.csv` (1DTE; the 0DTE glob EXCLUDES the 1DTE files).
+- **`raw_snapshot_loader.py`** — path resolution order `--trading-root` → `ZSA_TRADING_ROOT`
+  env → `~/Dropbox/Trading` (`Path.home()`); NO Windows username is ever hardcoded.
+  `parse_timestamp` accepts ISO-offset (`...T11:05:15-04:00`), spaced (`2026-06-02
+  11:00:00`), and compact (`20260602 110000`); tz-aware values are converted to
+  America/New_York and stored as naive ET wall time. RTH filter = `session=="RTH"` OR the
+  09:30–16:00 ET window.
+- **`mappers.py`** — `select_snapshot(timestamps, target)` picks the closest timestamp
+  inside the entry window by `|delta|`, ties broken **at-or-after** via the key
+  `abs(delta_min)*2 + (1 if delta<0 else 0)` (an at/after snapshot beats an equally-distant
+  earlier one). `map_structure` → `StructureSnapshot` and `map_option_chain` →
+  `OptionChainSnapshot` (CALL+PUT `OptionQuote` from the per-strike bid/ask), both
+  `source="backtest_raw"`/`provider_name="backtest_raw"`, both via the SHARED live mapper.
+  `vertical_credit(chain, short, long, side)` prices mid-to-mid. `corridor_wds(structure)`
+  = `ch.wing_dominance(structure.exposures, structure.spot)`.
+
+### Output discipline (never touch the raw data)
+
+`mappers.output_base()` = `OUTPUT_DIR`/`DATA_DIR` env if set else `<repo>/outputs`, ALWAYS
+suffixed `…/backtests/`. `latest_dir()` → `…/backtests/latest`; `run_dir(stamp, label)` →
+`…/backtests/runs/<stamp>_<label>`. Backtest output goes ONLY there — never into the raw
+`TOS Data/Daily Exposures/<SYM>` folders. (Because output_base honors OUTPUT_DIR/DATA_DIR,
+tests that assert the repo-local default must clear those envs to stay hermetic.)
+
+Three read-only CLIs sit on top: `discover_backtest_sources.py --symbols SPX SPY QQQ
+--include-1dte` (per symbol×DTE folder/count/date-range/cols/usability; 1DTE is
+discovery-only), `backtest_dry_run.py` (one entry snapshot read-out), `backtest_scan_dates.py`
+(one CSV row per entry snapshot over a date range). None run a scanner, hit a broker,
+preview an order, or call a live API. The replay RUNNER (drive these mapped snapshots
+through `run_scanner.main(argv)` + the paper lifecycle) is Phase 10B.

@@ -13,15 +13,17 @@ from src.replay import spx_raw_loader as sl
 
 
 def _write_csv(tmp_path: Path) -> Path:
-    # columns: timestamp, session, SPX_Spot, Strike, CALL Volume, PUT Volume
+    # columns: timestamp, session, SPX_Spot, Strike, CALL Volume, PUT Volume.
+    # Spot 7575 sits INSIDE the corridor (CW1 7560 < 7575 < PW1 7600) so the
+    # dominant wing is active (Phase 10A corridor rule).
     rows = [
         "timestamp,session,SPX_Spot,Strike,CALL Volume,PUT Volume",
-        "2026-06-03 12:00:00,RTH,7557,7550,500,300",
-        "2026-06-03 12:00:00,RTH,7557,7555,8264,400",     # CALL W2 (one below floor)
-        "2026-06-03 12:00:00,RTH,7557,7560,15734,600",    # CALL floor 10K (W1)
-        "2026-06-03 12:00:00,RTH,7557,7595,900,3000",
-        "2026-06-03 12:00:00,RTH,7557,7600,800,12000",    # PUT ceiling 10K (W1)
-        "2026-06-03 12:00:00,RTH,7557,7605,700,4800",     # PUT W2 (one above ceiling)
+        "2026-06-03 12:00:00,RTH,7575,7550,500,300",
+        "2026-06-03 12:00:00,RTH,7575,7555,8264,400",     # CALL W2 (one below floor)
+        "2026-06-03 12:00:00,RTH,7575,7560,15734,600",    # CALL floor 10K (W1)
+        "2026-06-03 12:00:00,RTH,7575,7595,900,3000",
+        "2026-06-03 12:00:00,RTH,7575,7600,800,12000",    # PUT ceiling 10K (W1)
+        "2026-06-03 12:00:00,RTH,7575,7605,700,4800",     # PUT W2 (one above ceiling)
         "2026-06-03 09:25:00,RTH,7610,7600,100,100",      # earlier tick, no 10K
         "2026-06-03 08:00:00,EXT,7610,7600,99999,99999",  # non-RTH → filtered out
     ]
@@ -48,7 +50,7 @@ def test_exposure_series_sorted_and_sided(tmp_path):
     rows = sl.read_rows(p)
     series = sl.exposure_series_at(rows, "2026-06-03 12:00:00")
     assert series["strikes"] == sorted(series["strikes"])      # ascending
-    assert series["spot"] == 7557.0
+    assert series["spot"] == 7575.0
     # side-specific volumes line up with strikes
     i = series["strikes"].index(7560.0)
     assert series["calls"][i] == 15734.0

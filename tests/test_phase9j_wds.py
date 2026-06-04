@@ -94,18 +94,20 @@ def test_exposure_context_w2_backward_compatible():
 # ── wing_dominance: dominant by WDS, nearest is separate breach risk ─────────
 
 def _ex_call_dominant():
-    # CALL 10K WDS 0.70 (Tier 2); PUT 10K WDS ~0.18 (Tier 4). Nearest = a 2K wing.
+    # VALID corridor (CW1 7560 < spot 7573.68 < PW1 7600). CALL 10K WDS 0.70
+    # (Tier 2) cleaner than PUT 10K WDS ~0.18 (Tier 4). Nearest = a 2K wing.
     return ExposureContext(
-        call_floor_2k=7570, call_floor_5k=7560,
-        call_floor_10k=7600, call_floor_10k_volume=12000,
-        call_floor_10k_w2_strike=7595, call_floor_10k_w2_volume=3600,
-        put_ceiling_2k=7650, put_ceiling_5k=7660,
-        put_ceiling_10k=7800, put_ceiling_10k_volume=11000,
-        put_ceiling_10k_w2_strike=7805, put_ceiling_10k_w2_volume=9000)
+        call_floor_2k=7565, call_floor_5k=7562,
+        call_floor_10k=7560, call_floor_10k_volume=12000,
+        call_floor_10k_w2_strike=7555, call_floor_10k_w2_volume=3600,
+        put_ceiling_2k=7600, put_ceiling_5k=7610,
+        put_ceiling_10k=7600, put_ceiling_10k_volume=11000,
+        put_ceiling_10k_w2_strike=7605, put_ceiling_10k_w2_volume=9000)
 
 
 def test_dominant_wing_by_wds_not_distance():
     wd = ch.wing_dominance(_ex_call_dominant(), spot=7573.68)
+    assert wd["corridor_valid"] is True and wd["wds_active"] is True
     assert wd["dominant_wing_side"] == "CALL"
     assert wd["dominant_wing_label"] == "CALL_FLOOR 10K"
     assert wd["dominant_wing_tier"] == 2 and wd["wds_source"] == "true"
@@ -143,7 +145,8 @@ def test_operator_read_distinguishes_dominant_and_nearest():
     dl = ch.operator_decision_layer(spot=spot, gamma_regime="negative", da_gex=-2.0,
                                     gamma=g, wings=ws, wds=wd)
     sr = dl["structure_read"]
-    assert "Dominant wing is CALL_FLOOR 10K at 7600 with WDS 70%" in sr
+    assert "Structure status: Active corridor." in sr
+    assert "Dominant wing is CALL_FLOOR 10K at 7560 with WDS 70%" in sr
     assert "immediate breach risk but not the primary structure" in sr
     # candidate risk names the dominant 10K as primary structure, not the 2K wing
     assert "Primary structure is the dominant CALL_FLOOR 10K" in dl["candidate_risk"]

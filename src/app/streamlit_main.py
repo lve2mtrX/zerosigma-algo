@@ -478,35 +478,48 @@ def render_market() -> None:
     for _i, _e in enumerate(ws["call_floors"]):
         cf[_i].metric(_e["label"], _e["strike_fmt"],
                       f"{_e['distance_fmt']} pts" if _e["available"] else None)
-    # ── Dominant wing (Phase 9J — true WDS, NOT nearest distance) ──
+    # ── Wing corridor + dominant WDS (Phase 9J/10A) ──
+    # Structure is ACTIVE only when CW1 < spot < PW1; a call floor above spot is
+    # NOT an active floor. Raw WDS may exist but is not active out of corridor.
     wd = ch.wing_dominance(ex, spot_val)
-    st.markdown("**Dominant wing (WDS)** — how clean the 10K wing is vs the adjacent strike (W2)")
-    if wd["wds_source"] == "true":
+    st.markdown("**Wing corridor + dominant WDS** — active only when CW1 < spot < PW1")
+    cc = st.columns(4)
+    cc[0].metric("CW1 (call floor 10K)", ch.fmt_strike(wd["corridor_cw1"]))
+    cc[1].metric("Spot", ch.fmt_price(spot_val))
+    cc[2].metric("PW1 (put ceiling 10K)", ch.fmt_strike(wd["corridor_pw1"]))
+    cc[3].metric("Corridor", "✅ Active" if wd["corridor_valid"] else "⛔ Inactive")
+    if wd["wds_active"]:
         _side = wd["dominant_wing_side"]
         _w1v = wd["call_w1_volume"] if _side == "CALL" else wd["put_w1_volume"]
         _w2s = wd["call_w2_strike"] if _side == "CALL" else wd["put_w2_strike"]
         _w2v = wd["call_w2_volume"] if _side == "CALL" else wd["put_w2_volume"]
         _wsr = wd["call_wsr"] if _side == "CALL" else wd["put_wsr"]
         dcols = st.columns(4)
-        dcols[0].metric(f"Dominant {wd['dominant_wing_label']}",
+        dcols[0].metric(f"Active dominant {wd['dominant_wing_label']}",
                         ch.fmt_strike(wd["dominant_wing_strike"]),
                         f"WDS {wd['dominant_wing_wds_pct']} · Tier {wd['dominant_wing_tier']}")
         dcols[1].metric("W1 volume", ch.fmt_count(_w1v))
         dcols[2].metric(f"W2 @ {ch.fmt_strike(_w2s)}", ch.fmt_count(_w2v))
         dcols[3].metric("WSR (W2/W1)", f"{round(_wsr * 100)}%" if _wsr is not None else "—")
         st.caption(wd["wds_reason"])
+    elif wd["raw_wds_source"] == "true":
+        st.caption(f"Raw WDS only (corridor inactive — NOT active structure): "
+                   f"{wd['raw_dominant_label']} {ch.fmt_strike(wd['raw_dominant_strike'])} "
+                   f"WDS {wd['raw_dominant_wds_pct']} Tier {wd['raw_dominant_tier']}.  "
+                   f"{wd['wds_reason']}")
     else:
-        st.caption(f"True WDS unavailable — {wd['wds_reason']}")
+        st.caption(f"WDS unavailable — {wd['wds_reason']}")
     near = ws["nearest_wing"]
     near_txt = (f"{near['label']} {near['strike_fmt']} ({near['distance_fmt']} pts)"
                 if near else "unavailable")
     _dom_txt = (f"{wd['dominant_wing_label']} {ch.fmt_strike(wd['dominant_wing_strike'])} "
                 f"(WDS {wd['dominant_wing_wds_pct']}, Tier {wd['dominant_wing_tier']})"
-                if wd["wds_source"] == "true" else "unavailable")
+                if wd["wds_active"]
+                else "none (corridor inactive)" if wd["raw_wds_source"] == "true" else "unavailable")
     _brd = (f"{wd['nearest_wing_distance_points']:.2f} pts"
             if wd["nearest_wing_distance_points"] is not None else "—")
-    st.caption(f"Dominant wing (WDS): **{_dom_txt}**  ·  Nearest wing (immediate breach risk): "
-               f"**{near_txt}** — {_brd} from spot")
+    st.caption(f"Active dominant wing: **{_dom_txt}**  ·  Nearest local wing (immediate breach "
+               f"risk): **{near_txt}** — {_brd} from spot")
     if not (ws["put_ceilings"][2]["available"] or ws["call_floors"][2]["available"]):
         st.caption("10K wings (and true WDS) require upstream exposure volume ≥ 10,000 "
                    "(subscription series); unavailable in sandbox / mock data.")
