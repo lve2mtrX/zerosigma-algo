@@ -99,6 +99,22 @@ class StrategyProfile:
     max_planned_stop_risk_dollars: float | None = None
     max_theoretical_loss_dollars: float | None = None
 
+    # ── Phase 9G: preset metadata + TP/SL + dynamic-exit config ──
+    # These describe the preset and its INTENDED exit management. TP/SL + dynamic
+    # exits are surfaced in the UI and audit; the paper LIFECYCLE still reads its
+    # PAPER_* env (PaperLifecycleConfig) — per-profile TP/SL execution wiring is
+    # tracked as DEFERRED (see notes.md). Adding these never changes P&L math.
+    preset_kind: str | None = None            # "dynamic" | "control" | "observe"
+    side_policy: str | None = None            # human side policy, e.g. "dynamic both sides"
+    threshold_label: str | None = None        # "2k" | "5k" (account-size bucket)
+    target_time: str | None = None            # ET target fill time, e.g. "15:15"
+    stop_loss_pct: float | None = None        # e.g. 1.50 / 2.00 (× credit)
+    stop_loss_mode: str | None = None         # "fixed_credit_multiple" | "dynamic"
+    take_profit_pct: float | None = None      # null / 0.50 / 0.75 (fraction of credit)
+    take_profit_mode: str | None = None       # "none" | "credit_capture" | "dynamic"
+    dynamic_exit_enabled: bool = False        # default OFF → preserves fixed behavior
+    dynamic_exit_policy: str | None = None    # named policy (configured, not yet active)
+
     # ── runtime provenance (NOT persisted in the YAML body) ──
     profile_path: str | None = field(default=None)
 
@@ -135,6 +151,7 @@ class StrategyProfile:
             "target_dte": self.target_dte,
             "quote_provider": self.quote_provider,
             "daily_selector": self.daily_selector,
+            "preset_kind": self.preset_kind,
             "enabled": self.enabled,
         }
 
@@ -155,6 +172,7 @@ REQUIRED_FIELDS: tuple[str, ...] = (
 _BOOL_FIELDS = (
     "enabled", "strict_target_dte", "allow_call_credit", "allow_put_credit",
     "require_selector_eligible_base", "require_quote_validation", "require_score_edge",
+    "dynamic_exit_enabled",   # Phase 9G
 )
 _INT_FIELDS = ("version", "target_dte", "max_trades_per_day")
 _OPT_FLOAT_FIELDS = (
@@ -162,10 +180,17 @@ _OPT_FLOAT_FIELDS = (
     "max_selector_distance_from_spot", "wing_threshold", "spread_width",
     "no_trade_score_threshold", "min_credit", "max_planned_stop_risk_dollars",
     "max_theoretical_loss_dollars",
+    "stop_loss_pct", "take_profit_pct",   # Phase 9G
 )
 _STR_FIELDS = (
     "profile_id", "profile_name", "strategy_id", "strategy_type", "symbol",
     "risk_profile", "notes",
+)
+# Phase 9G — optional strings (validated as string-or-null only when present).
+_OPT_STR_FIELDS = (
+    "entry_window_start", "entry_window_end",
+    "preset_kind", "side_policy", "threshold_label", "target_time",
+    "stop_loss_mode", "take_profit_mode", "dynamic_exit_policy",
 )
 
 
@@ -194,6 +219,9 @@ def validate_profile_dict(d: Any) -> list[str]:
     for f in _STR_FIELDS:
         if f in d and d[f] is not None and not isinstance(d[f], str):
             errors.append(f"{f} must be a string, got {type(d[f]).__name__}")
+    for f in _OPT_STR_FIELDS:
+        if f in d and d[f] is not None and not isinstance(d[f], str):
+            errors.append(f"{f} must be a string or null, got {type(d[f]).__name__}")
     for f in _OPT_FLOAT_FIELDS:
         if f in d and d[f] is not None and (isinstance(d[f], bool) or not isinstance(d[f], (int, float))):
             errors.append(f"{f} must be a number or null, got {type(d[f]).__name__}")
@@ -327,6 +355,18 @@ def template_profile_dict(profile_id: str) -> dict[str, Any]:
         "min_credit": None,
         "max_planned_stop_risk_dollars": None,
         "max_theoretical_loss_dollars": None,
+        # Phase 9G preset metadata + exit management (display / audit; lifecycle
+        # wiring deferred — see notes.md). Safe defaults preserve fixed behavior.
+        "preset_kind": None,
+        "side_policy": None,
+        "threshold_label": None,
+        "target_time": None,
+        "stop_loss_pct": None,
+        "stop_loss_mode": None,
+        "take_profit_pct": None,
+        "take_profit_mode": None,
+        "dynamic_exit_enabled": False,
+        "dynamic_exit_policy": None,
     }
 
 

@@ -1,0 +1,49 @@
+# ZerσSigma Algo — Phase 9G dynamic preset (PRIMARY). SAFE by default: stub
+# structure + mock quotes, disabled until you opt in, no credentials, no
+# execution. Going live = switch structure_provider->zerosigma_api (exposures)
+# and quote_provider->tastytrade (market data) in the cockpit, then enable.
+# Run:  python -m scripts.run_scanner --profile eod_5k_dynamic_sl150_no_tp --print-candidates
+profile_id: eod_5k_dynamic_sl150_no_tp
+profile_name: EOD 5K Dynamic — SL150 No TP
+version: 1
+enabled: false
+strategy_id: vertical_wing_v1
+strategy_type: vertical_credit_spread
+symbol: SPX
+structure_provider: stub
+quote_provider: mock
+target_dte: 0
+strict_target_dte: false
+daily_selector: balanced_structure_premium_valid
+max_trades_per_day: 1
+allow_call_credit: true
+allow_put_credit: true
+require_selector_eligible_base: true
+require_quote_validation: true
+require_score_edge: false
+min_selector_score: null
+min_selector_credit: null
+min_selector_distance_from_spot: null
+max_selector_distance_from_spot: null
+risk_profile: aggressive_paper_10k
+notes: "PRIMARY dynamic preset. Evaluates BOTH sides each tick and picks the better side by the balanced score. End-of-day entry window (target 15:15 ET), 5K bucket, SL 150% of credit, NO take-profit."
+created_at: "2026-06-02T00:00:00+00:00"
+updated_at: "2026-06-02T00:00:00+00:00"
+wing_threshold: null
+spread_width: null
+entry_window_start: "15:00"
+entry_window_end: "15:30"
+no_trade_score_threshold: null
+min_credit: null
+max_planned_stop_risk_dollars: null
+max_theoretical_loss_dollars: null
+preset_kind: dynamic
+side_policy: dynamic both sides
+threshold_label: 5k
+target_time: "15:15"
+stop_loss_pct: 1.50
+stop_loss_mode: fixed_credit_multiple
+take_profit_pct: null
+take_profit_mode: none
+dynamic_exit_enabled: false
+dynamic_exit_policy: null

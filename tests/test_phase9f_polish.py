@@ -97,7 +97,7 @@ def test_profile_info_fields_shape():
         "daily_selector": "call_credit_only", "structure_provider": "zerosigma_api",
         "quote_provider": "tastytrade", "risk_profile": "aggressive_paper_10k",
         "enabled": True, "profile_id": "demo"})
-    assert info["Side preference"] == "Calls only"
+    assert info["Side policy"] == "call only"   # Phase 9G: richer card key/value
     assert info["Data source"] == "Live"
     assert info["Safety"] == "local paper / no broker execution"
     assert "Designed to test" in info

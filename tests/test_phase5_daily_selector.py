@@ -255,7 +255,9 @@ def test_all_modes_are_known():
     assert set(SELECTOR_MODES) == {
         "score_best_valid", "best_credit_valid", "closest_wing_valid",
         "farthest_wing_valid", "call_credit_only", "put_credit_only",
-        "lowest_breach_risk_valid", "regime_aligned_valid", "no_trade",
+        "lowest_breach_risk_valid", "regime_aligned_valid",
+        "balanced_structure_premium_valid",   # Phase 9G — dynamic both-side selection
+        "no_trade",
     }
 
 

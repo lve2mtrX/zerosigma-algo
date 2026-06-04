@@ -2189,3 +2189,99 @@ Gotcha: manual-desk note "...any broker." tripped the 9C no-exec grep -> "broker
 
 Next: Phase 10 = historical / snapped-data backtest adapter. Phase 11 = Tastytrade
 execution readiness / live, still deferred.
+
+## 2026-06-03 — Phase 9G: dynamic-first preset stack + balanced selector + adjustable TP/SL
+
+Backtest-derived presets, a NEW dynamic both-side selector, and TP/SL + dynamic-exit
+profile metadata. Direct build (no workflow). NO change to scanner/quote/risk/paper
+P&L math; no broker execution. Architecture language kept: ZerσSigma API = exposures/
+structure engine; Tastytrade = market-data/quote engine.
+
+DYNAMIC-FIRST framing (per the user's correction): dynamic side-selection presets are
+the PRIMARY live presets; call-only presets are explicit CONTROLS to measure what
+dynamic selection adds. Dropdown orders dynamic FIRST.
+
+New selector `balanced_structure_premium_valid` (src/selector/daily_selector.py):
+evaluates BOTH CALL_CREDIT + PUT_CREDIT among eligible/quote-valid/risk-valid rows and
+picks the better side on a TRANSPARENT combined score — never highest-premium-only,
+never farthest-distance-only. Components min-max normalized WITHIN the eligible set
+(bounded [0,1], relative tradeoff, deterministic): premium_score, distance_safety_
+score, structure_score, maxvol_gamma_alignment_score, quote_quality_score, existing_
+candidate_score, planned_risk_penalty. total = Σ w·score − w_risk·risk. Default weights
+struct=1.0, prem=0.75, dist=0.75, maxvol=0.75, quote=0.50, score=0.75, risk=0.50 (all
+configurable on SelectorConfig). Two-pass: collect eligible → normalize → stamp
+selector_score_components → rank (total > score > |distance|). Emits a human
+explanation comparing the winner to the best OTHER-side runner-up ("Selected
+CALL_CREDIT because it had stronger structure, acceptable credit, safer distance from
+spot ... than the PUT_CREDIT alternative"), on SelectorResult.selector_explanation +
+the winner row reason. Missing fields → neutral 0.5 (never dominate). ALLOWED_SELECTORS
+= tuple(SELECTOR_MODES) so profiles using it auto-validate.
+
+Profile schema (src/config/strategy_profiles.py): added OPTIONAL, backward-compatible
+fields — preset_kind, side_policy, threshold_label, target_time, stop_loss_pct,
+stop_loss_mode, take_profit_pct, take_profit_mode, dynamic_exit_enabled (bool, default
+False), dynamic_exit_policy. New _OPT_STR_FIELDS validation loop + dynamic_exit_enabled
+in _BOOL_FIELDS + the two pct in _OPT_FLOAT_FIELDS. template_profile_dict + summary_row
+updated. from_dict ignores unknowns + fills defaults → the 4 legacy profiles still
+validate (they just gain default Nones/False; profile_hash shifts but no test pins a
+literal hash).
+
+10 new presets (profiles/*.yaml), all SAFE: stub exposures + mock market data +
+enabled:false (operator switches providers + enables in the cockpit to go live). 0DTE
+SPX, lowercase ids, human display names.
+  Dynamic core (primary): morning_5k_dynamic_tp75 (10:55–11:05, SL150, TP75),
+    morning_2k_dynamic_no_tp (SL150, no TP), eod_5k_dynamic_sl150_no_tp (15:00–15:30
+    target 15:15, SL150, no TP), eod_5k_dynamic_sl200_no_tp (SL200, no TP).
+  Call-only controls: morning_5k_call_tp75_control, morning_2k_call_no_tp_control,
+    eod_5k_call_sl150_no_tp_control, eod_5k_call_tp50_control (SL200, TP50).
+  Regime: regime_put_credit_test (put_credit_only, calls disabled).
+  Observe: observe_dynamic_5k (no_trade selector, both sides for scoring only).
+
+WIRED vs DEFERRED (important — no faked behavior):
+  WIRED now: balanced selector (full + tested); preset metadata; TP/SL + dynamic-exit
+    fields saved + validated + shown in the info card and Simple-Mode controls;
+    dynamic-first dropdown ordering + friendly labels; Tester UX cleanup.
+  DEFERRED: per-profile TP/SL EXECUTION + dynamic exits in the paper lifecycle. The
+    paper runner still reads PaperLifecycleConfig.from_env() (PAPER_* env). The UI is
+    explicit: "Your profile's TP/SL is saved as metadata; the paper lifecycle applies
+    the PAPER_* env values (per-profile wiring deferred)", and dynamic_exit_status()
+    always reads "configured … not active yet" even when the flag is true. paper
+    lifecycle math UNCHANGED.
+
+operator_mode.py (pure) additions: balanced selector style ("Dynamic — balanced both
+sides"); PRESET_DESCRIPTIONS for all 10; PRESET_ORDER + order_profiles_for_dropdown
+(dynamic first) + preset_kind_badge + profile_dropdown_label; side_policy_display;
+take_profit_display / stop_loss_display / dynamic_exit_status / entry_window_display /
+threshold_display; profile_info_fields enriched to the full card (Profile, Profile ID,
+Symbol, Strategy, Entry window, Target time, DTE, Threshold, Side policy, Selector
+mode, TP, SL, Dynamic exits, Risk, Data source, Designed to test, Safety); friendly_
+run_label (e.g. "Vertical Wing · Jun 2 · 10:31 PM") + strategy_display_name +
+short_run_id + running_display. _fmt_started_at parses a GIVEN ISO ts (never reads the
+clock) → deterministic.
+
+profile_builder.py: new "Exit management" section + STOP_LOSS_PRESETS (150/200/custom)
++ TAKE_PROFIT_PRESETS (None/50/75/custom) + PRESET_KIND_OPTIONS; SL/TP pct are BASIC,
+the modes + dynamic-exit + preset metadata are advanced groups ("Advanced exit
+management", "Advanced preset metadata"). Advanced builder form auto-iterates these.
+
+streamlit_main.py: shared _render_profile_info_card (Builder + Tester); Simple-Mode SL
+(150/200/custom radio) + TP (None/50/75/custom radio) controls wired into the saved
+profile; Tester cleanup — "Interval (s)"→"Scan every (seconds)" (+help "How often the
+local paper tester checks for a new signal" + "Scan every: 60 seconds" caption); "Max
+ticks (0=∞)" hidden in Simple, Advanced "Stop after scans"; "Active"→"Running: Yes/No";
+"Run id" metric→"Latest test run" friendly label; PID hidden in Simple; full run id +
+PID + interval moved into an "Advanced details" expander; dropdown uses friendly
+labels + dynamic-first order + a "Selected profile" details card.
+
+Tests: test_phase9g_presets.py (24), test_phase9g_balanced_selector.py (12),
+test_phase9g_operator_ui.py (43). Updated test_phase5_daily_selector::test_all_modes_
+are_known (+balanced) and one 9F info-card assertion (Side preference→Side policy /
+"call only"). Full suite 590 passed, ruff clean.
+
+Gotchas: ruff UP032 (.format → f-string in SelectorConfig.summary) + RUF046 (int(round
+(x)) → round(x)). A cute walrus in a test import block was invalid syntax — rewrote
+the import cleanly.
+
+Next: Phase 10 = historical/snapped-data backtest adapter (will let these presets be
+measured on archived data). Phase 11 = per-profile TP/SL + dynamic-exit lifecycle
+wiring + Tastytrade execution readiness, still deferred.

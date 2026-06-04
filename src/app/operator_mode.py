@@ -10,6 +10,8 @@ Visible branding uses "Zσ Strat Tester" (never "Forward Runner" as a tab name).
 
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from typing import Any
 
 # ── Simple / Advanced mode ───────────────────────────────────────────────────
@@ -78,11 +80,12 @@ def side_preference_to_fields(pref: str) -> dict[str, Any]:
 # ── selector style → daily_selector ──────────────────────────────────────────
 
 SELECTOR_STYLES = (
-    "Best score", "Best credit", "Conservative / lowest breach risk",
-    "No trade / observe only",
+    "Dynamic — balanced both sides", "Best score", "Best credit",
+    "Conservative / lowest breach risk", "No trade / observe only",
 )
 
 _SELECTOR_STYLE_MAP = {
+    "Dynamic — balanced both sides": "balanced_structure_premium_valid",  # Phase 9G
     "Best score": "score_best_valid",
     "Best credit": "best_credit_valid",
     "Conservative / lowest breach risk": "lowest_breach_risk_valid",
@@ -275,6 +278,72 @@ def runner_busy_message(profile_id: Any, status: Any) -> str:
             "Stop it before starting another.")
 
 
+# ── Phase 9G — friendly "Latest test run" label (full run_id kept for Advanced) ─
+
+def strategy_display_name(strategy_id: Any) -> str:
+    """'vertical_wing_v1' → 'Vertical Wing'. Strips a trailing _vN and title-cases."""
+    s = str(strategy_id or "").strip()
+    known = {"vertical_wing_v1": "Vertical Wing"}
+    if s in known:
+        return known[s]
+    s2 = re.sub(r"_v\d+$", "", s)
+    return s2.replace("_", " ").title() if s2 else "Strategy"
+
+
+def short_run_id(run_id: Any) -> str:
+    """Compact a long run_id for display ('abcd1234…  ef90'); full id stays in
+    Advanced details. Short ids are returned unchanged."""
+    rid = str(run_id or "").strip()
+    if len(rid) <= 16:
+        return rid
+    return f"{rid[:8]}…{rid[-4:]}"
+
+
+def _fmt_started_at(started_at: Any) -> str:
+    """Parse an ISO-ish timestamp → 'Jun 2 · 10:31 PM'. Empty/invalid → ''. Pure:
+    parses a GIVEN timestamp, never reads the current clock (deterministic)."""
+    s = str(started_at or "").strip().replace("Z", "+00:00")
+    if not s:
+        return ""
+    dt: datetime | None = None
+    for cand in (s, s[:19]):
+        try:
+            dt = datetime.fromisoformat(cand)
+            break
+        except ValueError:
+            continue
+    if dt is None:
+        return ""
+    hour12 = dt.strftime("%I").lstrip("0") or "12"
+    return f"{dt.strftime('%b')} {dt.day} · {hour12}:{dt.strftime('%M %p')}"
+
+
+def friendly_run_label(*, run_id: Any = None, profile_name: Any = None,
+                       strategy_id: Any = None, started_at: Any = None) -> str:
+    """Operator-friendly 'Latest test run' label, e.g. 'Vertical Wing · Jun 2 ·
+    10:31 PM'. Prefers profile_name, then the strategy display name; appends the
+    parsed start time when available. Falls back to a short run_id, then a clear
+    'No test run yet'. The full run_id is shown separately under Advanced."""
+    parts: list[str] = []
+    name = str(profile_name).strip() if profile_name else ""
+    if not name and strategy_id:
+        name = strategy_display_name(strategy_id)
+    if name:
+        parts.append(name)
+    when = _fmt_started_at(started_at)
+    if when:
+        parts.append(when)
+    if parts:
+        return " · ".join(parts)
+    rid = short_run_id(run_id)
+    return rid or "No test run yet"
+
+
+def running_display(active: Any) -> str:
+    """'Active: True/False' → operator 'Running: Yes/No'."""
+    return "Yes" if bool(active) else "No"
+
+
 # ── Phase 9F — preset strategy descriptions ──────────────────────────────────
 
 PRESET_DESCRIPTIONS: dict[str, str] = {
@@ -290,7 +359,91 @@ PRESET_DESCRIPTIONS: dict[str, str] = {
     "vertical_wing_no_trade": (
         "Observation-only profile. Runs the scan and logs candidate data without "
         "selecting a trade."),
+    # ── Phase 9G dynamic-first preset stack ──
+    "morning_5k_dynamic_tp75": (
+        "PRIMARY dynamic preset. Each tick it evaluates BOTH call-credit and "
+        "put-credit and picks the better side by the balanced structure/premium/"
+        "distance score — never blindly highest premium. Morning entry, 5K bucket, "
+        "SL 150% of credit, take 75% profit."),
+    "morning_2k_dynamic_no_tp": (
+        "PRIMARY dynamic preset. Picks the better side each tick by the balanced "
+        "score. Morning entry, 2K bucket, SL 150% of credit, no take-profit."),
+    "eod_5k_dynamic_sl150_no_tp": (
+        "PRIMARY dynamic preset. Picks the better side by the balanced score at the "
+        "end-of-day window (target 15:15 ET). 5K bucket, SL 150% of credit, no "
+        "take-profit."),
+    "eod_5k_dynamic_sl200_no_tp": (
+        "PRIMARY dynamic preset. Same EOD dynamic logic with a wider SL 200% of "
+        "credit. 5K bucket, no take-profit."),
+    "morning_5k_call_tp75_control": (
+        "CONTROL (call-only). Always selects a CALL_CREDIT — the call-only mirror of "
+        "the morning 5K dynamic preset, so you can measure what dynamic side-"
+        "selection adds. SL 150% of credit, take 75% profit."),
+    "morning_2k_call_no_tp_control": (
+        "CONTROL (call-only). Call-only mirror of the morning 2K dynamic preset. "
+        "SL 150% of credit, no take-profit."),
+    "eod_5k_call_sl150_no_tp_control": (
+        "CONTROL (call-only). Call-only mirror of the EOD 5K SL150 dynamic preset. "
+        "Target 15:15 ET, SL 150% of credit, no take-profit."),
+    "eod_5k_call_tp50_control": (
+        "CONTROL (call-only). EOD call-only with a wider SL 200% of credit and a 50% "
+        "take-profit. Target 15:15 ET, 5K bucket."),
+    "regime_put_credit_test": (
+        "REGIME test (put-only). Calls disabled, so it only ever selects a "
+        "PUT_CREDIT — for studying put-regime behavior next to the dynamic and "
+        "call-only presets. SL 150% of credit."),
+    "observe_dynamic_5k": (
+        "OBSERVE (no-trade). Both sides considered for scoring, but the no_trade "
+        "selector never opens a paper position — watch the balanced score with zero "
+        "paper risk."),
 }
+
+# ── Phase 9G — preset ordering + kind badges (dynamic FIRST in the dropdown) ──
+
+# The canonical dropdown order: dynamic core (primary) first, then call-only
+# controls, then the put-regime test, then observe; any other/legacy profiles
+# follow, alphabetically. IDs not listed here keep a stable trailing order.
+PRESET_ORDER: tuple[str, ...] = (
+    "morning_5k_dynamic_tp75",
+    "morning_2k_dynamic_no_tp",
+    "eod_5k_dynamic_sl150_no_tp",
+    "eod_5k_dynamic_sl200_no_tp",
+    "morning_5k_call_tp75_control",
+    "morning_2k_call_no_tp_control",
+    "eod_5k_call_sl150_no_tp_control",
+    "eod_5k_call_tp50_control",
+    "regime_put_credit_test",
+    "observe_dynamic_5k",
+)
+
+PRESET_KIND_BADGES = {
+    "dynamic": "🟢 Dynamic",
+    "control": "🟡 Control",
+    "regime": "🔵 Regime",
+    "observe": "⚪ Observe",
+}
+
+
+def preset_kind_badge(preset_kind: Any) -> str:
+    """Short badge for a preset kind (dynamic/control/regime/observe)."""
+    return PRESET_KIND_BADGES.get(str(preset_kind or "").lower(), "")
+
+
+def order_profiles_for_dropdown(profile_ids: list[str]) -> list[str]:
+    """Sort profile ids so the dynamic presets come FIRST (in PRESET_ORDER), then
+    any remaining ids alphabetically. Deterministic + stable."""
+    ranked = [p for p in PRESET_ORDER if p in profile_ids]
+    rest = sorted(p for p in profile_ids if p not in PRESET_ORDER)
+    return ranked + rest
+
+
+def profile_dropdown_label(profile_id: str, profile_name: Any = None,
+                           preset_kind: Any = None) -> str:
+    """Friendly dropdown label: '🟢 Dynamic · Morning 5K Dynamic — TP75'. Falls
+    back to the profile_name or the id when metadata is missing."""
+    name = str(profile_name).strip() if profile_name else str(profile_id)
+    badge = preset_kind_badge(preset_kind)
+    return f"{badge} · {name}" if badge else name
 
 
 def profile_description(profile_id: str, fields: dict[str, Any] | None = None) -> str:
@@ -314,28 +467,108 @@ def profile_description(profile_id: str, fields: dict[str, Any] | None = None) -
             f"{dte}, {side}, selector `{sel}`.")
 
 
-def profile_info_fields(fields: dict[str, Any]) -> dict[str, Any]:
-    """Pure: the info-card field set for a profile (for the Zσ Strat Builder)."""
+def side_policy_display(fields: dict[str, Any]) -> str:
+    """Human side policy: prefer the profile's explicit `side_policy`, else derive
+    from the allow_* flags + selector (CALL only / PUT only / dynamic both sides)."""
     f = fields or {}
+    explicit = f.get("side_policy")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
     if f.get("daily_selector") == "no_trade":
-        side = "Observe only"
-    elif f.get("allow_call_credit") and not f.get("allow_put_credit"):
-        side = "Calls only"
-    elif f.get("allow_put_credit") and not f.get("allow_call_credit"):
-        side = "Puts only"
-    else:
-        side = "Both sides"
+        return "observe only (no trade)"
+    if f.get("allow_call_credit") and not f.get("allow_put_credit"):
+        return "call only"
+    if f.get("allow_put_credit") and not f.get("allow_call_credit"):
+        return "put only"
+    return "dynamic both sides"
+
+
+def _pct_of_credit(pct: Any) -> str | None:
+    try:
+        return f"{round(float(pct) * 100)}% of credit"
+    except (TypeError, ValueError):
+        return None
+
+
+def take_profit_display(fields: dict[str, Any]) -> str:
+    """TP as friendly copy: 'None' or '75% of credit (credit capture)'."""
+    f = fields or {}
+    body = _pct_of_credit(f.get("take_profit_pct"))
+    if body is None:
+        return "None"
+    mode = str(f.get("take_profit_mode") or "").replace("_", " ").strip()
+    return f"{body} ({mode})" if mode and mode != "none" else body
+
+
+def stop_loss_display(fields: dict[str, Any]) -> str:
+    """SL as friendly copy: '150% of credit (fixed credit multiple)' or '—'."""
+    f = fields or {}
+    body = _pct_of_credit(f.get("stop_loss_pct"))
+    if body is None:
+        return "—"
+    mode = str(f.get("stop_loss_mode") or "").replace("_", " ").strip()
+    return f"{body} ({mode})" if mode else body
+
+
+def dynamic_exit_status(fields: dict[str, Any]) -> str:
+    """Honest status — lifecycle wiring is DEFERRED, so even 'enabled' reads as
+    configured-but-not-active so the operator is never misled."""
+    f = fields or {}
+    policy = str(f.get("dynamic_exit_policy") or "").strip()
+    if f.get("dynamic_exit_enabled"):
+        tail = f": {policy}" if policy else ""
+        return f"Configured{tail} — not active yet (fixed TP/SL still applies)"
+    if policy:
+        return f"Configured: {policy} — not active yet"
+    return "Off — fixed TP/SL exits"
+
+
+def entry_window_display(fields: dict[str, Any]) -> str:
+    """'10:55–11:05 ET' from start/end, or a single bound, or '—'."""
+    f = fields or {}
+    start = str(f.get("entry_window_start") or "").strip()
+    end = str(f.get("entry_window_end") or "").strip()
+    if start and end:
+        return f"{start}–{end} ET"
+    if start or end:
+        return f"{start or end} ET"
+    return "—"
+
+
+def threshold_display(fields: dict[str, Any]) -> str:
+    """Account-size bucket label, e.g. '5K' / '2K' / '—'."""
+    f = fields or {}
+    label = str(f.get("threshold_label") or "").strip()
+    return label.upper() if label else "—"
+
+
+def profile_info_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Pure: the full info-card field set for a profile (Builder + Tester). Phase
+    9G enriches it with entry window, target time, threshold, side policy, TP/SL,
+    and dynamic-exit status while staying backward-compatible (Data source +
+    Safety + Designed to test keys unchanged)."""
+    f = fields or {}
+    selector = f.get("daily_selector") or "score_best_valid"
+    target_time = str(f.get("target_time") or "").strip()
     return {
         "Profile": f.get("profile_name") or f.get("profile_id") or "—",
+        "Profile ID": f.get("profile_id") or "—",
         "Symbol": f.get("symbol") or "—",
         "Strategy": f.get("strategy_type") or f.get("strategy_id") or "—",
+        "Entry window": entry_window_display(f),
+        "Target time": f"{target_time} ET" if target_time else "—",
         "Target DTE": f.get("target_dte"),
-        "Side preference": side,
-        "Selector style": selector_to_style(f.get("daily_selector") or "score_best_valid"),
+        "Threshold": threshold_display(f),
+        "Side policy": side_policy_display(f),
+        "Selector style": selector_to_style(selector),
+        "Selector mode": selector,
+        "Take profit (TP)": take_profit_display(f),
+        "Stop loss (SL)": stop_loss_display(f),
+        "Dynamic exits": dynamic_exit_status(f),
+        "Risk profile": f.get("risk_profile") or "—",
         "Data source": providers_to_data_source(
             f.get("structure_provider") or "stub",
             f.get("quote_provider") or "mock").split(":")[0],
-        "Risk profile": f.get("risk_profile") or "—",
         "Enabled": bool(f.get("enabled")),
         "Designed to test": profile_description(str(f.get("profile_id") or ""), f),
         "Safety": "local paper / no broker execution",

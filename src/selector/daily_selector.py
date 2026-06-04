@@ -42,6 +42,7 @@ SELECTOR_MODES: tuple[str, ...] = (
     "put_credit_only",
     "lowest_breach_risk_valid",
     "regime_aligned_valid",
+    "balanced_structure_premium_valid",   # Phase 9G — dynamic both-side selection
     "no_trade",
 )
 
@@ -74,6 +75,16 @@ class SelectorConfig:
     lowest_breach_risk_distance_weight: float = 1.0
     lowest_breach_risk_credit_weight: float = 0.25
     lowest_breach_risk_risk_weight: float = 1.0
+    # Phase 9G — balanced_structure_premium_valid weights (premium vs distance vs
+    # structure safety; never "highest premium wins"). Configurable; conservative
+    # defaults below.
+    balanced_structure_weight: float = 1.0
+    balanced_premium_weight: float = 0.75
+    balanced_distance_weight: float = 0.75
+    balanced_maxvol_weight: float = 0.75
+    balanced_quote_weight: float = 0.50
+    balanced_score_weight: float = 0.75
+    balanced_risk_penalty_weight: float = 0.50
 
     def summary(self) -> str:
         """Compact, secrets-free one-line summary for the CSV / audit print."""
@@ -94,6 +105,16 @@ class SelectorConfig:
             parts.append(f"min_dist={self.min_selector_distance_from_spot}")
         if self.max_selector_distance_from_spot is not None:
             parts.append(f"max_dist={self.max_selector_distance_from_spot}")
+        if self.mode == "balanced_structure_premium_valid":
+            parts.append(
+                f"weights[struct={self.balanced_structure_weight},"
+                f"prem={self.balanced_premium_weight},"
+                f"dist={self.balanced_distance_weight},"
+                f"maxvol={self.balanced_maxvol_weight},"
+                f"quote={self.balanced_quote_weight},"
+                f"score={self.balanced_score_weight},"
+                f"risk={self.balanced_risk_penalty_weight}]"
+            )
         return " ".join(parts)
 
 
@@ -122,6 +143,7 @@ class SelectorResult:
     selector_rejection_reason: str | None = None
     selector_no_trade_reason: str | None = None
     selector_conflict_detected: bool = False
+    selector_explanation: str | None = None   # Phase 9G — why this side/trade won
     per_row: list[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -282,6 +304,121 @@ def _breach_risk_components(row: dict, cfg: SelectorConfig) -> dict[str, Any]:
     }
 
 
+# ── balanced_structure_premium_valid (Phase 9G) ─────────────────────────────
+
+_QUOTE_BUCKET_SCORE = {
+    "good": 1.0, "acceptable": 0.7, "poor": 0.4, "wide": 0.2,
+    "invalid": 0.0, "unknown": 0.5,
+}
+
+
+def _quote_raw(row: dict) -> float | None:
+    """Quote-quality 0..1 — prefer bid_ask_quality, else map the bucket."""
+    baq = _num(row, "bid_ask_quality")
+    if baq is not None:
+        return baq
+    bucket = row.get("quote_quality_bucket")
+    if isinstance(bucket, str):
+        return _QUOTE_BUCKET_SCORE.get(bucket.lower())
+    return None
+
+
+def _balanced_raw(row: dict) -> dict[str, float | None]:
+    """Raw (un-normalized) component inputs. Missing fields → None (neutral)."""
+    dist = _num(row, "distance_from_spot")
+    structure = _num(row, "anchor_volume")
+    if structure is None:
+        structure = _num(row, "structure_strength")
+    maxvol = _num(row, "maxvol_alignment")
+    if maxvol is None:
+        maxvol = _num(row, "score_maxvol_alignment")
+    return {
+        "premium": _num(row, "credit"),
+        "distance": abs(dist) if dist is not None else None,
+        "structure": structure,
+        "maxvol": maxvol,
+        "quote": _quote_raw(row),
+        "score": _num(row, "score"),
+        "risk": _num(row, "planned_stop_risk_pct"),
+    }
+
+
+def _norm(values: list[float | None]) -> list[float]:
+    """Min-max normalize to [0,1] across the candidate set. None / all-equal →
+    neutral 0.5 (so a missing or flat component never dominates)."""
+    present = [v for v in values if v is not None]
+    if not present:
+        return [0.5] * len(values)
+    lo, hi = min(present), max(present)
+    if hi <= lo:
+        return [0.5] * len(values)
+    return [((v - lo) / (hi - lo)) if v is not None else 0.5 for v in values]
+
+
+def _balanced_components(rows: list[dict], cfg: SelectorConfig) -> list[dict[str, Any]]:
+    """Transparent balanced score per row — normalized WITHIN the eligible set so
+    the better side wins on the premium/distance/structure tradeoff (NEVER
+    highest-premium-only, NEVER farthest-distance-only)."""
+    raws = [_balanced_raw(r) for r in rows]
+    keys = ("premium", "distance", "structure", "maxvol", "quote", "score", "risk")
+    norms = {k: _norm([raw[k] for raw in raws]) for k in keys}
+    weights = {
+        "structure": cfg.balanced_structure_weight,
+        "premium": cfg.balanced_premium_weight,
+        "distance": cfg.balanced_distance_weight,
+        "maxvol": cfg.balanced_maxvol_weight,
+        "quote": cfg.balanced_quote_weight,
+        "score": cfg.balanced_score_weight,
+        "risk": cfg.balanced_risk_penalty_weight,
+    }
+    out: list[dict[str, Any]] = []
+    for i, raw in enumerate(raws):
+        premium, distance = norms["premium"][i], norms["distance"][i]
+        structure, maxvol = norms["structure"][i], norms["maxvol"][i]
+        quote, score, risk = norms["quote"][i], norms["score"][i], norms["risk"][i]
+        total = (
+            weights["structure"] * structure + weights["premium"] * premium
+            + weights["distance"] * distance + weights["maxvol"] * maxvol
+            + weights["quote"] * quote + weights["score"] * score
+            - weights["risk"] * risk
+        )
+        out.append({
+            "premium_score": round(premium, 4),
+            "distance_safety_score": round(distance, 4),
+            "structure_score": round(structure, 4),
+            "maxvol_gamma_alignment_score": round(maxvol, 4),
+            "quote_quality_score": round(quote, 4),
+            "existing_candidate_score": round(score, 4),
+            "planned_risk_penalty": round(risk, 4),
+            "total": round(total, 4),
+            "partial": any(raw[k] is None for k in keys),
+            "weights": dict(weights),
+        })
+    return out
+
+
+def _balanced_explanation(win_row: dict, win_comps: dict, other_row: dict | None,
+                          other_comps: dict | None) -> str:
+    """Human 'why this side won' for the balanced selector."""
+    wside = win_row.get("side") or "trade"
+    if other_row is None or other_comps is None:
+        return (f"Selected {wside}: only eligible side this tick "
+                f"(balanced score {win_comps['total']}).")
+    oside = other_row.get("side") or "the other side"
+    reasons = []
+    if win_comps["structure_score"] > other_comps["structure_score"]:
+        reasons.append("stronger structure")
+    reasons.append("better/comparable credit"
+                   if win_comps["premium_score"] >= other_comps["premium_score"]
+                   else "acceptable credit")
+    if win_comps["distance_safety_score"] >= other_comps["distance_safety_score"]:
+        reasons.append("safer distance from spot")
+    if win_comps["planned_risk_penalty"] <= other_comps["planned_risk_penalty"]:
+        reasons.append("lower planned risk")
+    return (f"Selected {wside} because it had {', '.join(reasons)} than the {oside} "
+            f"alternative (balanced score {win_comps['total']} vs {other_comps['total']}).")
+
+
 # ── main entry point ────────────────────────────────────────────────────────
 
 def select_daily_trade(
@@ -371,6 +508,8 @@ def select_daily_trade(
             comps = _breach_risk_components(row, cfg)
             meta["selector_score"] = comps["total"]
             meta["selector_score_components"] = comps
+        elif mode == "balanced_structure_premium_valid":
+            pass  # deferred — balanced score is normalized across the eligible set below
         else:
             key, tb = _ranking(row, mode, cfg)
             meta["selector_score"] = round(key[0], 6)
@@ -385,6 +524,17 @@ def select_daily_trade(
         )
         return _no_trade(reason)
 
+    # 1b) Balanced selector — normalize components across the eligible SET, then
+    # stamp each eligible row's transparent score (deferred from the loop above).
+    if mode == "balanced_structure_premium_valid":
+        elig_rows = [rows[i] for i in eligible]
+        comps_list = _balanced_components(elig_rows, cfg)
+        for j, i in enumerate(eligible):
+            meta = result.per_row[i]
+            meta["selector_score"] = comps_list[j]["total"]
+            meta["selector_score_components"] = comps_list[j]
+            meta["selector_tiebreaker"] = "balanced_total>score>distance"
+
     # 2) Rank eligible candidates by the mode.
     if mode == "lowest_breach_risk_valid":
         def sort_key(i: int) -> tuple[float, ...]:
@@ -397,6 +547,15 @@ def select_daily_trade(
             )
         for i in eligible:
             result.per_row[i]["selector_tiebreaker"] = "breach_total>score>distance"
+    elif mode == "balanced_structure_premium_valid":
+        def sort_key(i: int) -> tuple[float, ...]:
+            comps = result.per_row[i]["selector_score_components"]
+            # tiebreak: balanced total, then existing score, then |distance|
+            return (
+                comps["total"],
+                _num(rows[i], "score") or 0.0,
+                abs(_num(rows[i], "distance_from_spot") or 0.0),
+            )
     else:
         def sort_key(i: int) -> tuple[float, ...]:
             return _ranking(rows[i], mode, cfg)[0]
@@ -428,6 +587,25 @@ def select_daily_trade(
         if meta.get("selector_tiebreaker"):
             base += f";tiebreak={meta['selector_tiebreaker']}"
         meta["selector_reason"] = base
+
+    # 5) Balanced selector — explain WHY the winning side beat the other side
+    # (winner vs the best eligible runner-up on the OPPOSITE side).
+    if mode == "balanced_structure_premium_valid" and winners:
+        wi = winners[0]
+        wrow, wcomps = rows[wi], result.per_row[wi]["selector_score_components"]
+        wside = wrow.get("side")
+        other_i = next(
+            (i for i in ranked if i != wi and rows[i].get("side") != wside), None
+        )
+        ocomps = (
+            result.per_row[other_i]["selector_score_components"]
+            if other_i is not None else None
+        )
+        orow = rows[other_i] if other_i is not None else None
+        expl = _balanced_explanation(wrow, wcomps, orow, ocomps)
+        result.selector_explanation = expl
+        result.per_row[wi]["selector_reason"] += f"; {expl}"
+
     result.selected_indices = list(winners)
     return result
 

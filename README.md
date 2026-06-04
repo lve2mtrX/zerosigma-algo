@@ -850,6 +850,7 @@ imports no strategy package).
 | `put_credit_only` | best eligible PUT_CREDIT (else NO_TRADE) | score → credit |
 | `lowest_breach_risk_valid` | transparent composite: farther + lower `planned_stop_risk_pct` + acceptable credit (emits `selector_score_components`) | — |
 | `regime_aligned_valid` | best eligible when `gamma_regime` ∈ {positive, neutral}; `negative` → blocked; missing → `insufficient_regime_data` | score → credit |
+| `balanced_structure_premium_valid` *(Phase 9G — dynamic both sides)* | evaluates BOTH CALL_CREDIT + PUT_CREDIT and picks the better side on a transparent combined score (premium + distance safety + structure + MaxVol/gamma + quote + existing score − planned-risk penalty), min-max normalized WITHIN the eligible set — never highest-premium-only, never farthest-distance-only; emits `selector_score_components` + a human `selector_explanation` | combined total → score → distance |
 | `no_trade` | nothing (always NO_TRADE) | — |
 
 **Eligibility** (all `*_valid` + side-only modes): never selects a `rejected`
@@ -1667,6 +1668,53 @@ zerosigma-algo/
 │   └── daily/           #   end-of-day summaries
 └── tests/               # pytest suite
 ```
+
+---
+
+## Strategy presets + adjustable TP/SL (Phase 9G)
+
+The cockpit ships a **dynamic-first** preset stack. **Dynamic side-selection
+presets are the PRIMARY live presets**; the call-only presets are explicit
+**controls** so you can measure what dynamic side-selection adds.
+
+| Preset | Kind | Side policy | When | TP / SL |
+|---|---|---|---|---|
+| `morning_5k_dynamic_tp75` | dynamic | both sides (balanced) | 10:55–11:05 ET | TP 75% · SL 150% |
+| `morning_2k_dynamic_no_tp` | dynamic | both sides (balanced) | morning, 2K | no TP · SL 150% |
+| `eod_5k_dynamic_sl150_no_tp` | dynamic | both sides (balanced) | target 15:15 ET | no TP · SL 150% |
+| `eod_5k_dynamic_sl200_no_tp` | dynamic | both sides (balanced) | target 15:15 ET | no TP · SL 200% |
+| `morning_5k_call_tp75_control` | control | call only | morning, 5K | TP 75% · SL 150% |
+| `morning_2k_call_no_tp_control` | control | call only | morning, 2K | no TP · SL 150% |
+| `eod_5k_call_sl150_no_tp_control` | control | call only | target 15:15 ET | no TP · SL 150% |
+| `eod_5k_call_tp50_control` | control | call only | target 15:15 ET | TP 50% · SL 200% |
+| `regime_put_credit_test` | regime | put only | morning, 5K | no TP · SL 150% |
+| `observe_dynamic_5k` | observe | both sides, never trades | morning, 5K | — |
+
+All ship **SAFE**: stub exposures + mock market data + `enabled: false`. To go
+live, switch the **Exposure source → ZerσSigma** and **Market data source →
+Tasty** in the cockpit and enable the profile.
+
+**Dynamic side selection** uses the `balanced_structure_premium_valid` selector,
+which scores BOTH the call-credit and put-credit candidate each tick on a
+transparent, normalized blend of *premium, distance safety, structure, MaxVol/
+gamma alignment, quote quality, existing score* minus a *planned-risk penalty* —
+then picks the better side and explains why (e.g. *"Selected CALL_CREDIT because
+it had stronger structure, acceptable credit, safer distance from spot than the
+PUT_CREDIT alternative"*). It is never "highest premium wins" or "farthest
+distance wins", and it is deterministic.
+
+**Adjustable TP/SL** lives on the profile (`stop_loss_pct` / `take_profit_pct`
++ modes) and is editable from the Builder Simple Mode (SL 150/200/custom, TP
+None/50/75/custom). **Wiring status:** TP/SL and dynamic-exit settings are saved
+as profile metadata and shown in the info card, but the **paper lifecycle still
+applies the `PAPER_*` env values** at test time — per-profile TP/SL execution and
+dynamic exits are **configured but not active yet (deferred)**. No paper P&L math
+changed.
+
+**Zσ Strat Tester** wording was cleaned up: **Scan every** (how often the local
+paper tester checks for a new signal), **Stop after scans** (Advanced only),
+**Running: Yes/No**, and a friendly **Latest test run** label (e.g. *"Vertical
+Wing · Jun 2 · 10:31 PM"*) — the full run id + PID live under *Advanced details*.
 
 ---
 

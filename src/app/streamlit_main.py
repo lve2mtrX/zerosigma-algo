@@ -670,6 +670,27 @@ def render_candidates() -> None:
     st.write(decision.explanation)
 
 
+def _render_profile_info_card(info: dict) -> None:
+    """Shared profile info card (Builder + Tester). Phase 9G — shows side policy,
+    entry window, target time, threshold, TP/SL, selector mode + dynamic-exit
+    status alongside the basics. Reads the pure ``om.profile_info_fields`` map."""
+    grid = (
+        "Profile", "Profile ID", "Symbol", "Strategy",
+        "Entry window", "Target time", "Target DTE", "Threshold",
+        "Side policy", "Selector mode", "Take profit (TP)", "Stop loss (SL)",
+        "Risk profile", "Data source",
+    )
+    cols = st.columns(4)
+    for _i, _k in enumerate(grid):
+        cols[_i % 4].metric(_k, ui.dash(info.get(_k)))
+    st.caption(f"**Dynamic exits:** {info.get('Dynamic exits')}")
+    st.caption(f"**Designed to test:** {info.get('Designed to test')}")
+    st.caption(
+        f"Enabled: `{info.get('Enabled')}`  ·  Safety: {info.get('Safety')}  ·  "
+        "TP/SL shown is the preset's intent; the paper lifecycle currently applies "
+        "the PAPER_* env values (per-profile wiring deferred).")
+
+
 def render_strategy_builder() -> None:
     st.subheader("🧱 Zσ Strat Builder")
     st.info(
@@ -689,14 +710,7 @@ def render_strategy_builder() -> None:
     if valid_ids and sel_id in valid_ids:
         sel_dict, _serrs = pb.load_dict_for_edit(sel_id)
     if sel_dict:
-        info = om.profile_info_fields(sel_dict)
-        ic = st.columns(4)
-        for _i, _k in enumerate(("Profile", "Symbol", "Strategy", "Target DTE",
-                                 "Side preference", "Selector style", "Data source",
-                                 "Risk profile")):
-            ic[_i % 4].metric(_k, ui.dash(info[_k]))
-        st.caption(f"**Designed to test:** {info['Designed to test']}")
-        st.caption(f"Enabled: `{info['Enabled']}`  ·  Safety: {info['Safety']}")
+        _render_profile_info_card(om.profile_info_fields(sel_dict))
     with st.expander("All profiles (table)", expanded=False):
         if summaries:
             st.dataframe(
@@ -806,13 +820,34 @@ def render_strategy_builder() -> None:
                 "Risk profile", options=profile_names,
                 index=(profile_names.index(base.get("risk_profile"))
                        if base.get("risk_profile") in profile_names else 0))
+            # ── Phase 9G — Simple-Mode exit management (SL 150/200/custom, TP None/50/75/custom) ──
+            st.markdown("_Exit management_")
+            r5 = st.columns(2)
+            _sl_labels = [lbl for lbl, _ in pb.STOP_LOSS_PRESETS]
+            _cur_sl = base.get("stop_loss_pct")
+            _sl_idx = 0 if _cur_sl in (None, 1.5) else (1 if _cur_sl == 2.0 else 2)
+            s_sl_choice = r5[0].radio("Stop loss", _sl_labels, index=_sl_idx,
+                                      help="Stop at this multiple of the credit. 150% / 200% / custom.")
+            s_sl_custom = r5[0].number_input(
+                "Custom SL (× credit)", value=float(_cur_sl) if _cur_sl else 1.50,
+                step=0.25, min_value=0.0, help="Used only when Stop loss = Custom.")
+            _tp_labels = [lbl for lbl, _ in pb.TAKE_PROFIT_PRESETS]
+            _cur_tp = base.get("take_profit_pct")
+            _tp_idx = (0 if _cur_tp is None else 1 if _cur_tp == 0.5
+                       else 2 if _cur_tp == 0.75 else 3)
+            s_tp_choice = r5[1].radio("Take profit", _tp_labels, index=_tp_idx,
+                                      help="Take profit at this fraction of credit, or None.")
+            s_tp_custom = r5[1].number_input(
+                "Custom TP (fraction of credit)", value=float(_cur_tp) if _cur_tp else 0.50,
+                step=0.05, min_value=0.0, max_value=1.0, help="Used only when Take profit = Custom.")
             s_validate = st.form_submit_button("Validate strategy")
         try:
             from src.paper.models import PaperLifecycleConfig
             _plc = PaperLifecycleConfig.from_env()
             st.caption(
-                "Paper test defaults (from PAPER_* env, applied at test time — not saved in "
-                f"the profile): contracts={_plc.contracts} · TP={_plc.take_profit_pct} · "
+                "Your profile's TP/SL is saved as metadata. The paper lifecycle still "
+                "applies the PAPER_* env values at test time (per-profile TP/SL wiring is "
+                f"deferred): contracts={_plc.contracts} · TP={_plc.take_profit_pct} · "
                 f"SL={_plc.stop_loss_pct} · EOD={_plc.eod_exit_time if _plc.exit_on_eod else 'off'}")
         except Exception:
             pass
@@ -820,10 +855,18 @@ def render_strategy_builder() -> None:
             _pid = _cur_id if _cur_id not in ("", "new_profile") else (
                 "".join((c if c.isalnum() else "_") for c in s_name.lower()).strip("_")
                 or "my_strategy")
+            _sl_map = dict(pb.STOP_LOSS_PRESETS)
+            _tp_map = dict(pb.TAKE_PROFIT_PRESETS)
+            _sl_pct = _sl_map.get(s_sl_choice) if s_sl_choice != "Custom" else float(s_sl_custom)
+            _tp_pct = (float(s_tp_custom) if s_tp_choice == "Custom"
+                       else _tp_map.get(s_tp_choice))
             vals = {
                 "profile_id": _pid, "profile_name": s_name,
                 "symbol": om.normalize_symbol(s_symbol), "strategy_type": s_type,
                 "target_dte": int(s_dte), "risk_profile": s_risk, "enabled": True,
+                "stop_loss_pct": _sl_pct, "stop_loss_mode": "fixed_credit_multiple",
+                "take_profit_pct": _tp_pct,
+                "take_profit_mode": "none" if _tp_pct is None else "credit_capture",
                 **om.build_simple_fields(side_preference=s_side, selector_style=s_style),
                 **om.data_source_to_providers(s_ds),
             }
@@ -902,19 +945,33 @@ def render_forward_runner() -> None:
         (_tester_prof.structure_provider if _tester_prof else chosen_structure),
         (_tester_prof.quote_provider if _tester_prof else chosen_quote)).split(":")[0])
 
+    _hb = forward_review.load_latest_heartbeat() or {}
     view = control_ui.status_view(control_ui.get_status())
-    mcols = st.columns(4)
-    mcols[0].metric("Runner", view["status"])
-    mcols[1].metric("Active", str(view["active"]))
-    mcols[2].metric("PID", str(view["pid"] or "—"))
-    mcols[3].metric("Run id", view["run_id"] or "—")
+    # Friendly "Latest test run" label; the full run_id lives in Advanced details.
+    _latest_run_label = om.friendly_run_label(
+        run_id=view["run_id"] or _hb.get("run_id"),
+        profile_name=(_tester_prof.profile_name if _tester_prof else None),
+        strategy_id=(_tester_prof.strategy_id if _tester_prof else None),
+        started_at=_hb.get("started_at") or _hb.get("latest_tick_time"))
+    if simple_mode:
+        # Simple Mode hides PID + raw run_id; shows Running: Yes/No + friendly label.
+        mcols = st.columns(3)
+        mcols[0].metric("Runner", view["status"])
+        mcols[1].metric("Running", om.running_display(view["active"]))
+        mcols[2].metric("Latest test run", _latest_run_label)
+    else:
+        mcols = st.columns(4)
+        mcols[0].metric("Runner", view["status"])
+        mcols[1].metric("Running", om.running_display(view["active"]))
+        mcols[2].metric("PID", str(view["pid"] or "—"))
+        mcols[3].metric("Latest test run", _latest_run_label)
     if view["stale"]:
         st.warning("Control state is STALE (PID not alive). Use **Clear stale runner** below.")
     if view["active"] or view.get("status") in ("running", "starting", "stopping"):
         st.warning("⚠ " + om.runner_busy_message(
             view.get("profile_id") or chosen_profile_id, view.get("status")))
     # Phase 9D — latest decision + open paper P&L at a glance.
-    _rs_hb = forward_review.load_latest_heartbeat() or {}
+    _rs_hb = _hb
     _rs_ps = portfolio_ledger.load_summary("latest") or {}
     _rs_sel = (f"{_rs_hb.get('latest_decision')} (selected)" if _rs_hb.get("selected_trade")
                else (_rs_hb.get("latest_decision") or "—"))
@@ -925,14 +982,39 @@ def render_forward_runner() -> None:
         f"**{ch.fmt_money(_rs_ps.get('total_pnl', 0.0))}**"
     )
 
-    runner_profiles = [s["profile_id"] for s in pb.list_summaries() if s.get("ok")]
-    rc = st.columns([2, 1, 1, 1])
+    _runner_summaries = {s["profile_id"]: s for s in pb.list_summaries() if s.get("ok")}
+    # Dynamic presets FIRST in the dropdown; friendly labels (badge · name).
+    runner_profiles = om.order_profiles_for_dropdown(list(_runner_summaries))
+
+    def _runner_label(pid: str) -> str:
+        s = _runner_summaries.get(pid, {})
+        return om.profile_dropdown_label(pid, s.get("profile_name"), s.get("preset_kind"))
+
+    rc = st.columns([2, 1, 1]) if simple_mode else st.columns([2, 1, 1, 1])
     sel_profile = rc[0].selectbox(
-        "Strategy profile", options=runner_profiles or ["(no profiles)"], key="runner_profile")
-    interval = rc[1].number_input("Interval (s)", value=60.0, step=10.0, min_value=0.0, key="runner_interval")
-    max_ticks = rc[2].number_input("Max ticks (0=∞)", value=0, step=1, min_value=0, key="runner_max_ticks")
-    once = rc[3].checkbox("Once", value=False, key="runner_once")
+        "Strategy profile", options=runner_profiles or ["(no profiles)"],
+        format_func=_runner_label if runner_profiles else str, key="runner_profile")
+    interval = rc[1].number_input(
+        "Scan every (seconds)", value=60.0, step=10.0, min_value=0.0, key="runner_interval",
+        help="How often the local paper tester checks for a new signal.")
+    once = rc[2].checkbox("Single scan", value=False, key="runner_once",
+                          help="Run exactly one scan, then stop.")
+    if simple_mode:
+        max_ticks = 0   # 'Stop after scans' is an Advanced-only control
+    else:
+        max_ticks = rc[3].number_input(
+            "Stop after scans", value=0, step=1, min_value=0, key="runner_max_ticks",
+            help="Stop automatically after this many scans (0 = run until you stop it).")
+    st.caption(f"Scan every: **{int(interval)} seconds**"
+               + ("  ·  single scan then stop" if once else ""))
     market_hours_only = st.checkbox("Market hours only (RTH)", value=False, key="runner_mho")
+    # Selected-profile info card (shared with the Builder).
+    if runner_profiles and sel_profile in _runner_summaries:
+        st.caption(f"**Selected profile:** {_runner_label(sel_profile)}")
+        _sel_runner_dict, _ = pb.load_dict_for_edit(sel_profile)
+        if _sel_runner_dict:
+            with st.expander("Selected profile details", expanded=simple_mode):
+                _render_profile_info_card(om.profile_info_fields(_sel_runner_dict))
 
     can, why = control_ui.can_start(control_ui.get_status())
     bcols = st.columns(5)
@@ -970,7 +1052,12 @@ def render_forward_runner() -> None:
         value=False, key="runner_force",
     )
 
-    with st.expander("Advanced / terminal commands", expanded=False):
+    with st.expander("Advanced details / terminal commands", expanded=False):
+        st.caption(
+            f"Full run id: `{view['run_id'] or _hb.get('run_id') or '—'}`  ·  "
+            f"PID: `{view['pid'] or '—'}`  ·  scan interval: `{int(interval)}s`  ·  "
+            f"stop after scans: `{int(max_ticks) or '∞'}`  ·  "
+            f"status: `{view['status']}`")
         _ctl_profile = sel_profile if runner_profiles else "vertical_wing_score_best_1dte"
         st.caption("Exact command (copy into a terminal — equivalent to the buttons):")
         st.code(

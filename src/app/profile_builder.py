@@ -32,7 +32,18 @@ from src.config.strategy_profiles import (
 
 # Field metadata drives the Streamlit form (label, kind, section, options).
 # kind ∈ str | bool | int | float | optfloat | opttext | select
-FIELD_SECTIONS: tuple[str, ...] = ("Identity", "Providers", "Selector", "Risk", "Strategy params")
+FIELD_SECTIONS: tuple[str, ...] = (
+    "Identity", "Providers", "Selector", "Exit management", "Risk", "Strategy params",
+)
+
+# Phase 9G — Simple-Mode option sets for TP/SL (None/50/75 + 150/200/custom).
+STOP_LOSS_PRESETS: tuple[tuple[str, float | None], ...] = (
+    ("150% of credit", 1.50), ("200% of credit", 2.00), ("Custom", None),
+)
+TAKE_PROFIT_PRESETS: tuple[tuple[str, float | None], ...] = (
+    ("None", None), ("50% of credit", 0.50), ("75% of credit", 0.75), ("Custom", None),
+)
+PRESET_KIND_OPTIONS: tuple[str, ...] = ("", "dynamic", "control", "regime", "observe")
 
 PROFILE_FIELDS: list[dict[str, Any]] = [
     # Identity
@@ -43,6 +54,16 @@ PROFILE_FIELDS: list[dict[str, Any]] = [
     {"name": "strategy_type", "label": "Strategy type", "kind": "str", "section": "Identity"},
     {"name": "symbol", "label": "Symbol", "kind": "str", "section": "Identity"},
     {"name": "notes", "label": "Notes", "kind": "str", "section": "Identity"},
+    # Phase 9G — preset metadata (descriptive; surfaced in the info card)
+    {"name": "target_time", "label": "Target time (ET)", "kind": "opttext", "section": "Identity",
+     "help": "Intended fill time within the entry window, e.g. 11:00 or 15:15."},
+    {"name": "threshold_label", "label": "Threshold (2k/5k)", "kind": "opttext", "section": "Identity",
+     "help": "Account-size bucket label this preset was tuned for."},
+    {"name": "preset_kind", "label": "Preset kind", "kind": "select",
+     "options": list(PRESET_KIND_OPTIONS), "section": "Identity",
+     "help": "dynamic (primary), control (call-only baseline), regime, or observe."},
+    {"name": "side_policy", "label": "Side policy (display)", "kind": "opttext", "section": "Identity",
+     "help": "Human side policy text, e.g. 'dynamic both sides'. Blank = derived from the allow_* flags."},
     # Providers
     {"name": "structure_provider", "label": "Structure provider", "kind": "select",
      "options": list(ALLOWED_STRUCTURE_PROVIDERS), "section": "Providers"},
@@ -67,6 +88,23 @@ PROFILE_FIELDS: list[dict[str, Any]] = [
     {"name": "min_selector_credit", "label": "Min selector credit", "kind": "optfloat", "section": "Selector"},
     {"name": "min_selector_distance_from_spot", "label": "Min distance from spot", "kind": "optfloat", "section": "Selector"},
     {"name": "max_selector_distance_from_spot", "label": "Max distance from spot", "kind": "optfloat", "section": "Selector"},
+    # Exit management (Phase 9G) — TP/SL are surfaced + saved; the paper LIFECYCLE
+    # still reads its PAPER_* env (per-profile execution wiring is DEFERRED).
+    {"name": "stop_loss_pct", "label": "Stop loss (× credit)", "kind": "optfloat", "section": "Exit management",
+     "help": "Stop at this multiple of the credit, e.g. 1.5 = 150%. Display + audit; lifecycle wiring deferred."},
+    {"name": "take_profit_pct", "label": "Take profit (fraction of credit)", "kind": "optfloat",
+     "section": "Exit management",
+     "help": "Take profit at this fraction of credit, e.g. 0.75 = 75%. Blank/None = no take-profit."},
+    {"name": "stop_loss_mode", "label": "Stop loss mode", "kind": "opttext", "section": "Exit management",
+     "help": "e.g. fixed_credit_multiple or dynamic."},
+    {"name": "take_profit_mode", "label": "Take profit mode", "kind": "opttext", "section": "Exit management",
+     "help": "e.g. none, credit_capture, or dynamic."},
+    {"name": "dynamic_exit_enabled", "label": "Dynamic exits enabled", "kind": "bool",
+     "section": "Exit management",
+     "help": "Configured-only this phase: dynamic-exit lifecycle is NOT active yet (fixed TP/SL still applies)."},
+    {"name": "dynamic_exit_policy", "label": "Dynamic exit policy", "kind": "opttext",
+     "section": "Exit management",
+     "help": "Named policy for future dynamic exits (configured, not active yet)."},
     # Risk
     {"name": "risk_profile", "label": "Risk profile", "kind": "str", "section": "Risk"},
     # Strategy params (optional)
@@ -96,6 +134,9 @@ ADVANCED_FIELDS: frozenset[str] = frozenset({
     "no_trade_score_threshold", "min_credit",
     # advanced risk fields
     "max_planned_stop_risk_dollars", "max_theoretical_loss_dollars",
+    # Phase 9G — advanced exit-management + preset metadata
+    "stop_loss_mode", "take_profit_mode", "dynamic_exit_enabled", "dynamic_exit_policy",
+    "preset_kind", "side_policy",
 })
 
 
@@ -117,6 +158,10 @@ ADVANCED_GROUPS: dict[str, tuple[str, ...]] = {
         "min_selector_distance_from_spot", "max_selector_distance_from_spot",
     ),
     "Advanced expiry controls": ("strict_target_dte",),
+    "Advanced exit management": (
+        "stop_loss_mode", "take_profit_mode", "dynamic_exit_enabled", "dynamic_exit_policy",
+    ),
+    "Advanced preset metadata": ("preset_kind", "side_policy"),
     "Advanced risk fields": ("max_planned_stop_risk_dollars", "max_theoretical_loss_dollars"),
     "Advanced strategy params": (
         "wing_threshold", "spread_width", "entry_window_start", "entry_window_end",
