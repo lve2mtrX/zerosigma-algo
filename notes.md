@@ -2585,3 +2585,143 @@ CLIs verified on REAL data, streamlit import OK.
 Next: Phase 10B — ReplayStructureProvider/ReplayQuoteProvider over these mapped snapshots
 + run_backtest per preset (reuse run_scanner.main + paper lifecycle) + per-preset P&L /
 drawdown / win-rate vs wingonomics_daily_stats.csv; SPY/QQQ wing calibration; full 1DTE.
+
+---
+
+## 2026-06-04 (Phase 10B) — historical replay runner: run profiles across snapshot dates
+
+REPLAY + SIMULATION only. No strategy/selector fork, no broker, no order preview, no
+Tastytrade, no ZerσSigma live API. Drives each mapped (structure, chain) through the SAME
+live path, then simulates the exit historically.
+
+Reused live path (NO fork): map_structure/map_option_chain (10A) → VerticalWingV1.
+generate_candidates → risk.filters.apply_filters → score → selector.readiness.
+compute_readiness → selector.daily_selector.select_daily_trade → lifecycle_sim.simulate_exit.
+Candidate construction is NOT re-implemented — generate_candidates already builds CALL_CREDIT
+(short at PUT_CEILING, long +1 strike) + PUT_CREDIT (short at CALL_FLOOR, long −1 strike) at
+the 2K/5K tier; the backtest just feeds it the profile-derived volume_threshold/spread_width.
+Side filtering + structure/premium balancing are the live selector's job.
+
+New pure modules (src/backtesting/):
+- profile_runtime.py — derive_run_settings(profile) from FIELDS (target_time, threshold_label
+  /wing_threshold, allow_*_credit, daily_selector, take_profit_pct, stop_loss_pct, target_dte),
+  never by name. TP/SL: take_profit_pct = CAPTURE fraction (TP75→debit≤0.25×credit; TP50≤0.50×);
+  stop_loss_pct = LOSS fraction (SL150→debit≥2.5×credit; SL200≥3.0×) — matches the reference
+  vertical_wing_backtest. selector_config_from_profile mirrors run_scanner's SelectorConfig.
+  threshold_scheme(symbol): SPX standard; SPY/QQQ provisional + warning.
+- replay_providers.py — ReplayStructureProvider/ReplayQuoteProvider wrap the 10A mapped
+  snapshots (provider-shaped get_snapshot/get_option_chain/get_spot/status; no network).
+- lifecycle_sim.py — build_day_index (ts→strike→(call_mid,put_mid)+spot, once/day);
+  simulate_exit walks (entry_ts, settlement_ts], debit = short_mid − long_mid, first-event-wins
+  (SL wins ties → event_conflict), EOD = first snapshot in [16:00,16:20] settled to cash-settle
+  INTRINSIC. Exit fields: exit_reason TP/SL/EOD/SKIPPED, exit_debit/pnl points+dollars,
+  credit_kept_pct, hold_minutes, max/min spot, short/long touch, snapshots_checked,
+  missing_price_count. dollars = points×100 (1 contract).
+- replay_runner.py — run_backtest iterates dates (rows loaded once/day, shared across profiles),
+  selects entry snapshot, maps, runs the reused pipeline, records corridor/WDS/gamma per snapshot,
+  simulates the selected trade. resolve_profiles: all-main (4 primary) / all (+6 controls).
+- reports.py — daily_pnl, equity_curve+drawdown, summary_by_{profile,symbol,corridor,wds_tier},
+  no_trade_reasons, run_config.json. Metrics: win rate, total/avg/expectancy P&L, gross w/l,
+  profit factor, max DD + duration, avg credit/risk/distance, TP/SL/EOD, CALL vs PUT, active vs
+  inactive corridor, WDS-tier breakdown.
+
+CLI scripts/backtest_run.py: --symbol --profile [id|all-main|all] --start --end --dte --run-label
+--limit --latest-days --entry --include-controls --trading-root --output-root. Prints files/dates/
+valid-entries/trades/skips/P&L/win-rate/max-DD/output. Outputs ONLY under
+outputs/backtests/{latest,runs/<stamp>_<label>}.
+
+Risk-cap learning: aggressive_paper_10k trades 5 contracts with a 10%-of-$10k planned-loss cap
+($1000); planned = credit × (stop_mult−1) × 100 × 5 under SL_150 → credit ≲ 1.33 to pass the cap.
+The live filters apply unchanged in the backtest (no fork), so big-credit synthetic candidates get
+risk-rejected exactly as live.
+
+VALIDATED on real data: SPX morning_5k_dynamic_tp75 5-day → 3 trades, +$45, 67% win, TP/SL/EOD
+2/1/0. SPX all-main 20-day → 17 trades, TP/SL/EOD 7/6/4, win 0.59, DD $660. SPY all-main 8-day →
+52 candidates MAPPED but 0 selected (SPX thresholds wrong for SPY → flagged provisional, not
+over-interpreted). The SPX SL/TP math checks out: credit 0.55 → SL at debit 1.40 (≥2.5×0.55) →
+−$85; credit 0.50 → TP at debit 0.10 (≤0.25×0.50) → +$40.
+
+Tests: test_phase10b_backtest.py (24). Full suite 724 passed, ruff clean, manage_profiles 14/14,
+smokes verified on REAL data.
+
+Next: Phase 10C — SPY/QQQ threshold calibration + cross-check vs wingonomics_daily_stats.csv;
+contracts sizing + comparison dashboards; corridor/WDS → selector weighting; full 1DTE (SPX 1DTE
+exists; QQQ_1DTE empty; SPY_1DTE absent).
+
+---
+
+## 2026-06-04 (hotfix) — precise Tasty quote diagnostics (read-only, no orders)
+
+Symptom: during RTH, ZerσSigma structure/spot/wings/gamma render but Tasty market data shows
+"unavailable" for SPX — cockpit reads structure but can't price spreads. Expected architecture:
+ZS = exposures/structure/spot; Tasty = quote chain / bid-ask. Goal: surface the EXACT stage that
+breaks. No strategy/selector change, no broker execution, no order preview, no secrets.
+
+New pure module src/providers/quotes/tasty_diagnostics.py — diagnose_quote_path(cfg, symbol,
+target_dte, validation, client_factory, spot_hint, now) walks: (1) configured? (is_configured +
+missing_fields NAMES only) → (2) auth/session (probe.login; fail → "Tasty auth failed / session
+invalid.") → (3) chain summary/roots (fail → "SPX root/expiry unresolved.") → (4) expiry/DTE
+(0DTE = today in chain expirations; has_0dte_today; else exact reason) → (5) root resolution for
+that expiry → (6) chain/quote pull (small ATM ladder around spot_hint or chain midpoint; "Tasty
+returned no chain" on fetch fail) → (7) per-quote QuoteValidation (stale/zero-bid/crossed/wide
+counts + missing strikes + top blocker). Every stage is non-fatal (network errors caught →
+sanitized exception TYPE only). Result dict is SAFE TO PRINT — only present/missing booleans +
+env/base_url, never token/password/client_secret/refresh_token/account. `summary_rows(diag)` is
+the single formatter for CLI + UI.
+
+CLI: scripts/diagnose_tasty_quotes.py --symbol SPX --dte 0 [--spot-hint N --json] → prints
+configured / auth / resolved root / resolved expiration / chain returned / quote count / strike
+min-max / sample strikes / last_error / FINAL. Live Cockpit: render_market gained a "Why are
+quotes unavailable?" expander (button-gated → one read-only round-trip; same fields + sanitized
+JSON). Reuses the existing read-only TastyProbeClient + QuoteValidation — no new network surface.
+
+Found on Dan's env: Tasty is NOT configured (no TASTY_* vars; defaults to certification) — the
+diagnostic reports exactly that with the missing var names. That IS the current root cause: add
+TASTY_* creds (+ TASTY_ENV=production) to .env to enable live quotes.
+
+Tests: test_phase10b_tasty_diagnostics.py (12 — missing config / auth fail / auth network-error /
+root unresolved / expiry unavailable / no chain / invalid quotes / stale quotes / happy path /
+NO secrets echoed / summary_rows / CLI). Full suite 736 passed, ruff clean, manage_profiles 14/14,
+diagnose CLI verified.
+
+---
+
+## 2026-06-04 (hotfix) — Tasty OAuth config detection (the diagnostic CLI wasn't loading .env)
+
+Symptom: Dan's .env HAS OAuth creds (TASTY_CLIENT_ID/SECRET/REFRESH_TOKEN + ENV/BASE_URL/SCOPES +
+QUOTE_PROVIDER=tastytrade), but the diagnostic reported "not configured" and mentioned missing
+USERNAME/PASSWORD. TWO root causes:
+1. scripts/diagnose_tasty_quotes.py never loaded .env — it called config_from_env() (reads
+   os.environ) without load_config/load_dotenv (probe_tastytrade.py does load_config first). So the
+   OAuth vars were invisible → config_from_env saw defaults → not configured.
+2. The "missing config" presentation picked the SHORTER missing list (legacy = 2 < oauth = 3),
+   misleadingly pointing at USERNAME/PASSWORD when nothing was set.
+
+Fixes (no strategy/selector/backtest change; no execution; no order preview; never enables order
+submission; no secrets):
+- CLI loads .env via load_dotenv(repo/.env, override=False) before reading env.
+- tasty_diagnostics.diagnose_quote_path now reports OAuth and legacy SEPARATELY: oauth_configured,
+  legacy_configured, auth_mode (oauth/legacy_session/none), oauth_missing_fields, legacy_missing_
+  fields, auth_summary ("OAuth credentials found. Using OAuth refresh-token auth." / "Tasty OAuth
+  credentials missing: TASTY_CLIENT_ID, ...; optional legacy fallback ..."). OAuth-led — never
+  claims unconfigured merely because USERNAME/PASSWORD are absent. Provider auth preference was
+  ALREADY correct (probe.login() does OAuth when has_oauth(), legacy only as fallback) — unchanged.
+- QUOTE_PROVIDER surfaced + warning when != tastytrade ("...will NOT use live Tasty quotes unless
+  Live data-source override is selected or QUOTE_PROVIDER=tastytrade").
+- Trade-scope SAFETY read: warns "Trade scope is present, but TASTY_ENABLE_ORDER_SUBMISSION=false.
+  Quote fetching remains read-only." — informational only; no submit path; never blocks.
+- .env.example: TASTY_ENV=production, TASTY_BASE_URL=https://api.tastyworks.com, TASTY_SCOPES=read
+  openid, TASTY_ALLOW_TRADE_SCOPE=false, TASTY_ENABLE_ORDER_SUBMISSION=false, QUOTE_PROVIDER=
+  tastytrade + safety notes (order submission stays disabled).
+- tests/conftest.py (NEW, test-infra only): forces QUOTE_PROVIDER=mock + clears TASTY_* for the
+  session so the suite is hermetic against the personal .env. Dan's .env (now QUOTE_PROVIDER=
+  tastytrade) had been leaking into 8 scanner tests via run_scanner's load_config → live-Tasty
+  attempts → NO_TRADE. load_config uses load_dotenv(override=False), so pre-set test values win.
+
+VERIFIED on Dan's real env: configured True, OAuth/API configured True, auth mode oauth, missing
+OAuth vars none, TASTY_ENV production, QUOTE_PROVIDER tastytrade, auth SUCCESS → resolved root SPXW,
+today's 0DTE, chain returned. (It even surfaced a real downstream finding: the ATM quote fails the
+conservative spread_abs $5 validation cap.) Tests: test_phase10b_tasty_diagnostics.py now 20 (+8:
+OAuth-without-legacy valid, OAuth-present-not-unconfigured-on-auth-fail, legacy optional fallback,
+missing-names-not-values, QUOTE_PROVIDER mock warning + tastytrade no-warning, trade-scope warning
+without execution, no-execution-paths). Full suite 744 passed, ruff clean, manage_profiles 14/14.

@@ -42,6 +42,7 @@ from src.paper.manual_tracker import (  # noqa: E402
     unrealized_pnl_dollars,
 )
 from src.paper.positions import PaperPosition  # noqa: E402
+from src.providers.quotes import tasty_diagnostics as tasty_diag  # noqa: E402
 from src.providers.quotes.factory import build_quote_provider  # noqa: E402
 from src.providers.quotes.tastytrade_provider import (  # noqa: E402
     TastytradeConfigurationError,
@@ -545,6 +546,39 @@ def render_market() -> None:
         f"@ {chain.quote_ts.isoformat() if chain else '—'}  ·  "
         f"expiry {structure.expiry}  ·  DTE {structure.dte}"
     )
+
+    # ── Phase 10B hotfix — precise Tasty quote diagnostics (READ-ONLY) ──
+    # "ZerσSigma structure renders, but Tasty market data is unavailable — why?"
+    # Walks config → auth/session → SPX root → expiry/DTE → chain → quote
+    # validation and surfaces the exact blocker. Button-gated so it only hits
+    # Tasty on demand (not every render). No orders, no order preview, no secrets.
+    with st.expander("Why are quotes unavailable?", expanded=False):
+        st.caption(
+            "Read-only Tasty quote-path check: configured → auth/session → SPX root → "
+            "expiry/DTE → chain → quote validation. No orders, no order preview, no secrets. "
+            "(ZerσSigma supplies structure/exposures; Tasty supplies the quote chain.)"
+        )
+        _dc = st.columns([1, 2])
+        _ddte = int(_dc[0].selectbox("Target DTE", [0, 1], index=0, key="tasty_diag_dte"))
+        _dspot = (structure.spot if getattr(structure, "spot", 0) and structure.spot > 0
+                  else None)
+        _dc[1].caption(f"ATM probe hint (Zσ spot): {ch.fmt_strike(_dspot) if _dspot else '—'}")
+        if st.button("Run Tasty quote diagnostic", key="tasty_diag_btn"):
+            try:
+                _diag = tasty_diag.diagnose_from_env(
+                    symbol=SYMBOL, target_dte=_ddte, spot_hint=_dspot)
+            except Exception as _exc:               # never break the cockpit
+                _diag = {**tasty_diag._blank_result(SYMBOL, _ddte),
+                         "final_status": f"diagnostic error: {type(_exc).__name__}",
+                         "blocker": "diagnostic_error"}
+            (st.success if _diag.get("blocker") is None else st.warning)(
+                _diag.get("final_status") or "—")
+            for _lbl, _val in tasty_diag.summary_rows(_diag):
+                st.text(f"{_lbl:<24}: {_val}")
+            with st.expander("Full sanitized diagnostic (JSON)", expanded=False):
+                st.json(_diag, expanded=False)
+        else:
+            st.caption("Click to probe Tasty now (one read-only round-trip — no orders).")
 
     # ── Advanced structure / raw diagnostics (walls, flip, DDOI) — ADVANCED
     # MODE ONLY (Phase 9I: removed from the normal trader flow + DDOI never in

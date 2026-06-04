@@ -1,13 +1,34 @@
-"""Phase 10A — local historical backtesting scaffold for the ZerσSigma Algo.
+"""Local historical backtesting for the ZerσSigma Algo (Phase 10A + 10B).
 
 Maps saved raw daily snapshot CSVs (SPX / SPY / QQQ, from the TOS logger) into the
-SAME StructureSnapshot / OptionChainSnapshot the live + replay path uses, so the
-existing strategy / selector / paper lifecycle can replay history WITHOUT a fork.
+SAME StructureSnapshot / OptionChainSnapshot the live path uses, then replays the
+existing strategy / selector across history and SIMULATES the TP/SL/EOD exit —
+all WITHOUT a strategy fork.
 
-Read-only data mapping: no network, no broker calls, no order/execution. This is a
-LOADER + MAPPER scaffold — the full TP/SL lifecycle runner is a later phase.
+Read-only: no network, no broker calls, no order preview, no execution. Phase 10A
+is the loader/mapper scaffold; Phase 10B adds the replay runner + lifecycle sim +
+reports (``replay_runner`` / ``lifecycle_sim`` / ``reports`` / ``replay_providers``
+/ ``profile_runtime``).
 """
 
-from src.backtesting import mappers, raw_snapshot_loader, schemas
+from src.backtesting import (
+    lifecycle_sim,
+    mappers,
+    profile_runtime,
+    raw_snapshot_loader,
+    replay_providers,
+    replay_runner,
+    reports,
+    schemas,
+)
 
-__all__ = ["mappers", "raw_snapshot_loader", "schemas"]
+__all__ = [
+    "lifecycle_sim",
+    "mappers",
+    "profile_runtime",
+    "raw_snapshot_loader",
+    "replay_providers",
+    "replay_runner",
+    "reports",
+    "schemas",
+]

@@ -1910,8 +1910,52 @@ python -m scripts.backtest_scan_dates --symbol SPX --profile eod_5k_dynamic_sl15
   `outputs/backtests/runs/<stamp>_<label>/` — **never** inside the raw `TOS Data` folders.
   (`OUTPUT_DIR` / `DATA_DIR` relocate the `outputs` root if set.)
 
-The replay RUNNER (drive these mapped snapshots through `run_scanner.main(argv)` + the
-paper lifecycle, then compare presets vs `wingonomics_daily_stats.csv`) is **Phase 10B**.
+---
+
+## Historical replay runner (Phase 10B)
+
+Phase 10B runs the saved snapshots through the **same live path** — the real
+`VerticalWingV1` strategy, the live risk filters, and the Phase 5 selector
+(`select_daily_trade`, including `balanced_structure_premium_valid`) — and then
+**simulates** the TP/SL/EOD exit from the post-entry snapshots. **No strategy fork, no
+broker, no order preview, no Tastytrade, no ZerσSigma live API.**
+
+```powershell
+# One profile across a date range
+python -m scripts.backtest_run --symbol SPX --profile morning_5k_dynamic_tp75 `
+    --start 2026-01-01 --end 2026-06-03 --dte 0 --run-label test
+
+# All 4 primary dynamic profiles over the most recent 20 dates
+python -m scripts.backtest_run --symbol SPX --profile all-main --latest-days 20 `
+    --dte 0 --run-label smoke
+
+# Add the call-only / put-regime / observe controls
+python -m scripts.backtest_run --symbol SPX --profile all-main --include-controls `
+    --latest-days 20 --dte 0 --run-label smoke_with_controls
+```
+
+- **Reuses the live selector, no fork:** candidates come from the real
+  `generate_candidates` (CALL_CREDIT short at PUT_CEILING, PUT_CREDIT short at CALL_FLOOR,
+  2K/5K tier from the profile), the live `apply_filters` risk caps gate them, and
+  `select_daily_trade` picks the side — the backtest only adapts the candidate into the
+  selector's row shape via the live `compute_readiness`.
+- **Exit simulation** (matches the reference backtest): mid-to-mid repricing after entry;
+  **TP** when debit ≤ `(1 − capture) × credit` (TP75 → 25%, TP50 → 50%); **SL** when
+  debit ≥ `(1 + loss) × credit` (SL150 → 2.5×, SL200 → 3.0×); first event wins (SL wins a
+  tie); **EOD** settles to cash-settle intrinsic at the first snapshot ≥ 16:00.
+- **Reports** under `outputs/backtests/{latest,runs/<stamp>_<label>}/`: `trades.csv`,
+  `candidates.csv`, `daily_pnl.csv`, `equity_curve.csv`,
+  `summary_by_{profile,symbol,corridor,wds_tier}.csv`, `no_trade_reasons.csv`,
+  `run_config.json` — win rate, P&L, expectancy, profit factor, max drawdown, TP/SL/EOD
+  counts, CALL vs PUT frequency, active-vs-inactive corridor, and per-WDS-tier performance.
+- **SPY / QQQ** run on the same code path, but their wing thresholds are flagged
+  **provisional** (`threshold_scheme` / `threshold_warning` on every row) — the SPX 2K/5K/10K
+  volume thresholds are not yet calibrated for those symbols, so results are not
+  over-interpreted (calibration is Phase 10C).
+
+The runner is read-only and idempotent; nothing here places, previews, or routes an order.
+Phase 10C adds SPY/QQQ threshold calibration, a `wingonomics_daily_stats.csv` cross-check,
+corridor/WDS → selector weighting, and full 1DTE support.
 
 ---
 

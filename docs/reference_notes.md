@@ -1636,3 +1636,72 @@ discovery-only), `backtest_dry_run.py` (one entry snapshot read-out), `backtest_
 (one CSV row per entry snapshot over a date range). None run a scanner, hit a broker,
 preview an order, or call a live API. The replay RUNNER (drive these mapped snapshots
 through `run_scanner.main(argv)` + the paper lifecycle) is Phase 10B.
+
+## 25. Phase 10B — historical replay runner (selector reuse + exit sim, durable)
+
+The backtest reuses the live strategy + selector verbatim and only adds a data SOURCE +
+an exit SIMULATION. The durable contract:
+
+### Selector reuse without a fork (the key seam)
+
+`src/selector/daily_selector.select_daily_trade(rows, cfg, gamma_regime=...)` is a PURE
+function over generic candidate ROW dicts — it does not depend on the `vertical_wing`
+package. So the backtest builds the same rows the live scanner does and calls the same
+selector. The row schema the selector consumes (`side`, `score`, `credit`,
+`distance_from_spot`, `rejected`, `selector_eligible_base`, the four `candidate_passes_*`
+flags, `quote_validation_passed`, `quote_quality_bucket`, `candidate_is_marginal`,
+`planned_stop_risk_pct`, plus `anchor_volume`/`structure_strength`/`maxvol_alignment`/
+`bid_ask_quality` for `balanced_structure_premium_valid`) is produced by the live
+`selector.readiness.compute_readiness(candidate, ...)` — the SAME function `run_scanner`
+uses. `replay_runner._selector_row` is the only adapter; no scoring/selection logic is
+re-implemented.
+
+Backtest quotes carry `validation_passed=None` (mid-to-mid, not broker-validated). The
+quote-quality bucket is never `"invalid"` on that basis (it only goes invalid when a leg
+EXPLICITLY fails broker validation), so `require_quote_validation=True` from the profile
+does not over-block historical candidates — the structure/premium balance does the work.
+
+### Profile → behavior is field-driven (no name hardcoding)
+
+`backtesting.profile_runtime.derive_run_settings(profile)` reads `target_time`,
+`threshold_label`/`wing_threshold`, `allow_*_credit`, `daily_selector`, `take_profit_pct`,
+`stop_loss_pct`, `target_dte`. The 2K/5K tier flows in as the strategy's `volume_threshold`
+param (≥5000 → 5K tier in `_ceiling_for_threshold`/`_floor_for_threshold`). Sides are the
+selector's `allow_call/put_credit`; the observe preset is `daily_selector=no_trade` →
+selects nothing while still logging candidates.
+
+### Exit-simulation semantics (match the reference vertical_wing_backtest)
+
+`backtesting.lifecycle_sim.simulate_exit` reprices the spread mid-to-mid at each post-entry
+snapshot in `(entry_ts, settlement_ts]`:
+- `debit = short_mid − long_mid` (same option side; CALL legs for CALL_CREDIT, PUT for PUT).
+- TAKE PROFIT (capture fraction `c`): `debit ≤ (1 − c) × credit`  → TP75 ≤ 0.25×, TP50 ≤ 0.50×.
+- STOP LOSS (loss fraction `l`): `debit ≥ (1 + l) × credit`        → SL150 ≥ 2.5×, SL200 ≥ 3.0×.
+- First event wins; TP+SL on the SAME snapshot → SL wins, `event_conflict=True`.
+- EOD / settlement = the first snapshot in `[16:00:00, 16:20:00]`, settled to cash-settle
+  INTRINSIC from that snapshot's spot (0DTE cash settlement); fallback to the last post-entry
+  snapshot when no post-16:00 snapshot exists; `SKIPPED` only when nothing is priceable.
+- P&L: `pnl_points = credit − exit_debit`; dollars = `points × 100 × contracts` (1 contract).
+
+NOTE the profile's `take_profit_pct`/`stop_loss_pct` are CAPTURE/LOSS fractions — a
+DIFFERENT convention from the live `PaperLifecycleConfig` debit-fraction. The historical
+simulator owns the capture/loss convention; the live paper lifecycle is untouched (the
+backtest never mutates it).
+
+### Risk caps apply unchanged
+
+`risk.filters.apply_filters` runs in the backtest with the profile's risk session, so the
+same planned/theoretical loss caps gate candidates. Under `aggressive_paper_10k` (5
+contracts, planned cap = 10% × $10k = $1000, default stop `SL_150`), planned loss =
+`credit × 1.5 × 100 × 5`, so credits above ~$1.33 are risk-rejected exactly as live — a real
+constraint the backtest surfaces rather than hides.
+
+### Outputs (repo-local)
+
+`reports.write_reports` writes `trades.csv`, `candidates.csv`, `daily_pnl.csv`,
+`equity_curve.csv`, `summary_by_{profile,symbol,corridor,wds_tier}.csv`,
+`no_trade_reasons.csv`, `run_config.json` under `outputs/backtests/{latest,runs/<stamp>_
+<label>}` — never the raw data folders. SPY/QQQ runs stamp `threshold_scheme=
+provisional_spx_2k5k10k` + a `threshold_warning` on every row so uncalibrated results are
+never mistaken for validated ones. The replay runner is read-only: no broker, no order
+preview, no Tastytrade, no ZerσSigma live API.

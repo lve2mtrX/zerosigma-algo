@@ -351,3 +351,88 @@ Still loader/mapping-only — **no** `run_backtest`, no scanner/selector/lifecyc
 snapshots → `run_scanner.main(argv)` per preset → paper lifecycle → per-preset P&L /
 drawdown / win-rate comparison vs `wingonomics_daily_stats.csv`, plus SPY/QQQ wing
 calibration and full 1DTE support.
+
+## 16. Phase 10B landed — replay runner + lifecycle sim + reports
+
+The historical replay RUNNER is built. It drives the SAME live path end to end and
+SIMULATES the exit — no strategy/selector fork, no broker, no order preview, no
+Tastytrade, no ZerσSigma live API.
+
+### Reused live path (the durable bit — no fork)
+
+```
+saved raw file → mappers.map_structure / map_option_chain   (Phase 10A)
+              → VerticalWingV1.generate_candidates           (the live strategy)
+              → risk.filters.apply_filters                   (the live risk caps)
+              → VerticalWingV1.score
+              → selector.readiness.compute_readiness         (the live readiness)
+              → selector.daily_selector.select_daily_trade   (the live Phase 5 selector)
+              → lifecycle_sim.simulate_exit                  (NEW historical exit sim)
+```
+
+Candidate construction is NOT re-implemented — `generate_candidates` already builds the
+CALL_CREDIT (short at PUT_CEILING, long one strike higher) + PUT_CREDIT (short at
+CALL_FLOOR, long one strike lower) verticals at the 2K/5K tier. The backtest only feeds
+it the profile-derived `volume_threshold` / `spread_width`. Side filtering, structure-vs-
+premium balancing, and quote/risk validity are the live selector's job (`select_daily_trade`).
+
+### New modules (`src/backtesting/`)
+
+- **`profile_runtime.py`** — `derive_run_settings(profile)` reads behavior from PROFILE
+  FIELDS (`target_time`, `threshold_label`/`wing_threshold`, `allow_*_credit`,
+  `daily_selector`, `take_profit_pct`, `stop_loss_pct`, `target_dte`), never by name.
+  TP/SL semantics: `take_profit_pct` = credit-CAPTURE fraction (TP75 → debit ≤ 0.25×credit;
+  TP50 → ≤ 0.50×credit); `stop_loss_pct` = LOSS fraction (SL150 → debit ≥ 2.5×credit;
+  SL200 → ≥ 3.0×credit) — matching the reference backtest. `selector_config_from_profile`
+  mirrors `run_scanner`'s SelectorConfig build. `threshold_scheme(symbol)` returns
+  `spx_2k5k10k_standard` for SPX and `provisional_spx_2k5k10k` + a warning for SPY/QQQ.
+- **`replay_providers.py`** — `ReplayStructureProvider` / `ReplayQuoteProvider` wrap the
+  mapped snapshots and satisfy the provider shape (`get_snapshot` / `get_option_chain` /
+  `get_spot` / `status`); `provider_name="backtest_raw"`. No network, no broker.
+- **`lifecycle_sim.py`** — `build_day_index(rows, symbol)` indexes the day once
+  (ts→strike→(call_mid,put_mid) + spot); `simulate_exit(...)` walks post-entry snapshots
+  in `(entry_ts, settlement_ts]`, reprices `debit = short_mid − long_mid` (same side),
+  fires TP/SL on the first event (SL wins a same-snapshot tie → `event_conflict`), and
+  EOD-settles to cash-settle INTRINSIC at the first snapshot in `[16:00, 16:20]`. Exit
+  fields: `exit_reason` (TP/SL/EOD/SKIPPED), `exit_debit_points/_dollars`, `pnl_points/
+  _dollars`, `credit_kept_pct`, `hold_minutes`, max/min spot after entry, short/long touch
+  flags, `snapshots_checked`, `missing_price_count`, `settlement_method`. Points → dollars
+  is `× 100` once (1 contract).
+- **`replay_runner.py`** — `run_backtest(...)` iterates dates (loads each day's rows once,
+  shared across profiles), selects the entry snapshot, maps, runs the reused pipeline,
+  records corridor/WDS/gamma per snapshot, and simulates the selected trade. `BacktestResult`
+  carries candidates / trades / no_trade_reasons / counters. `resolve_profiles` expands
+  `all-main` (4 primary) / `all` (+6 controls).
+- **`reports.py`** — pure aggregation + writers: `trades.csv`, `candidates.csv`,
+  `daily_pnl.csv`, `equity_curve.csv`, `summary_by_{profile,symbol,corridor,wds_tier}.csv`,
+  `no_trade_reasons.csv`, `run_config.json`. Metrics: win rate, total/avg P&L, expectancy,
+  gross wins/losses, profit factor, max drawdown + duration, avg credit/risk/distance,
+  TP/SL/EOD counts, CALL vs PUT frequency, active vs inactive corridor counts, WDS-tier
+  breakdown.
+
+### CLI
+
+```
+python -m scripts.backtest_run --symbol SPX --profile morning_5k_dynamic_tp75 \
+    --start 2026-01-01 --end 2026-06-03 --dte 0 --run-label test
+python -m scripts.backtest_run --symbol SPX --profile all-main --latest-days 20 \
+    --dte 0 --run-label smoke
+```
+
+### Validated on real data
+
+SPX morning_5k_dynamic_tp75 5-day → 3 trades, +$45, 67% win, TP/SL/EOD 2/1/0. SPX all-main
+20-day → 17 trades, TP/SL/EOD 7/6/4, win 0.59. SPY all-main 8-day → 52 candidates MAPPED
+but 0 selected (SPX-calibrated thresholds are wrong for SPY — flagged provisional, not
+over-interpreted). All outputs land under `outputs/backtests/`. Tests:
+`tests/test_phase10b_backtest.py` (24 — candidate construction both sides, call/put-only
+exclusion, observe selects nothing, TP75/TP50/SL150/SL200/EOD/SKIPPED exits, missing-price
+counting, daily P&L + equity/drawdown, corridor + WDS-tier summaries, CLI smoke repo-local,
+no-execution + no-hardcoded-user guards).
+
+### Still Phase 10C (next)
+
+SPY/QQQ threshold calibration + cross-check vs `wingonomics_daily_stats.csv`; contracts
+sizing + comparison dashboards; promote corridor/WDS into selector weighting; full 1DTE
+support (SPX 1DTE data exists; QQQ_1DTE empty; SPY_1DTE absent). Still NO broker execution,
+NO order preview.
