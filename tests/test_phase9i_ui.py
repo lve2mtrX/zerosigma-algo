@@ -24,9 +24,11 @@ def test_data_source_resolution_wired():
 # ── 2. quote diagnostics ─────────────────────────────────────────────────────
 
 def test_quote_diagnostics_wired():
-    assert "quote_chain_status(" in _SRC
-    # raw provider state only in Advanced
-    assert "Quote diagnostics (raw provider status)" in _SRC
+    # Phase 10B superseded the Phase 9I quote_chain_status banner with the richer
+    # cockpit_quote_status reconciliation (distinct states, validation-aware).
+    assert "cockpit_quote_status(" in _SRC
+    # precise quote-state + validation details surfaced in the read-only expander
+    assert "Quote status & diagnostics" in _SRC
 
 
 # ── 3. Advanced structure + DDOI hidden in Simple Mode ───────────────────────

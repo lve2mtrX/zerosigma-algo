@@ -126,7 +126,9 @@ def test_tab_labels_branded_no_forward_runner():
     labels = om.tab_labels()
     assert len(labels) == 6
     joined = " ".join(labels)
-    assert "Zσ Strat Tester" in joined
+    # Phase 10B: the Tester tab is relabeled "🧪 Run Strategy" (trader-first).
+    assert "Run Strategy" in joined
+    assert "Zσ Strat Tester" not in joined
     assert "Forward Runner" not in joined
     assert any("Paper Portfolio" in lbl for lbl in labels)
     assert any("Strat Builder" in lbl for lbl in labels)   # 9F: "Zσ Strat Builder"

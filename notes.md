@@ -2725,3 +2725,105 @@ conservative spread_abs $5 validation cap.) Tests: test_phase10b_tasty_diagnosti
 OAuth-without-legacy valid, OAuth-present-not-unconfigured-on-auth-fail, legacy optional fallback,
 missing-names-not-values, QUOTE_PROVIDER mock warning + tastytrade no-warning, trade-scope warning
 without execution, no-execution-paths). Full suite 744 passed, ruff clean, manage_profiles 14/14.
+
+---
+
+## 2026-06-04 (hotfix) — Live Cockpit Tasty status reconciliation (chain returns but UI said "unavailable")
+
+Symptom: the Tasty diagnostic proved OAuth + auth + SPXW root + 0DTE expiry + chain all work, yet
+the Live Cockpit still showed "Tasty market data: unavailable / Strategy eligible: no / generic
+banner." ROOT CAUSE: streamlit_main fetched the chain with `get_option_chain(SYMBOL,
+expiry=structure.expiry)` — NO `request`/`required_strikes`. The Tasty REST provider returns None
+without required_strikes ("production provider does not pull whole chains"), so the cockpit's
+`chain` was always None under tastytrade → `market_data_available = chain is not None` False →
+everything collapsed to the generic "unavailable" banner. The diagnostic worked because it probes
+explicit ATM strikes. (The scanner already builds a QuoteRequest; the cockpit didn't.)
+
+Fixes (NO strategy/selector/risk change; no execution; no order preview; no secrets):
+1. Root cause — streamlit builds the SAME structure-anchored QuoteRequest the scanner uses
+   (`ch.build_quote_request(SYMBOL, structure, STRATEGIES)`) and passes it to get_option_chain. The
+   Tasty chain now returns in the cockpit, matching the diagnostic.
+2. Quote STATE model — new pure `cockpit_helpers.cockpit_quote_status(...)` classifies the
+   ALREADY-FETCHED chain into nine distinct states (not one "unavailable"): not_configured /
+   auth_failed / root_unresolved / expiration_unavailable / chain_unavailable /
+   chain_returned_validation_failed / chain_returned_usable / mock / unknown_error, each with a UI
+   label, an `available` flag (usable quotes or mock), an eligible hint, a precise banner, and
+   details (quote_count, validation passed/failed, top blocker, root, expiration, strike range,
+   max_spread_abs, max_age, observed worst spread, missing strikes, last_error). The generic
+   "market may be closed…" banner now shows ONLY for true chain_unavailable.
+3. render_symbol_health + render_market use the status: market_data card shows the precise label;
+   "Strategy eligible" shows "blocked" on validation-fail; the banner explains the blocker. The
+   "Why are quotes unavailable?" expander → "Quote status & diagnostics" shows the cockpit's OWN
+   state (no network) + the validation config, then the existing button-gated network probe.
+4. CLI parity — scripts/diagnose_cockpit_quote_status.py runs the SAME cockpit path (load_config →
+   build providers → build_quote_request → fetch chain → cockpit_quote_status) and prints provider /
+   data source / chain / validation / STATE / label / banner. Lets us verify the cockpit status
+   without the app.
+
+REAL FINDING on Dan's env (cockpit parity CLI): chain RETURNED (SPXW @ 2026-06-05, 8 quotes for the
+wing strikes 7545/7550/7600/7605), but all 8 failed validation with top blocker **stale** (quotes
+>10s old → market closed / REST delayed), NOT spread_abs. So the cockpit now reads
+`chain_returned_validation_failed` → "chain returned / validation blocked (stale)" instead of
+"unavailable". spread_abs investigation: max_spread_abs=`TASTY_QUOTE_MAX_SPREAD_ABS` (default 5.0)
+and max_age=`TASTY_QUOTE_MAX_AGE_SECONDS` (default 10.0) are BOTH per-quote, env-configurable, and
+applied to the SELECTED candidate legs (the wing strikes), not just one ATM probe. Validation flags
+individual quotes (chain still returns); it does not drop strikes. The diagnostic's earlier
+spread_abs finding was on its ATM ladder. Left validation UNCHANGED (risk-adjacent; do not loosen
+blindly) — Dan can raise TASTY_QUOTE_MAX_AGE_SECONDS / TASTY_QUOTE_MAX_SPREAD_ABS in .env if needed;
+during live RTH with fresh quotes the stale block clears on its own.
+
+Tests: test_phase10b_cockpit_quote_status.py (14 — each state, generic-banner-only-for-no-chain,
+validation-blocked != unavailable, mock available, missing strikes, build_quote_request, CLI parity
+with mocked providers, no-secrets). Updated test_phase9i_ui (quote_chain_status → cockpit_quote_status).
+Full suite 758 passed, ruff clean, manage_profiles 14/14, cockpit parity CLI verified on REAL data.
+
+---
+
+## 2026-06-04 — Phase 10B UI hotfix: trader-first labels + Run Strategy workflow + stale clarity
+
+Backend was correct (chain returns, states classified) but the cockpit READ confusingly: clipped
+raw enums in cards (`TRADE_CALL_CREDIT`, `chain_returned_validation_failed`, `vertical_wing_v1`,
+`zerosigma_api`), a "Best Eligible Setup" header that fired even when nothing was actually priceable,
+and no obvious "how do I run a strategy" path. This pass is UI-only — NO strategy / selector / risk /
+backtest logic touched, NO execution surface added.
+
+1. Friendly label helpers (pure, stdlib-only, in `operator_mode.py` — fully unit-tested, zero project
+   imports): `provider_short` (zerosigma_api→"Zσ API", tastytrade→"Tasty", null→"Manual"),
+   `decision_label`/`side_label` (TRADE_CALL_CREDIT→"Call Credit", NO_TRADE→"No Trade"),
+   `runner_state_label` (stopped→"Stopped"), `quote_state_label(state, top_blocker)` — the key one:
+   `chain_returned_validation_failed` splits on the blocker → **"Stale"** when top_blocker=="stale"
+   else "Validation Blocked"; usable→"Available", chain_unavailable→"No Chain", mock→"Sandbox".
+   `candidate_label` ("Put Credit 7550/7545", drops .0), `candidate_status_label` (pills:
+   Eligible / Blocked: stale quotes / Blocked: quote validation / Blocked: risk cap / Blocked:
+   filters / Observe only), `header_status_cells` (7 short read-only cells: Strategy / Structure /
+   Quotes / Runner / Last Signal / Paper P&L / Safety). The long pinned
+   `cockpit_quote_status['label']` is UNCHANGED — these are separate short card labels.
+
+2. Stale-quote clarity (the real after-hours case): `quote_state_banner` for stale →
+   "Tasty chain returned, but quotes are stale. Structure preview only — live eligibility will
+   re-check during RTH."; `stale_quote_mode_banner` adds the 🌙 after-hours sub-text. Wired into
+   render_symbol_health (Quotes card now shows "Stale" not a clipped enum) and render_market.
+
+3. "Best Eligible Setup" is now honest — the header says **"Best Eligible Setup"** only when
+   `QUOTE_STATUS["available"]`; otherwise **"Best Candidate Preview — Stale Quotes"** (stale) or
+   **"Best Candidate Preview — Blocked"**. Setup line uses candidate_label + score (2dp) + credit $.
+
+4. Run Strategy workflow — Tester tab relabeled **"🧪 Run Strategy"** (tab_labels), page title
+   "🧪 Run Strategy — local paper test", and a prominent 5-step panel: Choose strategy → Confirm data
+   source → Preview Strategy → Start Paper Test → Stop Test / Review Latest. Buttons relabeled
+   (👁 Preview Strategy / ▶ Start Paper Test / ■ Stop Test / 📄 Review Latest). Header strip is now a
+   clearly READ-ONLY "Status Summary" with a CTA: "▶ To run a strategy, open the 🧪 Run Strategy tab".
+
+5. Candidate cards use the friendly Setup + Status pill; raw JSON score breakdown stays Advanced-only
+   (Simple Mode shows a caption). No raw IDs surface in Simple Mode.
+
+REAL-ENV check (cockpit parity CLI, after-hours): STATE=`chain_returned_validation_failed`, top
+blocker=**stale** (8/8 quotes >10s old, SPXW @ 2026-06-05, wing strikes 7545/7550/7600/7605) → the
+cockpit now renders Quotes="Stale" + the stale banner + "Best Candidate Preview — Stale Quotes",
+exactly the intended UX. During live RTH the stale block clears on its own.
+
+Tests: NEW test_phase10b_ui_labels.py (20 — all label helpers incl. stale split, no-raw-enum-leak,
+banners, candidate labels/pills, 7-cell header, Run-Strategy tab/buttons, and source-wiring for
+Best-Eligible gating + Run-a-Strategy panel + read-only header + Advanced-only raw JSON + no-exec).
+Updated test_phase9e (tab "Run Strategy") + test_phase9f (button labels). Full suite **778 passed**,
+ruff clean, manage_profiles 14/14, both diagnose CLIs read-only (no secrets, no orders).

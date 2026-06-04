@@ -107,7 +107,11 @@ def test_profile_info_fields_shape():
 
 def test_button_label_helpers():
     labels = om.button_labels()
-    assert labels["start"] == "▶ Start local paper test"
+    # Phase 10B: trader-first run workflow labels (Preview → Start → Stop → Review).
+    assert labels["start"] == "▶ Start Paper Test"
+    assert labels["preview"] == "👁 Preview Strategy"
+    assert labels["stop"] == "■ Stop Test"
+    assert labels["review"] == "📄 Review Latest"
     assert labels["clear_stale"] == "🧹 Clear stale runner"
     assert labels["record_manual"] == "Record manual paper trade"
     assert labels["apply_session"] == "Apply local session settings"

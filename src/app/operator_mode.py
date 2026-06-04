@@ -28,6 +28,7 @@ DEFAULT_SYMBOL = "SPX"
 # ── branded tab / section labels (the rename) ────────────────────────────────
 
 STRAT_TESTER_TAB = "Zσ Strat Tester"
+RUN_STRATEGY_TAB = "Run Strategy"   # Phase 10B — action-oriented tab label (Tester = subtitle)
 PAPER_PORTFOLIO_TAB = "Paper Portfolio"
 LIVE_COCKPIT_TAB = "Live Cockpit"
 STRATEGY_BUILDER_TAB = "Zσ Strat Builder"   # Phase 9F rename
@@ -46,7 +47,7 @@ def tab_labels() -> list[str]:
     return [
         f"🛰 {LIVE_COCKPIT_TAB}",
         f"🧱 {STRATEGY_BUILDER_TAB}",
-        f"🧪 {STRAT_TESTER_TAB}",
+        f"🧪 {RUN_STRATEGY_TAB}",
         f"💼 {PAPER_PORTFOLIO_TAB}",
         f"📊 {STATS_TAB}",
         f"⚙ {SETTINGS_TAB}",
@@ -236,9 +237,10 @@ def friendly_log_label(filename: str) -> str:
 
 # ── Phase 9F — button labels (verb-first, consistent) ────────────────────────
 
-BTN_PREVIEW = "👁 Preview strategy"
-BTN_START_TEST = "▶ Start local paper test"
-BTN_STOP_TEST = "■ Stop test"
+BTN_PREVIEW = "👁 Preview Strategy"
+BTN_START_TEST = "▶ Start Paper Test"
+BTN_STOP_TEST = "■ Stop Test"
+BTN_REVIEW = "📄 Review Latest"
 BTN_CLEAR_STALE = "🧹 Clear stale runner"
 BTN_REFRESH = "🔄 Refresh status"
 BTN_RECORD_MANUAL = "Record manual paper trade"
@@ -255,7 +257,7 @@ def button_labels() -> dict[str, str]:
     """All operator button labels (pure — for tests + reuse)."""
     return {
         "preview": BTN_PREVIEW, "start": BTN_START_TEST, "stop": BTN_STOP_TEST,
-        "clear_stale": BTN_CLEAR_STALE, "refresh": BTN_REFRESH,
+        "review": BTN_REVIEW, "clear_stale": BTN_CLEAR_STALE, "refresh": BTN_REFRESH,
         "record_manual": BTN_RECORD_MANUAL, "apply_session": BTN_APPLY_SESSION,
         "new": BTN_NEW_PROFILE, "edit": BTN_EDIT_PROFILE, "clone": BTN_CLONE_PROFILE,
         "load": BTN_LOAD_PROFILE, "save": BTN_SAVE_PROFILE, "validate": BTN_VALIDATE,
@@ -342,6 +344,151 @@ def friendly_run_label(*, run_id: Any = None, profile_name: Any = None,
 def running_display(active: Any) -> str:
     """'Active: True/False' → operator 'Running: Yes/No'."""
     return "Yes" if bool(active) else "No"
+
+
+# ── Phase 10B UI hotfix — trader-first status labels (raw IDs → short copy) ───
+# Pure 1–2 word converters for the read-only status cards so Simple Mode never
+# shows clipped raw enums (TRADE_CALL_CREDIT / chain_returned_validation_failed /
+# vertical_wing_v1 / zerosigma_api). Raw values stay available in Advanced.
+
+def provider_short(name: Any) -> str:
+    """Compact provider label for status cards: zerosigma_api→'Zσ API',
+    tastytrade→'Tasty', mock→'Mock', stub→'Stub', null→'Manual'."""
+    n = str(name or "").strip().lower()
+    return {"zerosigma_api": "Zσ API", "tastytrade": "Tasty", "mock": "Mock",
+            "stub": "Stub", "null": "Manual"}.get(n, str(name) if name else "—")
+
+
+def decision_label(decision: Any) -> str:
+    """Raw decision / side → trader copy. TRADE_CALL_CREDIT / CALL_CREDIT →
+    'Call Credit'; TRADE_PUT_CREDIT / PUT_CREDIT → 'Put Credit'; NO_TRADE →
+    'No Trade'. Anything else passes through (or '—' when empty)."""
+    d = str(decision or "").strip().upper()
+    known = {
+        "TRADE_CALL_CREDIT": "Call Credit", "CALL_CREDIT": "Call Credit",
+        "TRADE_PUT_CREDIT": "Put Credit", "PUT_CREDIT": "Put Credit",
+        "NO_TRADE": "No Trade",
+    }
+    if d in known:
+        return known[d]
+    return str(decision) if decision not in (None, "", "—") else "—"
+
+
+def side_label(side: Any) -> str:
+    """CALL_CREDIT → 'Call Credit', PUT_CREDIT → 'Put Credit' (alias of decision_label)."""
+    return decision_label(side)
+
+
+def runner_state_label(status: Any) -> str:
+    """Runner state → Title Case: stopped→'Stopped', running→'Running',
+    stopping→'Stopping', starting→'Starting', stale→'Stale', error→'Error',
+    completed→'Completed'."""
+    s = str(status or "stopped").strip().lower()
+    known = {"stopped": "Stopped", "running": "Running", "stopping": "Stopping",
+             "starting": "Starting", "stale": "Stale", "error": "Error",
+             "completed": "Completed"}
+    return known.get(s, s.title() if s else "Stopped")
+
+
+_QUOTE_STATE_SHORT = {
+    "chain_returned_usable": "Available",
+    "chain_unavailable": "No Chain",
+    "mock": "Sandbox",
+    "not_configured": "Not Configured",
+    "auth_failed": "Auth Failed",
+    "root_unresolved": "No Root",
+    "expiration_unavailable": "No Expiry",
+    "unknown_error": "Unknown",
+}
+
+
+def quote_state_label(state: Any, top_blocker: Any = None) -> str:
+    """Short 1–2 word card label for a cockpit_quote_status state. The
+    validation-blocked state splits on the blocker: stale → 'Stale', else →
+    'Validation Blocked'. Keeps the long cockpit_quote_status['label'] untouched."""
+    s = str(state or "").strip()
+    if s == "chain_returned_validation_failed":
+        return "Stale" if str(top_blocker or "").lower() == "stale" else "Validation Blocked"
+    return _QUOTE_STATE_SHORT.get(s, "Unknown")
+
+
+def quote_state_banner(state: Any, symbol: Any, top_blocker: Any = None) -> str | None:
+    """Trader-facing banner for a quote state. None when quotes are usable/sandbox."""
+    s = str(state or "").strip()
+    sym = str(symbol or "—")
+    if s == "chain_returned_validation_failed":
+        if str(top_blocker or "").lower() == "stale":
+            return ("Tasty chain returned, but quotes are stale. Structure preview only — "
+                    "live eligibility will re-check during RTH.")
+        return ("Tasty chain returned, but quote validation blocked usable candidates. "
+                f"Reason: {top_blocker or 'validation'}.")
+    if s in ("chain_returned_usable", "mock"):
+        return None
+    if s == "not_configured":
+        return f"Tasty is not configured for {sym}. Add TASTY_* OAuth credentials to .env."
+    if s == "auth_failed":
+        return f"Tasty auth failed / session invalid for {sym}."
+    if s == "root_unresolved":
+        return f"Tasty could not resolve the option root for {sym}."
+    if s == "expiration_unavailable":
+        return f"Tasty has no matching expiration for {sym} right now."
+    return (f"Tasty market data unavailable for {sym}. The market may be closed or the "
+            "symbol unsupported by the market-data engine. Try during RTH or use Sandbox.")
+
+
+def stale_quote_mode_banner(symbol: Any) -> str:
+    """After-hours / stale-quote sub-text (shown only when stale is the top blocker)."""
+    return (f"Structure is live from Zσ, but Tasty quotes for {symbol} are stale. Candidate "
+            "pricing is preview-only until fresh RTH quotes arrive.")
+
+
+def _strike_short(v: Any) -> str:
+    try:
+        f = float(v)
+        return str(int(f)) if f == int(f) else str(f)
+    except (TypeError, ValueError):
+        return "—"
+
+
+def candidate_label(side: Any, short_strike: Any, long_strike: Any) -> str:
+    """'Put Credit 7550/7545' from side + strikes (drops trailing .0)."""
+    return f"{decision_label(side)} {_strike_short(short_strike)}/{_strike_short(long_strike)}"
+
+
+def candidate_status_label(*, rejected: Any = False, risk_rejection_type: Any = None,
+                           quote_state: Any = None, top_blocker: Any = None,
+                           eligible_base: Any = None, preset_kind: Any = None) -> str:
+    """Trader status pill for a candidate (display only — never changes selection):
+    'Observe only' / 'Blocked: stale quotes' / 'Blocked: quote validation' /
+    'Blocked: risk cap' / 'Blocked: filters' / 'Eligible'."""
+    if str(preset_kind or "").lower() == "observe":
+        return "Observe only"
+    if str(quote_state or "") == "chain_returned_validation_failed":
+        return ("Blocked: stale quotes" if str(top_blocker or "").lower() == "stale"
+                else "Blocked: quote validation")
+    if risk_rejection_type:
+        return "Blocked: risk cap"
+    if rejected:
+        return "Blocked: filters"
+    if eligible_base is False:
+        return "Blocked: not eligible"
+    return "Eligible"
+
+
+def header_status_cells(*, strategy: Any, structure: Any, quotes: Any, runner: Any,
+                        last_signal: Any, paper_pnl: Any,
+                        safety: str = "No Broker") -> list[tuple[str, str]]:
+    """Friendly (label, value) pairs for the READ-ONLY header status summary.
+    All values must already be short/friendly (use the converters above)."""
+    return [
+        ("Strategy", str(strategy) if strategy else "—"),
+        ("Structure", str(structure) if structure else "—"),
+        ("Quotes", str(quotes) if quotes else "—"),
+        ("Runner", str(runner) if runner else "Stopped"),
+        ("Last Signal", str(last_signal) if last_signal else "—"),
+        ("Paper P&L", str(paper_pnl) if paper_pnl else "$0.00"),
+        ("Safety", safety),
+    ]
 
 
 # ── Phase 9H/9I — profile grouping by purpose + run/selection mismatch ───────

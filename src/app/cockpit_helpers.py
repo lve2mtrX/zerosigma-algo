@@ -777,6 +777,205 @@ def quote_chain_status(*, resolved_quote_name: Any, quote_status: Any = None,
             "advanced": advanced}
 
 
+# ── cockpit quote STATE model (distinct buckets, not one "unavailable") ──────
+# Classifies the cockpit's ACTUAL fetched chain + provider state into one of nine
+# distinct states so the UI never collapses a returned-but-validation-blocked
+# chain into a generic "unavailable". PURE — reads already-fetched data; no
+# network, no secrets.
+
+COCKPIT_QUOTE_STATES: tuple[str, ...] = (
+    "not_configured", "auth_failed", "root_unresolved", "expiration_unavailable",
+    "chain_unavailable", "chain_returned_validation_failed", "chain_returned_usable",
+    "mock", "unknown_error",
+)
+
+_COCKPIT_QUOTE_LABELS: dict[str, str] = {
+    "not_configured": "not configured",
+    "auth_failed": "auth failed",
+    "root_unresolved": "root unresolved",
+    "expiration_unavailable": "expiration unavailable",
+    "chain_unavailable": "chain unavailable",
+    "chain_returned_validation_failed": "chain returned / validation blocked",
+    "chain_returned_usable": "available",
+    "mock": "mock",
+    "unknown_error": "unknown error",
+}
+
+_GENERIC_NO_CHAIN_BANNER = (
+    "Tasty market data unavailable for {symbol}. The market may be closed, quotes "
+    "stale, or the symbol unsupported by the market-data engine. Try Sandbox mode "
+    "or check during RTH."
+)
+
+
+def _eligible_hint(state: str) -> str:
+    if state == "chain_returned_usable":
+        return "yes"
+    if state == "chain_returned_validation_failed":
+        return "blocked"
+    if state == "mock":
+        return "sandbox"
+    return "no"
+
+
+def _cockpit_banner(state: str, symbol: str, top_blocker: Any) -> str | None:
+    if state in ("chain_returned_usable", "mock"):
+        return None
+    if state == "chain_returned_validation_failed":
+        blk = f" ({top_blocker})" if top_blocker else ""
+        return (
+            f"Tasty chain returned for {symbol}, but quote validation blocked usable "
+            f"candidates{blk}. No eligible setup could be priced under the current "
+            "quote-validation rules."
+        )
+    if state == "not_configured":
+        return (f"Tasty is not configured for {symbol}. Add TASTY_* OAuth credentials "
+                "to .env (see the 'Why are quotes unavailable?' details).")
+    if state == "auth_failed":
+        return f"Tasty auth failed / session invalid for {symbol}."
+    if state == "root_unresolved":
+        return f"Tasty could not resolve the option root for {symbol}."
+    if state == "expiration_unavailable":
+        return f"Tasty has no matching expiration for {symbol} right now."
+    if state == "unknown_error":
+        return f"Tasty market data unavailable for {symbol} (unexpected provider state)."
+    # chain_unavailable → the original generic banner (this is the ONLY place it shows)
+    return _GENERIC_NO_CHAIN_BANNER.format(symbol=symbol)
+
+
+def cockpit_quote_status(
+    *,
+    symbol: Any,
+    resolved_quote_name: Any,
+    chain: Any,
+    quote_status: Any = None,
+    quote_provider_error: Any = None,
+    structure_error: Any = None,
+    max_spread_abs: Any = None,
+    max_age_seconds: Any = None,
+    requested_strikes: Any = None,
+) -> dict[str, Any]:
+    """Classify the cockpit's quote state from the ALREADY-FETCHED chain + provider.
+
+    Returns {state, label, available, eligible_hint, banner, details}. `available`
+    is True only when there are usable (validation-not-failed, priceable) quotes,
+    or for the sandbox mock. Never raises; never echoes secrets (only counts,
+    thresholds, root/expiry, and sanitized provider error strings).
+    """
+    name = str(resolved_quote_name or "").lower()
+    last_error = getattr(quote_status, "last_error", None)
+    le = str(last_error).lower() if last_error else ""
+    quotes = list(getattr(chain, "quotes", None) or []) if chain is not None else []
+    root = getattr(chain, "resolved_root_symbol", None) if chain is not None else None
+    expiry = getattr(chain, "expiry", None) if chain is not None else None
+    strikes = sorted({
+        q.strike for q in quotes if getattr(q, "strike", None) is not None
+    })
+
+    failed = [q for q in quotes if getattr(q, "validation_passed", None) is False]
+    usable = [
+        q for q in quotes
+        if getattr(q, "validation_passed", None) is not False
+        and getattr(q, "mid", None) is not None
+    ]
+    blockers: dict[str, int] = {}
+    observed_failing_spread: float | None = None
+    for q in failed:
+        reason = str(getattr(q, "validation_rejection_reason", None) or "unknown")
+        key = reason.split("(")[0]
+        blockers[key] = blockers.get(key, 0) + 1
+        b, a = getattr(q, "bid", None), getattr(q, "ask", None)
+        if b is not None and a is not None and "spread" in key:
+            observed_failing_spread = max(observed_failing_spread or 0.0, float(a) - float(b))
+    top_blocker = max(blockers, key=lambda k: blockers[k]) if blockers else None
+
+    if name in ("mock", "stub"):
+        state = "mock"
+    elif chain is None:
+        if quote_provider_error:
+            state = "not_configured"
+        elif "auth" in le:
+            state = "auth_failed"
+        elif "expir" in le:
+            state = "expiration_unavailable"
+        elif "unresolved" in le or "root" in le:
+            state = "root_unresolved"
+        elif "quote_fetch" in le or "http" in le:
+            state = "chain_unavailable"
+        elif name == "null":
+            state = "chain_unavailable"
+        elif structure_error:
+            state = "chain_unavailable"
+        elif le:
+            state = "unknown_error"
+        else:
+            state = "chain_unavailable"
+    else:
+        state = ("chain_returned_validation_failed" if (quotes and not usable)
+                 else "chain_returned_usable")
+
+    req = sorted({float(s) for s in (requested_strikes or [])})
+    returned = set(strikes)
+    missing = [s for s in req if s not in returned]
+
+    details = {
+        "quote_provider": resolved_quote_name,
+        "chain_returned": chain is not None,
+        "quote_count": len(quotes),
+        "validation_passed_count": len(usable),
+        "validation_failed_count": len(failed),
+        "validation_blockers": blockers,
+        "top_blocker": top_blocker,
+        "max_spread_abs": (float(max_spread_abs) if max_spread_abs is not None else None),
+        "max_age_seconds": (float(max_age_seconds) if max_age_seconds is not None else None),
+        "observed_failing_spread": (round(observed_failing_spread, 2)
+                                    if observed_failing_spread is not None else None),
+        "root": root,
+        "expiration": expiry,
+        "strike_min": strikes[0] if strikes else None,
+        "strike_max": strikes[-1] if strikes else None,
+        "requested_strikes": req,
+        "missing_strikes": missing,
+        "last_error": last_error,
+    }
+    return {
+        "state": state,
+        "label": _COCKPIT_QUOTE_LABELS.get(state, "unknown error"),
+        "available": state in ("chain_returned_usable", "mock"),
+        "eligible_hint": _eligible_hint(state),
+        "banner": _cockpit_banner(state, str(symbol or "—"), top_blocker),
+        "details": details,
+    }
+
+
+def build_quote_request(symbol: Any, structure: Any, strategies: Any):  # type: ignore[no-untyped-def]
+    """Build the SAME structure-anchored QuoteRequest the scanner uses, so the
+    cockpit's Tasty chain fetch supplies required_strikes (the REST provider
+    returns no chain without them). Pure; no network."""
+    from src.providers.quotes.types import QuoteRequest
+    req: set[float] = set()
+    for strat in (strategies or {}).values():
+        fn = getattr(strat, "required_quote_strikes", None)
+        if not callable(fn):
+            continue
+        try:
+            for k in fn(structure, getattr(strat, "default_parameters", {}) or {}) or ():
+                if k is not None:
+                    req.add(float(k))
+        except Exception:        # never fail the render on one strategy's hint
+            continue
+    spot = getattr(structure, "spot", None)
+    if not (isinstance(spot, (int, float)) and spot > 0):
+        spot = getattr(getattr(structure, "exposures", None), "maxvol", None)
+    return QuoteRequest(
+        symbol=symbol,
+        expiry=getattr(structure, "expiry", None),
+        spot_hint=(float(spot) if isinstance(spot, (int, float)) and spot > 0 else None),
+        required_strikes=tuple(sorted(req)),
+        spot_hint_source="structure_spot",
+    )
+
+
 # ── equity curve + drawdown math (from closed-trade rows) ────────────────────
 
 def _f(v: Any) -> float | None:

@@ -15,6 +15,7 @@ controller (a background `run_forward` monitor) — no brokerage anywhere.
 
 from __future__ import annotations
 
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -46,6 +47,7 @@ from src.providers.quotes import tasty_diagnostics as tasty_diag  # noqa: E402
 from src.providers.quotes.factory import build_quote_provider  # noqa: E402
 from src.providers.quotes.tastytrade_provider import (  # noqa: E402
     TastytradeConfigurationError,
+    validation_from_env,
 )
 from src.providers.structure.factory import build_structure_provider  # noqa: E402
 from src.providers.structure.stub import StubStructureProvider  # noqa: E402
@@ -266,8 +268,26 @@ except Exception as exc:
     resolved_structure_name = "stub"
     structure = structure_provider.get_snapshot(SYMBOL)
 spot_quote = quote_provider.get_spot(SYMBOL)
-chain = quote_provider.get_option_chain(SYMBOL, expiry=structure.expiry)
+# Build the SAME structure-anchored QuoteRequest the scanner uses. The Tasty REST
+# provider returns NO chain without `required_strikes` (it never pulls whole
+# chains), which previously made the cockpit show "market data unavailable" even
+# though auth/root/expiry/chain all worked. Mock/stub use the request for
+# strike-alignment. (Selection/strategy logic is unchanged.)
+quote_request = ch.build_quote_request(SYMBOL, structure, STRATEGIES)
+chain = quote_provider.get_option_chain(SYMBOL, expiry=structure.expiry, request=quote_request)
 quote_status = quote_provider.status()
+
+# Reconcile the cockpit's quote STATE from the chain it ACTUALLY fetched (no extra
+# network) — distinct buckets, never one generic "unavailable".
+QUOTE_VALIDATION = validation_from_env()
+QUOTE_STATUS = ch.cockpit_quote_status(
+    symbol=SYMBOL, resolved_quote_name=resolved_quote_name, chain=chain,
+    quote_status=quote_status, quote_provider_error=quote_provider_error,
+    structure_error=structure_error,
+    max_spread_abs=QUOTE_VALIDATION.max_spread_abs,
+    max_age_seconds=QUOTE_VALIDATION.max_age_seconds,
+    requested_strikes=quote_request.required_strikes,
+)
 
 session: SessionConfig = st.session_state["session_config"]
 baseline: SessionConfig = st.session_state["session_baseline"]
@@ -297,7 +317,10 @@ def render_symbol_health() -> None:
     ZerσSigma EXPOSURES, and SANDBOX from unavailable LIVE data (sandbox reads
     'sandbox mock' / 'sandbox stub', never an alarming 'unavailable')."""
     sandbox = om.is_sandbox(resolved_structure_name, resolved_quote_name)
-    market_data_available = chain is not None
+    # Phase 10B hotfix — "market data available" means USABLE quotes (validation
+    # not failed), not merely a non-None chain. A returned-but-validation-blocked
+    # Tasty chain is its own state, not "unavailable".
+    market_data_available = QUOTE_STATUS["available"]
     exposures_available = (
         structure_error is None and structure is not None
         and (structure.exposures.da_gex_signed is not None
@@ -306,16 +329,29 @@ def render_symbol_health() -> None:
     view = om.symbol_health_view(
         symbol=SYMBOL, sandbox=sandbox,
         market_data_available=market_data_available, exposures_available=exposures_available)
+    _tb = QUOTE_STATUS["details"].get("top_blocker")
+    _q_short = om.quote_state_label(QUOTE_STATUS["state"], _tb)
     cols = st.columns(5)
     cols[0].metric("Symbol", view["symbol"])
-    cols[1].metric("Tasty market data", view["market_data"])
-    cols[2].metric("ZerσSigma exposures", view["exposures"])
-    cols[3].metric("Strategy eligible", view["eligible"])
+    # Phase 10B — short, readable quote-state label (no clipped long copy).
+    cols[1].metric("Quotes", view["market_data"] if sandbox else _q_short)
+    cols[2].metric("Exposures", view["exposures"])
+    _elig = ("blocked" if (not sandbox
+             and QUOTE_STATUS["state"] == "chain_returned_validation_failed")
+             else view["eligible"])
+    cols[3].metric("Strategy eligible", _elig)
     cols[4].markdown("<div class='zsa-pill-cell'>" + ui.pill("NO BROKER EXECUTION", "green")
                      + "</div>", unsafe_allow_html=True)
     if view["note"]:
         st.caption(view["note"])
-    if view["reason"]:
+    # Precise, trader-facing quote-state banner (stale wording when after-hours).
+    _banner = None if sandbox else om.quote_state_banner(QUOTE_STATUS["state"], SYMBOL, _tb)
+    if _banner:
+        st.warning(_banner)
+        if (QUOTE_STATUS["state"] == "chain_returned_validation_failed"
+                and str(_tb).lower() == "stale"):
+            st.caption("🌙 After-hours / stale quote mode — " + om.stale_quote_mode_banner(SYMBOL))
+    elif view["reason"]:
         st.warning(view["reason"])
 
 
@@ -439,7 +475,29 @@ def render_operator_decision() -> None:
     left.markdown(f"**Structure Read**  \n{layer['structure_read']}")
     left.markdown(f"**Trade Bias**  \n{layer['trade_bias']}")
     left.markdown(f"**Candidate Risk**  \n{layer['candidate_risk']}")
-    right.markdown(f"**Best Eligible Setup**  \n{layer['best_eligible_setup']}")
+    # Phase 10B — only say "Best Eligible Setup" when quotes are actually usable.
+    # A stale/validation-blocked top candidate is a PREVIEW, not an eligible setup.
+    _tb = QUOTE_STATUS["details"].get("top_blocker")
+    if best:
+        _setup = om.candidate_label(best.get("side"), best.get("short"), best.get("long"))
+        _bits = []
+        if isinstance(best.get("score"), (int, float)):
+            _bits.append(f"score {best['score']:.2f}")
+        if best.get("credit") is not None:
+            _bits.append(f"credit {ch.fmt_money(best['credit'])}")
+        if _bits:
+            _setup += " — " + ", ".join(_bits)
+        if QUOTE_STATUS["available"]:
+            right.markdown(f"**Best Eligible Setup**  \n{_setup}")
+        elif (QUOTE_STATUS["state"] == "chain_returned_validation_failed"
+              and str(_tb).lower() == "stale"):
+            right.markdown(f"**Best Candidate Preview — Stale Quotes**  \n{_setup}  \n"
+                           "_Blocked: stale quotes — preview pricing only._")
+        else:
+            right.markdown(f"**Best Candidate Preview — Blocked**  \n{_setup}  \n"
+                           f"_Blocked: {om.quote_state_label(QUOTE_STATUS['state'], _tb).lower()}._")
+    else:
+        right.markdown(f"**Best Eligible Setup**  \nNo eligible setup. {layer['best_eligible_setup']}")
     right.markdown(f"**Why / Why Not**  \n{layer['why_why_not']}")
     st.caption(
         f"Gamma source: {gamma['source'].replace('_', ' ')} · {gamma['note']}  ·  "
@@ -525,20 +583,27 @@ def render_market() -> None:
         st.caption("10K wings (and true WDS) require upstream exposure volume ≥ 10,000 "
                    "(subscription series); unavailable in sandbox / mock data.")
 
-    if chain is None:
-        # Phase 9I — say WHY (concise in Simple, raw provider state in Advanced).
-        _qstat = ch.quote_chain_status(
-            resolved_quote_name=resolved_quote_name, quote_status=quote_status,
-            quote_provider_error=quote_provider_error, structure_error=structure_error,
-            chain=None)
-        st.warning(f"{_qstat['simple_reason']} Showing Zσ structure context only.")
-        _actions = ch.chain_unavailable_actions(
-            resolved_quote_name, last_error=getattr(quote_status, "last_error", None))
-        for _a in (_actions[:2] if simple_mode else _actions):
-            st.caption(f"• {_a}")
-        if not simple_mode:
-            with st.expander("Quote diagnostics (raw provider status)", expanded=False):
-                st.json(_qstat["advanced"], expanded=False)
+    # ── Phase 10B hotfix — precise quote STATE (not one generic "unavailable").
+    # A returned-but-validation-blocked Tasty chain is NOT "unavailable" — say so.
+    if not QUOTE_STATUS["available"]:
+        _det = QUOTE_STATUS["details"]
+        if QUOTE_STATUS["state"] == "chain_returned_validation_failed":
+            _tb = _det.get("top_blocker")
+            st.warning(om.quote_state_banner(QUOTE_STATUS["state"], SYMBOL, _tb))
+            st.caption(
+                f"Quotes: **{om.quote_state_label(QUOTE_STATUS['state'], _tb)}** — chain returned "
+                f"({_det['quote_count']} quotes · {_det['root'] or '—'} @ "
+                f"{_det['expiration'] or '—'}), {_det['validation_failed_count']} failed validation "
+                f"· blocker `{_tb or '—'}` (max_spread_abs={_det['max_spread_abs']}, observed worst "
+                f"spread {_det['observed_failing_spread']}). Structure preview only."
+            )
+        else:
+            # genuine no-chain / auth / root / config state
+            st.warning(f"{QUOTE_STATUS['banner']} Showing Zσ structure context only.")
+            _actions = ch.chain_unavailable_actions(
+                resolved_quote_name, last_error=getattr(quote_status, "last_error", None))
+            for _a in (_actions[:2] if simple_mode else _actions):
+                st.caption(f"• {_a}")
 
     st.caption(
         f"Structure from `{structure.source}` @ {structure.quote_ts.isoformat()}  ·  "
@@ -552,11 +617,35 @@ def render_market() -> None:
     # Walks config → auth/session → SPX root → expiry/DTE → chain → quote
     # validation and surfaces the exact blocker. Button-gated so it only hits
     # Tasty on demand (not every render). No orders, no order preview, no secrets.
-    with st.expander("Why are quotes unavailable?", expanded=False):
+    with st.expander("Quote status & diagnostics (read-only)", expanded=False):
+        # The cockpit's ACTUAL quote state — derived from the chain the app already
+        # fetched (no extra network). Surfaces the validation config + exact blocker.
+        _d = QUOTE_STATUS["details"]
+        st.markdown(f"**Cockpit quote state:** `{QUOTE_STATUS['state']}` → "
+                    f"**{QUOTE_STATUS['label']}**")
+        for _l, _v in (
+            ("QUOTE_PROVIDER (resolved)", resolved_quote_name),
+            ("TASTY_ENV", os.environ.get("TASTY_ENV") or "—"),
+            ("root / expiration", f"{_d['root'] or '—'} @ {_d['expiration'] or '—'}"),
+            ("chain returned", _d["chain_returned"]),
+            ("quote count", _d["quote_count"]),
+            ("validation passed / failed",
+             f"{_d['validation_passed_count']} / {_d['validation_failed_count']}"),
+            ("top validation blocker", _d["top_blocker"] or "—"),
+            ("strike range", f"{_d['strike_min']} – {_d['strike_max']}"),
+            ("max_spread_abs / max_age_s", f"{_d['max_spread_abs']} / {_d['max_age_seconds']}"),
+            ("observed worst spread", _d["observed_failing_spread"]),
+            ("missing strikes", _d["missing_strikes"] or "—"),
+            ("last_error", _d["last_error"] or "—"),
+        ):
+            st.text(f"{_l:<28}: {_v}")
+        st.caption("max_spread_abs is the `TASTY_QUOTE_MAX_SPREAD_ABS` env cap (per-leg, "
+                   "$ absolute). SPX index options can exceed a tight $5 cap — raise it in "
+                   ".env if validation is over-blocking.")
+        st.divider()
         st.caption(
-            "Read-only Tasty quote-path check: configured → auth/session → SPX root → "
-            "expiry/DTE → chain → quote validation. No orders, no order preview, no secrets. "
-            "(ZerσSigma supplies structure/exposures; Tasty supplies the quote chain.)"
+            "Live read-only network probe (config → auth/session → SPX root → expiry/DTE → "
+            "chain → validation). No orders, no order preview, no secrets."
         )
         _dc = st.columns([1, 2])
         _ddte = int(_dc[0].selectbox("Target DTE", [0, 1], index=0, key="tasty_diag_dte"))
@@ -651,6 +740,12 @@ def render_candidates() -> None:
             c.meta["_readiness"] = dict(readiness)
 
             rows.append({
+                "Setup": om.candidate_label(c.side, c.short_strike, c.long_strike),
+                "Status": om.candidate_status_label(
+                    rejected=c.rejected, risk_rejection_type=readiness.get("risk_rejection_type"),
+                    quote_state=QUOTE_STATUS["state"],
+                    top_blocker=QUOTE_STATUS["details"].get("top_blocker"),
+                    eligible_base=readiness.get("selector_eligible_base")),
                 "side": c.side,
                 "short K": c.short_strike,
                 "long K": c.long_strike,
@@ -710,8 +805,8 @@ def render_candidates() -> None:
             sc = candidates[i]
             st.success(
                 f"Daily selector (`{_sel.daily_selector_mode}`): selected "
-                f"{sc.side} {sc.short_strike}/{sc.long_strike} "
-                f"(score {sc.score:.3f}, credit {sc.credit:.2f}) — "
+                f"{om.candidate_label(sc.side, sc.short_strike, sc.long_strike)} "
+                f"(score {sc.score:.2f}, credit {ch.fmt_money(sc.credit)}) — "
                 f"{_sel.per_row[i]['selector_reason']}"
             )
         else:
@@ -728,9 +823,16 @@ def render_candidates() -> None:
                 f"gap {c.score_gap_to_threshold:+.4f}"
                 if c.score_gap_to_threshold is not None else ""
             )
+            _rd_c = c.meta.get("_readiness") or {}
+            _status_c = om.candidate_status_label(
+                rejected=c.rejected, risk_rejection_type=_rd_c.get("risk_rejection_type"),
+                quote_state=QUOTE_STATUS["state"],
+                top_blocker=QUOTE_STATUS["details"].get("top_blocker"),
+                eligible_base=_rd_c.get("selector_eligible_base"))
             label = (
-                f"{sel_badge}{c.side}  K {c.short_strike}/{c.long_strike}  "
-                f"score {c.score:.4f}  ({gap_str})  rejection={c.rejection_type or '—'}"
+                f"{sel_badge}{om.candidate_label(c.side, c.short_strike, c.long_strike)}  ·  "
+                f"score {c.score:.2f}  ·  credit {ch.fmt_money(c.credit)}  ·  {_status_c}"
+                + (f"  ({gap_str})" if not simple_mode and gap_str else "")
             )
             with st.expander(label, expanded=(c.rejection_type == "selected")):
                 etop = st.columns(4)
@@ -841,12 +943,15 @@ def render_candidates() -> None:
                         f"strict_target_dte: `{strict_on}`  ·  passed: `{strict_ok}`  "
                         "_(CLI scanner gate; not enforced in this inline preview)_"
                     )
-                st.json(c.score_breakdown, expanded=False)
+                if simple_mode:
+                    st.caption("Full score breakdown (raw) is shown in Advanced Mode.")
+                else:
+                    st.json(c.score_breakdown, expanded=False)
 
     decision = strat.select(candidates, params)
     st.subheader("Decision")
     badge = {"TRADE_CALL_CREDIT": "success", "TRADE_PUT_CREDIT": "success", "NO_TRADE": "warning"}
-    getattr(st, badge.get(decision.decision, "info"))(decision.decision)
+    getattr(st, badge.get(decision.decision, "info"))(om.decision_label(decision.decision))
     st.write(decision.explanation)
 
 
@@ -1124,13 +1229,18 @@ def render_strategy_builder() -> None:
 
 
 def render_forward_runner() -> None:
-    st.subheader("🧪 Zσ Strat Tester — local paper strategy test")
+    st.subheader("🧪 Run Strategy — local paper test")
+    st.caption("Zσ Strat Tester · run a saved strategy as a local paper test.")
     st.markdown(ui.pill(control_ui.EXECUTION_BANNER, "green"), unsafe_allow_html=True)
-    st.caption(
-        "**Step 1** select a strategy profile → **Step 2** preview → **Step 3** start a "
-        "local paper test → **Step 4** stop → **Step 5** review the latest result. "
-        "LOCAL PAPER TEST ONLY — no broker orders, no order preview, no live execution."
+    # Phase 10B — prominent "Run a Strategy" step panel (Simple-Mode call-to-action).
+    st.markdown("#### ▶ Run a Strategy")
+    st.markdown(
+        "**1. Choose strategy** (dropdown below) → **2. Confirm data source** (Live / Sandbox) → "
+        "**3. Preview Strategy** (one paper tick) → **4. Start Paper Test** → "
+        "**5. Stop Test / Review Latest**"
     )
+    st.caption("Paper test only. No broker execution. No order preview.")
+    st.divider()
     # Phase 9E — active profile / symbol / data source context.
     _tester_prof = next((r.profile for r in list_run_profiles()
                          if r.ok and r.profile and r.profile.profile_id == chosen_profile_id), None)
@@ -1171,8 +1281,9 @@ def render_forward_runner() -> None:
     # Phase 9D — latest decision + open paper P&L at a glance.
     _rs_hb = _hb
     _rs_ps = portfolio_ledger.load_summary("latest") or {}
-    _rs_sel = (f"{_rs_hb.get('latest_decision')} (selected)" if _rs_hb.get("selected_trade")
-               else (_rs_hb.get("latest_decision") or "—"))
+    _rs_sel = (f"{om.decision_label(_rs_hb.get('latest_decision'))} (selected)"
+               if _rs_hb.get("selected_trade")
+               else om.decision_label(_rs_hb.get("latest_decision")))
     st.caption(
         f"Latest decision: **{_rs_sel}**  ·  open paper trades: "
         f"**{_rs_ps.get('open_trade_count', 0)}**  ·  realized P&L: "
@@ -1273,7 +1384,7 @@ def render_forward_runner() -> None:
         st.warning("⚠ " + _mismatch["message"])
 
     can, why = control_ui.can_start(control_ui.get_status())
-    bcols = st.columns(5)
+    bcols = st.columns(6)
     if bcols[0].button(om.BTN_REFRESH, key="runner_refresh"):
         st.rerun()
     if bcols[1].button(om.BTN_PREVIEW, disabled=not runner_profiles or not can,
@@ -1299,7 +1410,9 @@ def render_forward_runner() -> None:
         ok, msg = control_ui.stop_runner(force=bool(st.session_state.get("runner_force", False)))
         (st.success if ok else st.warning)(msg)
         st.rerun()
-    if bcols[4].button(om.BTN_CLEAR_STALE, key="runner_cleanup"):
+    if bcols[4].button(om.BTN_REVIEW, key="runner_review"):
+        st.info("Latest test review is shown below ↓ (read-only — no broker, no orders).")
+    if bcols[5].button(om.BTN_CLEAR_STALE, key="runner_cleanup"):
         ok, msg = control_ui.cleanup()
         (st.success if ok else st.warning)(msg)
         st.rerun()
@@ -1897,21 +2010,29 @@ _strip_hb = forward_review.load_latest_heartbeat() or {}
 _strip_psum = portfolio_ledger.load_summary("latest") or {}
 _strip_profile = (chosen_profile_id if chosen_profile_id and chosen_profile_id != "(none)"
                   else (st.session_state.get("active_strategy") or "—"))
-_strip_selected = _strip_hb.get("latest_decision") if _strip_hb.get("selected_trade") else "—"
-_strip_open = _strip_psum.get("open_trade_count", len(paper_account.open_positions))
+_strip_last = _strip_hb.get("latest_decision") or "—"
 _strip_real = _strip_psum.get("realized_pnl", paper_account.realized_pnl)
-_strip_cells = ch.status_strip_cells(
-    run_profile=_strip_profile, structure_name=resolved_structure_name,
-    quote_name=resolved_quote_name, runner_status=_strip_runner["status"],
-    selected_trade=_strip_selected, open_trades=_strip_open, realized_pnl=_strip_real,
+# Phase 10B — friendly, READ-ONLY status summary. Short 1–2 word values so cards
+# never clip (no raw TRADE_CALL_CREDIT / chain_returned_validation_failed / IDs).
+_strip_cells = om.header_status_cells(
+    strategy=om.strategy_display_name(st.session_state.get("active_strategy")),
+    structure=om.provider_short(resolved_structure_name),
+    quotes=om.quote_state_label(QUOTE_STATUS["state"],
+                                QUOTE_STATUS["details"].get("top_blocker")),
+    runner=om.runner_state_label(_strip_runner["status"]),
+    last_signal=om.decision_label(_strip_last),
+    paper_pnl=ch.fmt_money(_strip_real),
 )
-_strip_cols = st.columns(len(_strip_cells) + 1)
+st.caption("Status Summary — read-only (this row reports state; it does not run anything).")
+_strip_cols = st.columns(len(_strip_cells))
 for _col, (_lbl, _val) in zip(_strip_cols, _strip_cells, strict=False):
-    _col.metric(_lbl, _val)
-_strip_cols[-1].markdown(
-    "<div class='zsa-pill-cell'>" + ui.pill("NO BROKER EXECUTION", "green") + "</div>",
-    unsafe_allow_html=True,
-)
+    if _lbl == "Safety":
+        _col.markdown(f"<div class='zsa-pill-cell' title='No broker execution'>{_lbl}<br>"
+                      + ui.pill("NO BROKER", "green") + "</div>", unsafe_allow_html=True)
+    else:
+        _col.metric(_lbl, _val)
+st.caption("▶ To run a strategy, open the **🧪 Run Strategy** tab (Choose → Preview → "
+           "Start Paper Test → Review). Paper test only — no broker execution.")
 
 # Phase 9E — branded tab labels (Zσ Strat Tester / Paper Portfolio; no "Forward Runner").
 tab_live, tab_builder, tab_tester, tab_portfolio, tab_logs, tab_settings = st.tabs(om.tab_labels())
