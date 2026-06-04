@@ -10,6 +10,7 @@ var PRESENCE (never reads or returns secret values).
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -395,3 +396,540 @@ def latest_best_candidate(output_root: Path | str | None = None) -> dict[str, An
         return None
     bc = data.get("best_candidate_of_day")
     return bc if isinstance(bc, dict) else None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 9H — operator decision layer + Wing Stack + primary/secondary gamma
+# (pure: translate raw structure into human-readable operator context; NEVER
+# invents data — a missing field reads "unavailable")
+# ══════════════════════════════════════════════════════════════════════════════
+
+def fmt_distance(v: Any) -> str:
+    """Signed distance in points: 5.0 → '+5', -12.5 → '-12.50'. None → '—'."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{int(x):+d}" if x == int(x) else f"{x:+.2f}"
+
+
+def _num_or_none(v: Any) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _wing_entry(label: str, tier: str, strike: Any, spot: float | None) -> dict[str, Any]:
+    st = _num_or_none(strike)
+    sp = _num_or_none(spot)
+    dist = (st - sp) if (st is not None and sp is not None) else None
+    return {
+        "label": label, "tier": tier, "strike": st,
+        "strike_fmt": fmt_strike(st) if st is not None else "—",
+        "distance": dist,
+        "distance_fmt": fmt_distance(dist) if dist is not None else "—",
+        "available": st is not None,
+    }
+
+
+def wing_stack(exposures: Any, spot: Any = None) -> dict[str, Any]:
+    """Structured Wing Stack: PUT_CEILING + CALL_FLOOR at the 2K / 5K / 10K tiers,
+    plus the nearest wing and the 'primary' wing (the strongest available tier,
+    nearest spot). Missing tiers are marked available=False (shown as '—')."""
+    ex = exposures
+    sp = _num_or_none(spot)
+    put_ceilings = [
+        _wing_entry("PUT_CEILING 2K", "2k", getattr(ex, "put_ceiling_2k", None), sp),
+        _wing_entry("PUT_CEILING 5K", "5k", getattr(ex, "put_ceiling_5k", None), sp),
+        _wing_entry("PUT_CEILING 10K", "10k", getattr(ex, "put_ceiling_10k", None), sp),
+    ]
+    call_floors = [
+        _wing_entry("CALL_FLOOR 2K", "2k", getattr(ex, "call_floor_2k", None), sp),
+        _wing_entry("CALL_FLOOR 5K", "5k", getattr(ex, "call_floor_5k", None), sp),
+        _wing_entry("CALL_FLOOR 10K", "10k", getattr(ex, "call_floor_10k", None), sp),
+    ]
+    available = [e for e in (put_ceilings + call_floors) if e["available"]]
+
+    nearest = None
+    if available and sp is not None:
+        nearest = min(available, key=lambda e: abs(e["distance"]))
+
+    # Primary wing = strongest available tier (10K > 5K > 2K), nearest spot within it.
+    primary = None
+    for tier in ("10k", "5k", "2k"):
+        tier_entries = [e for e in available if e["tier"] == tier]
+        if tier_entries:
+            primary = (min(tier_entries, key=lambda e: abs(e["distance"]))
+                       if sp is not None else tier_entries[0])
+            break
+
+    return {
+        "put_ceilings": put_ceilings,
+        "call_floors": call_floors,
+        "nearest_wing": nearest,
+        "primary_wing": primary,
+        "spot": sp,
+        "any_available": bool(available),
+    }
+
+
+def primary_secondary_gamma(exposures: Any, spot: Any = None) -> dict[str, Any]:
+    """Primary / secondary gamma levels for the prime cards + decision layer.
+
+    Prefers the mapped ZS payload clusters (`gamma_primary` / `gamma_secondary`).
+    When absent, DERIVES a display-only primary/secondary from the available
+    gamma structure (call_wall / put_wall / gamma_flip) ranked by closeness to
+    spot — deterministic. When nothing is available, source='unavailable' and the
+    summary says so (never invents a value)."""
+    ex = exposures
+    sp = _num_or_none(spot)
+    gp = _num_or_none(getattr(ex, "gamma_primary", None))
+    gs = _num_or_none(getattr(ex, "gamma_secondary", None))
+
+    if gp is not None:
+        source, primary, secondary = "payload_cluster", gp, gs
+        note = "From ZS gamma clusters (gamma.cluster_primary / cluster_secondary)."
+    else:
+        # deterministic derivation from available gamma structure
+        cands: list[float] = []
+        for v in (getattr(ex, "call_wall", None), getattr(ex, "put_wall", None),
+                  getattr(ex, "gamma_flip", None)):
+            n = _num_or_none(v)
+            if n is not None and n not in cands:
+                cands.append(n)
+        if sp is not None:
+            cands.sort(key=lambda v: abs(v - sp))
+        else:
+            cands.sort(reverse=True)
+        if cands:
+            source = "derived_from_walls"
+            primary = cands[0]
+            secondary = cands[1] if len(cands) > 1 else None
+            note = "Derived from gamma walls/flip nearest spot (no explicit clusters in payload)."
+        else:
+            source, primary, secondary = "unavailable", None, None
+            note = "Primary/secondary gamma unavailable from current structure payload."
+
+    return {
+        "primary": primary, "primary_fmt": fmt_strike(primary) if primary is not None else "—",
+        "secondary": secondary,
+        "secondary_fmt": fmt_strike(secondary) if secondary is not None else "—",
+        "source": source,
+        "available": primary is not None,
+        "note": note,
+    }
+
+
+# DDOI is intentionally NOT a prime cockpit card (Phase 9H). It is shown only
+# under Advanced Structure / raw diagnostics, and only when a value is present.
+DDOI_HELP = ("DDOI is a dealer-positioning pin/gravity reference. It is only shown "
+             "when available and relevant.")
+
+
+def ddoi_advanced(exposures: Any) -> dict[str, Any]:
+    """DDOI for the Advanced Structure expander only (never a prime card)."""
+    v = _num_or_none(getattr(exposures, "ddoi_pin", None))
+    if v is None:
+        return {"value": None, "value_fmt": "—", "available": False,
+                "note": "Unavailable — DDOI is not in the current public ZS payload."}
+    return {"value": v, "value_fmt": fmt_strike(v), "available": True,
+            "note": "Dealer-positioning pin/gravity reference."}
+
+
+def _spot_vs_level(spot: float | None, level: float | None, near_pts: float = 8.0) -> str:
+    """'below' / 'above' / 'near' a level (or '' when either is missing)."""
+    if spot is None or level is None:
+        return ""
+    diff = spot - level
+    if abs(diff) <= near_pts:
+        return "near"
+    return "above" if diff > 0 else "below"
+
+
+def operator_decision_layer(*, spot: Any, gamma_regime: Any, da_gex: Any,
+                            gamma: dict[str, Any], wings: dict[str, Any],
+                            best_eligible: dict[str, Any] | None = None,
+                            chain_available: bool = True) -> dict[str, str]:
+    """Translate structure into the 5-part operator summary. Pure; every part is
+    guarded so missing data reads 'unavailable' rather than inventing context.
+
+    `gamma` = output of `primary_secondary_gamma`; `wings` = output of `wing_stack`.
+    """
+    sp = _num_or_none(spot)
+    regime = gamma_regime if isinstance(gamma_regime, str) and gamma_regime else None
+    g_primary = gamma.get("primary")
+    near = wings.get("nearest_wing")
+    primary_wing = wings.get("primary_wing")
+
+    # ── Structure Read ──
+    parts: list[str] = []
+    parts.append(f"Spot {fmt_price(sp)}." if sp is not None else "Spot unavailable.")
+    if gamma.get("available"):
+        rel = _spot_vs_level(sp, g_primary)
+        seg = f"Primary gamma {gamma['primary_fmt']}"
+        if gamma.get("secondary") is not None:
+            seg += f", secondary gamma {gamma['secondary_fmt']}"
+        if rel:
+            seg += f"; spot is {rel} primary gamma"
+        parts.append(seg + ".")
+    else:
+        parts.append("Primary/secondary gamma unavailable from current structure payload.")
+    if near:
+        parts.append(f"Nearest wing: {near['label']} at {near['strike_fmt']} "
+                     f"({near['distance_fmt']} pts).")
+    parts.append(f"Gamma regime is {regime}." if regime else "Gamma regime unavailable.")
+    structure_read = " ".join(parts)
+
+    # ── Trade Bias ──
+    if regime == "negative":
+        bias = ("Negative gamma regime — structure may be less pinning and moves can "
+                "accelerate (more directional). Put-credit candidates need bullish "
+                "confirmation; call-credit candidates must respect overhead structure.")
+    elif regime == "positive":
+        bias = ("Positive gamma regime — structure tends to pin/mean-revert toward gamma "
+                "levels, so range-bound credit setups are more favorable. Still respect "
+                "the nearest wing on each side.")
+    else:
+        bias = "Gamma regime unavailable — directional bias cannot be inferred from structure."
+
+    # ── Candidate Risk ──
+    if near and near.get("distance") is not None:
+        d = abs(near["distance"])
+        proximity = ("Spot is close to" if d <= 10 else "Spot has room to")
+        risk = (f"{proximity} the nearest wing ({near['label']} {near['strike_fmt']}, "
+                f"{near['distance_fmt']} pts).")
+        if regime == "negative":
+            risk += " Negative gamma can accelerate a breach of that level."
+        if primary_wing and primary_wing is not near:
+            risk += f" Primary wing: {primary_wing['label']} {primary_wing['strike_fmt']}."
+    else:
+        risk = "Wing structure unavailable — candidate breach risk cannot be assessed."
+
+    # ── Best Eligible Setup ──
+    if best_eligible:
+        be = best_eligible
+        bits = [str(be.get("side") or "setup")]
+        if be.get("short") is not None and be.get("long") is not None:
+            bits.append(f"{fmt_strike(be['short'])}/{fmt_strike(be['long'])}")
+        tail = []
+        if be.get("score") is not None:
+            tail.append(f"score {be['score']}")
+        if be.get("credit") is not None:
+            tail.append(f"credit {fmt_money(be['credit'])}")
+        best = " ".join(bits) + (f" — {', '.join(tail)}" if tail else "")
+        if be.get("reason"):
+            best += f". {be['reason']}"
+    elif not chain_available:
+        best = "Quote chain unavailable — no eligible setup can be priced this scan."
+    else:
+        best = "No eligible setup surfaced in the current scan (see Ranked candidates)."
+
+    # ── Why / Why Not ──
+    if best_eligible:
+        why = ("Why: this side cleared the selector's eligibility + risk gates"
+               + (f" ({best_eligible.get('reason')})" if best_eligible.get("reason") else "")
+               + ".")
+    else:
+        why = ("Why not: no candidate cleared the selector gates this scan — check Ranked "
+               "candidates for blockers (score threshold, quote validation, side filters).")
+    if regime == "negative":
+        why += " Negative gamma argues for tighter respect of the nearest wall."
+    elif regime == "positive":
+        why += " Positive gamma supports range-bound credit capture near structure."
+
+    return {
+        "structure_read": structure_read,
+        "trade_bias": bias,
+        "candidate_risk": risk,
+        "best_eligible_setup": best,
+        "why_why_not": why,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 9I — quote-chain diagnostics + stats/drawdown math + EOD staleness
+# (pure: read-only translation of provider/ledger state into trader-facing copy
+# and chartable series; NEVER overclaims a reason it cannot detect)
+# ══════════════════════════════════════════════════════════════════════════════
+
+QUOTE_REASON_SIMPLE: dict[str, str] = {
+    "chain_available": "Quotes available.",
+    "provider_mock": "Using sandbox mock quotes (not live market data).",
+    "tasty_config_mock_fallback": "Tasty not configured — using sandbox mock quotes (check .env).",
+    "provider_null": "Quotes unavailable: provider is set to manual marks (null).",
+    "tasty_config_error": "Quotes unavailable: Tastytrade is not configured (check .env).",
+    "tasty_auth_failed": "Quotes unavailable: Tastytrade authentication failed.",
+    "root_or_expiry_unresolved": "Quotes unavailable: Tasty could not resolve the root/expiry.",
+    "tasty_http_error": "Quotes unavailable: Tastytrade returned an error fetching quotes.",
+    "tasty_no_chain": "Quotes unavailable: Tasty returned no chain for the selected expiry/root.",
+    "structure_error": "Quotes unavailable: the exposure/structure provider errored.",
+    "market_closed_or_stale": "Quotes unavailable: market closed or stale Tasty chain.",
+    "unknown": "Quotes unavailable: provider returned no usable chain.",
+}
+
+
+def quote_chain_status(*, resolved_quote_name: Any, quote_status: Any = None,
+                       quote_provider_error: Any = None, structure_error: Any = None,
+                       chain: Any = None) -> dict[str, Any]:
+    """Diagnose WHY a quote chain is (un)available → {available, reason_code,
+    simple_reason, advanced}. Deterministic; never overclaims — unknown causes
+    fall back to 'provider returned no usable chain'. Pure, never raises."""
+    name = str(resolved_quote_name or "").lower()
+    last_error = getattr(quote_status, "last_error", None)
+    notes = getattr(quote_status, "notes", None)
+    connected = getattr(quote_status, "connected", None)
+    last_chain_ts = getattr(quote_status, "last_chain_ts", None)
+    provider = getattr(quote_status, "provider_name", None) or resolved_quote_name
+
+    advanced = {
+        "provider": provider,
+        "connected": connected,
+        "last_error": last_error,
+        "last_chain_ts": str(last_chain_ts) if last_chain_ts is not None else None,
+        "notes": notes,
+        "quote_provider_error": quote_provider_error,
+        "structure_error": structure_error,
+        "chain_present": chain is not None,
+    }
+
+    if chain is not None:
+        # A present chain means quotes ARE usable. If we're on mock because a
+        # Tasty config error forced a fallback, say so (still available).
+        if name == "mock" and quote_provider_error:
+            code = "tasty_config_mock_fallback"
+        elif name == "mock":
+            code = "provider_mock"
+        else:
+            code = "chain_available"
+        return {"available": True, "reason_code": code,
+                "simple_reason": QUOTE_REASON_SIMPLE[code], "advanced": advanced}
+
+    # chain is None → diagnose the cause.
+    if name == "null":
+        code = "provider_null"
+    elif name == "mock":
+        code = "provider_mock"
+    elif quote_provider_error:
+        code = "tasty_config_error"
+    elif isinstance(last_error, str) and last_error:
+        le = last_error.lower()
+        if "auth_failed" in le:
+            code = "tasty_auth_failed"
+        elif "chain_unresolved" in le:
+            code = "root_or_expiry_unresolved"
+        elif "quote_fetch_failed" in le:
+            code = "tasty_http_error"
+        else:
+            code = "market_closed_or_stale"
+    elif structure_error:
+        code = "structure_error"
+    elif connected is False and name == "tastytrade":
+        code = "tasty_no_chain"
+    elif last_chain_ts is None and name == "tastytrade":
+        code = "market_closed_or_stale"
+    else:
+        code = "unknown"
+
+    return {"available": False, "reason_code": code,
+            "simple_reason": QUOTE_REASON_SIMPLE.get(code, QUOTE_REASON_SIMPLE["unknown"]),
+            "advanced": advanced}
+
+
+# ── equity curve + drawdown math (from closed-trade rows) ────────────────────
+
+def _f(v: Any) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def equity_curve_from_closed_trades(closed_trades: list[dict] | None) -> list[dict[str, Any]]:
+    """Time-ordered cumulative realized P&L. Each point: {closed_at, realized_pnl,
+    cumulative}. Sorted by closed_at (rows with no realized_pnl are skipped)."""
+    rows: list[tuple[str, float]] = []
+    for t in closed_trades or []:
+        rp = _f(t.get("realized_pnl"))
+        if rp is None:
+            continue
+        rows.append((str(t.get("closed_at") or ""), rp))
+    rows.sort(key=lambda r: r[0])
+    out: list[dict[str, Any]] = []
+    cum = 0.0
+    for closed_at, rp in rows:
+        cum += rp
+        out.append({"closed_at": closed_at, "realized_pnl": round(rp, 2),
+                    "cumulative": round(cum, 2)})
+    return out
+
+
+def drawdown_series(cumulative_values: list[Any]) -> list[dict[str, float]]:
+    """Per-point {peak, drawdown} over a cumulative-equity series. drawdown =
+    value - running_peak (always <= 0)."""
+    out: list[dict[str, float]] = []
+    peak: float | None = None
+    for v in cumulative_values:
+        x = _f(v)
+        if x is None:
+            out.append({"peak": round(peak, 2) if peak is not None else 0.0, "drawdown": 0.0})
+            continue
+        peak = x if peak is None else max(peak, x)
+        out.append({"peak": round(peak, 2), "drawdown": round(x - peak, 2)})
+    return out
+
+
+def max_drawdown(cumulative_values: list[Any], starting_balance: Any = None) -> dict[str, Any]:
+    """Max peak-to-trough drawdown over a cumulative-equity series. When
+    ``starting_balance`` is given, percent is computed against peak EQUITY
+    (balance + cumulative); otherwise pct is None unless the peak cumulative > 0."""
+    base = _f(starting_balance) or 0.0
+    peak: float | None = None
+    peak_i = 0
+    mdd = 0.0
+    mdd_peak: float | None = None
+    mdd_trough: float | None = None
+    pi = ti = 0
+    for i, v in enumerate(cumulative_values):
+        x = _f(v)
+        if x is None:
+            continue
+        eq = base + x
+        if peak is None or eq > peak:
+            peak, peak_i = eq, i
+        dd = eq - peak
+        if dd < mdd:
+            mdd, mdd_peak, mdd_trough, pi, ti = dd, peak, eq, peak_i, i
+    pct = round(mdd / mdd_peak * 100.0, 2) if (mdd_peak and mdd_peak > 0) else None
+    return {
+        "max_drawdown": round(mdd, 2),
+        "peak_value": round(mdd_peak, 2) if mdd_peak is not None else None,
+        "trough_value": round(mdd_trough, 2) if mdd_trough is not None else None,
+        "peak_index": pi, "trough_index": ti, "max_drawdown_pct": pct,
+    }
+
+
+def daily_pnl_from_closed_trades(closed_trades: list[dict] | None) -> list[dict[str, Any]]:
+    """date (YYYY-MM-DD of closed_at) → summed realized P&L, ordered by date."""
+    acc: dict[str, float] = {}
+    for t in closed_trades or []:
+        rp = _f(t.get("realized_pnl"))
+        ca = t.get("closed_at")
+        if rp is None or not ca:
+            continue
+        day = str(ca)[:10]
+        acc[day] = acc.get(day, 0.0) + rp
+    return [{"date": d, "realized_pnl": round(acc[d], 2)} for d in sorted(acc)]
+
+
+def pnl_by_profile(closed_trades: list[dict] | None) -> list[dict[str, Any]]:
+    """Per-profile realized P&L + win/loss counts, ordered by profile_id."""
+    acc: dict[str, float] = {}
+    wins: dict[str, int] = {}
+    losses: dict[str, int] = {}
+    for t in closed_trades or []:
+        rp = _f(t.get("realized_pnl"))
+        if rp is None:
+            continue
+        pid = str(t.get("profile_id") or "—")
+        acc[pid] = acc.get(pid, 0.0) + rp
+        if rp > 0:
+            wins[pid] = wins.get(pid, 0) + 1
+        elif rp < 0:
+            losses[pid] = losses.get(pid, 0) + 1
+    return [{"profile_id": p, "realized_pnl": round(acc[p], 2),
+             "wins": wins.get(p, 0), "losses": losses.get(p, 0)} for p in sorted(acc)]
+
+
+def trade_outcome_counts(closed_trades: list[dict] | None) -> dict[str, Any]:
+    """{wins, losses, flat, total, win_rate%} from closed-trade realized P&L."""
+    wins = losses = flat = 0
+    for t in closed_trades or []:
+        rp = _f(t.get("realized_pnl"))
+        if rp is None:
+            continue
+        if rp > 0:
+            wins += 1
+        elif rp < 0:
+            losses += 1
+        else:
+            flat += 1
+    decided = wins + losses
+    return {"wins": wins, "losses": losses, "flat": flat, "total": wins + losses + flat,
+            "win_rate": round(wins / decided * 100.0, 1) if decided else 0.0}
+
+
+def exit_reason_counts(closed_trades: list[dict] | None) -> list[tuple[str, int]]:
+    """Exit-reason histogram (take_profit / stop_loss / eod_exit / …), most first."""
+    acc: dict[str, int] = {}
+    for t in closed_trades or []:
+        r = str(t.get("exit_reason") or "unknown")
+        acc[r] = acc.get(r, 0) + 1
+    return sorted(acc.items(), key=lambda kv: -kv[1])
+
+
+# ── EOD summary staleness (file mtime vs latest run) ─────────────────────────
+
+def _parse_dt(v: Any) -> datetime | None:
+    """Parse an ISO string OR epoch float → naive datetime. None/invalid → None.
+    Pure: parses GIVEN values, never reads the clock."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(v))
+        except (OverflowError, OSError, ValueError):
+            return None
+    s = str(v).strip().replace("Z", "+00:00")
+    if not s:
+        return None
+    for cand in (s, s[:19]):
+        try:
+            dt = datetime.fromisoformat(cand)
+            return dt.replace(tzinfo=None) if dt.tzinfo else dt
+        except ValueError:
+            continue
+    return None
+
+
+def is_eod_stale(eod_generated_at: Any, latest_run_at: Any) -> bool:
+    """True when the EOD summary is missing or predates the latest run. Args may
+    be ISO strings, epoch floats, or None."""
+    e = _parse_dt(eod_generated_at)
+    if e is None:
+        return True                      # no EOD summary → stale
+    r = _parse_dt(latest_run_at)
+    if r is None:
+        return False                     # have EOD, no run to compare → fresh enough
+    return e < r
+
+
+def eod_summary_status(output_root: Path | str | None = None,
+                       forward_root: Path | str | None = None) -> dict[str, Any]:
+    """Read-only: EOD summary presence + staleness vs the latest forward run.
+    Returns {exists, generated_at, date, latest_run_at, stale, note}."""
+    from src.forward import review as fr
+    base = Path(output_root) if output_root else (_REPO_ROOT / "outputs")
+    eod_path = base / "latest" / "eod_summary.json"
+    exists = eod_path.is_file()
+    generated_at = None
+    mtime = None
+    date = None
+    if exists:
+        try:
+            mtime = eod_path.stat().st_mtime
+            generated_at = datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
+        except (OSError, OverflowError, ValueError):
+            generated_at = None
+        date = (_read_json_file(eod_path) or {}).get("date")
+    man = fr.load_latest_manifest(forward_root) or {}
+    latest_run_at = man.get("started_at") or man.get("ended_at")
+    stale = is_eod_stale(mtime, latest_run_at)
+    if not exists:
+        note = "No EOD summary generated yet."
+    elif stale:
+        note = "EOD summary is older than the latest local paper run — regenerate to refresh."
+    else:
+        note = "EOD summary is up to date with the latest run."
+    return {"exists": exists, "generated_at": generated_at, "date": date,
+            "latest_run_at": latest_run_at, "stale": stale, "note": note}

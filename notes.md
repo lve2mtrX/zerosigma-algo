@@ -2285,3 +2285,165 @@ the import cleanly.
 Next: Phase 10 = historical/snapped-data backtest adapter (will let these presets be
 measured on archived data). Phase 11 = per-profile TP/SL + dynamic-exit lifecycle
 wiring + Tastytrade execution readiness, still deferred.
+
+## 2026-06-03 — Phase 9H / 10-prep: operator decision layer + 10K wings + primary/secondary gamma + backtest plan
+
+Operator-cockpit cleanup + structure-display depth + Phase 10 prep. NO scanner/
+selector/quote/lifecycle/risk MATH change; no broker execution. (9G was committed by
+Dan as 2ffa705 before this turn — clean tree.)
+
+Structure model (src/providers/structure/types.py): ExposureContext gained
+put_ceiling_10k / call_floor_10k (+ _volume), gamma_primary / gamma_secondary — all
+optional defaults (backward compatible; ExposureContext() still valid). ddoi_pin field
+KEPT (Advanced/raw only now).
+
+ZS mapper (zerosigma_api.py): 10K wings derived the SAME way as 2K/5K
+(_highest/_lowest_strike_where at threshold 10000) from the subscription volume series;
+gamma_primary/secondary mapped from gamma.cluster_primary / cluster_secondary (+ aliases
+primary/secondary/_strike). Both tracked in `missing`. EXTRACTED a reusable
+`build_snapshot_from_payload(snap_payload, vol_series, *, symbol, source)` method (the
+post-fetch mapping moved out of get_snapshot, behavior-preserving — 53 provider tests
+green) so the Phase 10 replay loader reuses the EXACT live mapping (no fork). Stub:
+10K derives honestly to None (mock chain peaks ~5.5K volume; demonstrates the
+"unavailable" path) + demo gamma clusters 5795/5825 for the sandbox.
+
+DDOI: per the updated requirement, REMOVED from the prime Live Cockpit cards (it was
+never wired — zerosigma_api sets ddoi_pin=None; "still not in the public payload"). It
+now lives ONLY in the Advanced structure / raw diagnostics expander with the help text
+"DDOI is a dealer-positioning pin/gravity reference. It is only shown when available
+and relevant." Replaced in prime by Primary Gamma + Secondary Gamma.
+
+Pure helpers (src/app/cockpit_helpers.py): wing_stack() (2K/5K/10K put ceilings + call
+floors, nearest wing = min |dist|, primary wing = strongest available tier nearest
+spot, signed distances); primary_secondary_gamma() (source ∈ payload_cluster /
+derived_from_walls / unavailable — derivation ranks call_wall/put_wall/gamma_flip by
+closeness to spot, deterministic; never invents); ddoi_advanced() + DDOI_HELP;
+operator_decision_layer() → the 5-part summary (Structure Read / Trade Bias / Candidate
+Risk / Best Eligible Setup / Why·Why Not), every part guarded so missing data reads
+"unavailable", references primary/secondary gamma + nearest wing + regime; fmt_distance.
+operator_mode.py: profile_category / group_profiles_by_category / profiles_in_category
+(Primary live paper tests → Controls → Research/Observe → Legacy; Primary first) +
+DEFAULT_SIMPLE_CATEGORY; run_profile_mismatch(selected, latest_run) → warning.
+
+Live Cockpit (streamlit_main.py): new render_operator_decision() inserted ABOVE Market/
+structure (tab_live order: symbol_health → operator_decision → provider_status → market
+→ candidates). Best Eligible Setup uses a guarded read-only _compute_best_eligible()
+(re-derives the top eligible candidate; any failure → None → honest "no eligible setup
+surfaced" — does NOT change scanner/selector math). render_market reworked: prime cards
+= Spot / Gamma regime / DA-GEX / MaxVol / Primary gamma / Secondary gamma (DDOI gone);
+new Wing Stack section (put ceilings + call floors 2K/5K/10K + nearest/primary + signed
+distance + a "10K requires upstream volume ≥10,000" note when absent); walls/flip/DDOI
+moved into an "Advanced structure / raw diagnostics" expander.
+
+Tester + Builder: Simple Mode now shows a "Profile group" radio (Primary first) that
+filters the dropdown to one category; Advanced Mode exposes all. Tester gained a
+"Latest completed test" section (profile/name/status from the forward manifest) + a
+mismatch warning when the latest run's profile ≠ the selected profile ("Start a new
+local paper test …"). Builder preset dropdown now uses friendly badge labels + grouping.
+
+Backtest prep (Phase 10): docs/phase10_backtest_plan.md (discovery → file locations →
+snapshot schema (raw payload OR {snapshot, exposure_series, symbol} bundle) →
+wingonomics review → StructureSnapshot mapping via the shared method → quote/chain
+availability + fallbacks (mock re-centered on snapshot spot) → same selector + same
+paper lifecycle reuse → per-preset output comparison → the 7 backtest questions →
+build order). Minimal SAFE scaffold: src/replay/ (snapshot_loader: map_payload_to_
+snapshot / load_snapshot_record (raw+bundle) / load_snapshot_file / discover_snapshot_
+files — pure, reuses build_snapshot_from_payload) + scripts/discover_replay_data.py
+(read-only; reports 0 files today + documents the needed capture step). No scanner/
+selector fork; no execution.
+
+Tests: test_phase9h_structure.py (12) + test_phase9h_helpers.py (13) +
+test_phase9h_ui.py (8) — 10K derivation, gamma mapping + aliases, stub honesty, shared
+mapper + replay parity, wing stack tiers/nearest/primary, gamma source modes, DDOI
+advanced-only + help, decision-layer parts/gamma-reference/unavailable/no-chain,
+mismatch, grouping (primary first), prime cards have gamma not DDOI, operator panel above
+market, no-exec scan. Full suite 623 passed, ruff clean.
+
+WIRED vs DEFERRED: 10K wings + gamma clusters are WIRED (mapped + displayed + in
+candidate-visible ExposureContext). 10K is only POPULATED when the subscription volume
+series carries ≥10,000-volume strikes (sandbox/public → None, shown as "—" + note).
+Backtest is PLAN + scaffold only (no capture step / no ReplayProvider yet).
+
+Next: Phase 10 implementation (capture step + ReplayStructureProvider/ReplayQuoteProvider
++ run_backtest + per-preset comparison). Phase 11 = per-profile TP/SL + dynamic-exit
+lifecycle wiring + Tastytrade execution readiness, still deferred.
+
+## 2026-06-03 — Phase 9I: trader-first UI cleanup + live-test readiness + stats charts + backtest research
+
+Made the cockpit feel like a trader cockpit, not a debug console. NO scanner/
+selector/risk/paper-P&L MATH change; no broker execution. Used a 5-agent read-only
+research WORKFLOW first to map every UI/data-source/stats/EOD surface + discover the
+real backtest data on disk, then implemented directly (one coupled streamlit file →
+sequential). 9H was uncommitted on entry (Dan committed 9G as 2ffa705) — expected
+dirtiness, no divergence; built 9I on top.
+
+Pure helpers (testable, no streamlit):
+- operator_mode: resolve_run_source(app_ds, profile_struct, profile_quote, prefer) →
+  {mismatch, winner, data_source(Live/Sandbox), exposure_label, market_data_label,
+  providers, message} — NEVER silently mismatches; run_source_status (ready/warning/
+  unavailable); data_source_short; RUN_SOURCE_APP/PROFILE; simple_mode_profile_ids
+  (Main-only vs show-all). Category RELABEL: Primary live paper tests→**Main
+  Strategies**, Controls→**Comparison Tests**, Research/Observe→**Research / Disabled**,
+  Legacy→**Legacy / Archived** (updated 9H tests).
+- cockpit_helpers: quote_chain_status(...) → {available, reason_code, simple_reason,
+  advanced} mapping last_error patterns (auth_failed/chain_unresolved/quote_fetch_
+  failed) + provider mock/null + config-fallback + structure_error → concise reason;
+  never overclaims (unknown→"provider returned no usable chain"). Stats math from
+  closed trades: equity_curve_from_closed_trades, drawdown_series, max_drawdown
+  (+pct vs peak equity when starting_balance given), daily_pnl, pnl_by_profile,
+  trade_outcome_counts, exit_reason_counts. EOD staleness: is_eod_stale (tz-safe) +
+  eod_summary_status (eod file mtime vs forward manifest started_at).
+
+control_ui: start_runner + safe_command gained quote_provider/structure_provider
+passthrough (control.start/build_command already supported them — additive, no runner
+behavior change) so the Tester can run a profile on the APP data source.
+
+streamlit_main (items 1–9):
+1. Data source: top Tester metric = **App data source**; a "Data source for this run"
+   panel resolves App vs Profile (Data/Exposure/Market source + Status badge) + a
+   mismatch WARNING; Advanced toggle (app vs profile wins), Simple Mode = app wins
+   (explicit caption). Resolved providers passed as overrides to Preview/Start when app
+   wins.
+2. Quote diagnostics: render_market chain-None now says WHY (quote_chain_status) —
+   concise in Simple, raw provider state under an Advanced expander.
+3. Advanced structure / raw diagnostics (incl. DDOI) gated behind `if not simple_mode`
+   — gone from the normal flow; DDOI never in prime.
+4. Profile dropdown: Simple Mode shows ONLY Main Strategies + a "Show comparison and
+   legacy profiles" checkbox (Tester + Builder); Advanced = all.
+5. Terminal commands: `python -m scripts…` blocks gated to Advanced (Tester expander +
+   Portfolio else-branch); Simple Mode gets buttons (Refresh portfolio / Reconcile /
+   plus Generate EOD + Refresh stats on the Stats page).
+6. Manual Paper Desk hidden in Simple Mode (Advanced only; renamed "Manual local paper
+   entry" + "Manual entries are local records only").
+7. Stats charts (Streamlit-native): equity curve (line), drawdown (area), daily P&L
+   (bar), P&L-by-profile + exit-reason tables, selected-signals-over-runs (bar), and
+   metrics (closed trades / win rate / realized P&L / **max drawdown** + %). Graceful
+   "More stats will appear…" empty state.
+8. EOD: prominent "Generate / Refresh EOD summary" button + last-generated timestamp +
+   ⚠stale/✅up-to-date badge + a SAFE one-shot auto-generate (guarded by
+   `_eod_autogen_done`; only when stale + has run data + runner not live — no background
+   loop, no broker, local outputs only).
+9. Latest-run clarity: Stats "Latest run" shows the friendly label (friendly_run_label);
+   full run id only in Advanced.
+
+Backtest research (item 10): scripts/discover_backtest_sources.py — HOME/env-derived
+roots (ZSA_TRADING_ROOT / --root / ~/Dropbox/Trading; ZSA_BACKTEST_DIRS), NO hardcoded
+username. Live run found: **145 SPX_RAW_*.csv** (Strike + CALL/PUT Volume present →
+usable), 78 SPX_1DTE, WINGONOMICS outputs (daily_stats + latest.json), the wingonomics
+script (reference, do-not-modify), Greek_Data_MASTER.xlsm + DeltaDrift PDFs (not
+usable). Key finding: **wingonomics.py detects 10K wings by the SAME volume-threshold
+logic our mapper uses** (call_floor = min strike where CALL Volume ≥ 10000) → replaying
+the raw CSVs should reproduce its wing levels; wingonomics_daily_stats.csv is the
+validation ground-truth. docs/phase10_backtest_plan.md §13 documents the sources, the
+CSV→exposure_series ETL, the quote-from-CSV-bid/ask path, env path approach, and the
+concrete build order. We CONSUME wingonomics; never run/modify it.
+
+Tests: test_phase9i_helpers.py (16) + test_phase9i_ui.py (10) + test_phase9i_discovery.py
+(6). Updated test_phase9h_helpers (category relabel) + test_phase9h_ui (grouping wiring
+→ simple_mode_profile_ids + checkbox). Full suite 654 passed, ruff clean,
+manage_profiles 14/14, streamlit import OK, discovery script runs read-only.
+
+Next: Phase 10 implementation (capture_exposures ETL over SPX_RAW CSVs →
+ReplayStructure/QuoteProvider → run_backtest per preset → review_backtest comparison vs
+wingonomics). Phase 11 = per-profile TP/SL + dynamic-exit lifecycle wiring + Tastytrade
+execution readiness, still deferred.

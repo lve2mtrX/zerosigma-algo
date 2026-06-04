@@ -380,6 +380,70 @@ def render_provider_status() -> None:
                 st.json(provider_status)
 
 
+def _compute_best_eligible() -> dict | None:
+    """Read-only: the top eligible candidate for the operator 'Best Eligible
+    Setup'. Mirrors Ranked-candidates generation but extracts a compact dict and
+    is fully guarded — any failure returns None (the decision layer then says no
+    eligible setup surfaced). Does NOT change scanner/selector math."""
+    try:
+        if not STRATEGIES or chain is None:
+            return None
+        strat = STRATEGIES[st.session_state["active_strategy"]]
+        params = {**(strat.default_parameters or {}), **session.to_filter_params()}
+        cands = strat.generate_candidates(structure, chain, params)
+        apply_filters(cands, session.to_filter_params())
+        for c in cands:
+            strat.score(c, structure, chain, params)
+        eligible = [c for c in cands if not getattr(c, "rejected", False)]
+        if not eligible:
+            return None
+        eligible.sort(key=lambda c: -(getattr(c, "score", 0.0) or 0.0))
+        c0 = eligible[0]
+        long_k = getattr(c0, "long_strike", None)
+        if long_k is None:
+            long_k = (c0.meta.get("long_leg") or {}).get("strike")
+        sc = getattr(c0, "score", None)
+        return {
+            "side": getattr(c0, "side", None),
+            "short": getattr(c0, "short_strike", None),
+            "long": long_k,
+            "score": round(sc, 4) if isinstance(sc, (int, float)) else None,
+            "credit": getattr(c0, "credit", None),
+            "reason": "top-scoring eligible candidate this scan",
+        }
+    except Exception:
+        return None
+
+
+def render_operator_decision() -> None:
+    """Phase 9H — operator decision layer: translate raw structure into a human
+    summary (Structure Read / Trade Bias / Candidate Risk / Best Eligible Setup /
+    Why·Why Not). Never invents data — missing fields read 'unavailable'."""
+    st.subheader("🧭 Operator read")
+    spot_val, _src = ch.spot_with_source(
+        chain.spot if chain else None, structure_spot,
+        spot_quote.last if spot_quote else None,
+    )
+    ex = structure.exposures
+    gamma = ch.primary_secondary_gamma(ex, spot_val)
+    wings = ch.wing_stack(ex, spot_val)
+    best = _compute_best_eligible()
+    layer = ch.operator_decision_layer(
+        spot=spot_val, gamma_regime=ex.gamma_regime, da_gex=ex.da_gex_signed,
+        gamma=gamma, wings=wings, best_eligible=best, chain_available=chain is not None,
+    )
+    left, right = st.columns(2)
+    left.markdown(f"**Structure Read**  \n{layer['structure_read']}")
+    left.markdown(f"**Trade Bias**  \n{layer['trade_bias']}")
+    left.markdown(f"**Candidate Risk**  \n{layer['candidate_risk']}")
+    right.markdown(f"**Best Eligible Setup**  \n{layer['best_eligible_setup']}")
+    right.markdown(f"**Why / Why Not**  \n{layer['why_why_not']}")
+    st.caption(
+        f"Gamma source: {gamma['source'].replace('_', ' ')} · {gamma['note']}  ·  "
+        "Operator read only — no broker execution."
+    )
+
+
 def render_market() -> None:
     st.subheader("Market / structure")
     # Phase 9D — spot fallback (prefer quote spot, fall back to Zσ structure spot).
@@ -388,27 +452,54 @@ def render_market() -> None:
         spot_quote.last if spot_quote else None,
     )
     ex = structure.exposures
+    gamma = ch.primary_secondary_gamma(ex, spot_val)
+    # ── Prime cards (Phase 9H: Primary/Secondary Gamma replace DDOI) ──
     top = st.columns(6)
     top[0].metric("Spot", ch.fmt_price(spot_val), spot_src)
-    top[1].metric("MaxVol", ch.fmt_strike(ex.maxvol))
-    top[2].metric("Call wall", ch.fmt_strike(ex.call_wall))
-    top[3].metric("Put wall", ch.fmt_strike(ex.put_wall))
-    top[4].metric("DA-GEX", ch.fmt_exposure(ex.da_gex_signed))
-    top[5].metric("Gamma regime", ch.gamma_regime_badge(ex.gamma_regime, ex.da_gex_signed))
+    top[1].metric("Gamma regime", ch.gamma_regime_badge(ex.gamma_regime, ex.da_gex_signed))
+    top[2].metric("DA-GEX", ch.fmt_exposure(ex.da_gex_signed))
+    top[3].metric("MaxVol", ch.fmt_strike(ex.maxvol))
+    top[4].metric("Primary gamma", gamma["primary_fmt"],
+                  gamma["source"].replace("_", " ") if gamma["available"] else None)
+    top[5].metric("Secondary gamma", gamma["secondary_fmt"])
+    if not gamma["available"]:
+        st.caption("Primary/secondary gamma unavailable from current structure payload.")
 
-    levels = st.columns(5)
-    levels[0].metric("PUT_CEILING 2K", ch.fmt_strike(ex.put_ceiling_2k))
-    levels[1].metric("PUT_CEILING 5K", ch.fmt_strike(ex.put_ceiling_5k))
-    levels[2].metric("CALL_FLOOR 2K", ch.fmt_strike(ex.call_floor_2k))
-    levels[3].metric("CALL_FLOOR 5K", ch.fmt_strike(ex.call_floor_5k))
-    levels[4].metric("DDOI pin", ch.fmt_strike(ex.ddoi_pin))
+    # ── Wing Stack (Phase 9H): put ceilings + call floors at 2K/5K/10K ──
+    ws = ch.wing_stack(ex, spot_val)
+    st.markdown("**Wing Stack** — structural levels by volume threshold")
+    pc = st.columns(3)
+    for _i, _e in enumerate(ws["put_ceilings"]):
+        pc[_i].metric(_e["label"], _e["strike_fmt"],
+                      f"{_e['distance_fmt']} pts" if _e["available"] else None)
+    cf = st.columns(3)
+    for _i, _e in enumerate(ws["call_floors"]):
+        cf[_i].metric(_e["label"], _e["strike_fmt"],
+                      f"{_e['distance_fmt']} pts" if _e["available"] else None)
+    near, prim = ws["nearest_wing"], ws["primary_wing"]
+    near_txt = (f"{near['label']} {near['strike_fmt']} ({near['distance_fmt']} pts)"
+                if near else "unavailable")
+    prim_txt = (f"{prim['label']} {prim['strike_fmt']} ({prim['distance_fmt']} pts)"
+                if prim else "unavailable")
+    st.caption(f"Nearest wing: **{near_txt}**  ·  Primary wing: **{prim_txt}**")
+    if not (ws["put_ceilings"][2]["available"] or ws["call_floors"][2]["available"]):
+        st.caption("10K wings require upstream exposure volume ≥ 10,000 (subscription "
+                   "series); unavailable in sandbox / mock data.")
 
     if chain is None:
-        st.warning("Quote chain unavailable — showing Zσ structure context only.")
-        for _a in ch.chain_unavailable_actions(
-            resolved_quote_name, last_error=getattr(quote_status, "last_error", None)
-        ):
+        # Phase 9I — say WHY (concise in Simple, raw provider state in Advanced).
+        _qstat = ch.quote_chain_status(
+            resolved_quote_name=resolved_quote_name, quote_status=quote_status,
+            quote_provider_error=quote_provider_error, structure_error=structure_error,
+            chain=None)
+        st.warning(f"{_qstat['simple_reason']} Showing Zσ structure context only.")
+        _actions = ch.chain_unavailable_actions(
+            resolved_quote_name, last_error=getattr(quote_status, "last_error", None))
+        for _a in (_actions[:2] if simple_mode else _actions):
             st.caption(f"• {_a}")
+        if not simple_mode:
+            with st.expander("Quote diagnostics (raw provider status)", expanded=False):
+                st.json(_qstat["advanced"], expanded=False)
 
     st.caption(
         f"Structure from `{structure.source}` @ {structure.quote_ts.isoformat()}  ·  "
@@ -416,6 +507,23 @@ def render_market() -> None:
         f"@ {chain.quote_ts.isoformat() if chain else '—'}  ·  "
         f"expiry {structure.expiry}  ·  DTE {structure.dte}"
     )
+
+    # ── Advanced structure / raw diagnostics (walls, flip, DDOI) — ADVANCED
+    # MODE ONLY (Phase 9I: removed from the normal trader flow + DDOI never in
+    # prime UI). ──
+    if not simple_mode:
+        with st.expander("Advanced structure / raw diagnostics", expanded=False):
+            adv = st.columns(4)
+            adv[0].metric("Call wall", ch.fmt_strike(ex.call_wall))
+            adv[1].metric("Put wall", ch.fmt_strike(ex.put_wall))
+            adv[2].metric("Gamma flip", ch.fmt_strike(ex.gamma_flip))
+            ddoi = ch.ddoi_advanced(ex)
+            adv[3].metric("DDOI pin", ddoi["value_fmt"])
+            st.caption(ddoi["note"])
+            st.caption(ch.DDOI_HELP)
+            _missing = (structure.raw or {}).get("missing_fields") or []
+            if _missing:
+                st.caption("Structure fields unavailable from payload: " + ", ".join(_missing))
 
 
 def render_candidates() -> None:
@@ -700,11 +808,27 @@ def render_strategy_builder() -> None:
     st.caption("CONFIG / SELECTION ONLY — no execution, no orders, no broker calls.")
 
     summaries = pb.list_summaries()
-    valid_ids = [s["profile_id"] for s in summaries if s.get("ok")]
+    _ok_summaries = [s for s in summaries if s.get("ok")]
+    valid_ids = [s["profile_id"] for s in _ok_summaries]
+    _builder_summ = {s["profile_id"]: s for s in _ok_summaries}
+
+    def _builder_label(pid: str) -> str:
+        s = _builder_summ.get(pid, {})
+        return om.profile_dropdown_label(pid, s.get("profile_name"), s.get("preset_kind"))
 
     # ── A. Preset strategy profiles + selected-profile info card ──
+    # Phase 9I — Simple Mode shows only Main Strategies; a checkbox reveals
+    # comparison + legacy. Advanced Mode shows all profiles.
     st.markdown("**Preset strategy profiles**")
-    sel_id = st.selectbox("Select a profile", options=valid_ids or ["(none)"],
+    if simple_mode and valid_ids:
+        _b_show_all = st.checkbox(
+            "Show comparison and legacy profiles", value=False, key="builder_show_all",
+            help="Off = only your Main Strategies. On = comparison, research, and legacy too.")
+        _builder_options = om.simple_mode_profile_ids(_ok_summaries, show_all=_b_show_all) or valid_ids
+    else:
+        _builder_options = om.order_profiles_for_dropdown(valid_ids)
+    sel_id = st.selectbox("Select a profile", options=_builder_options or ["(none)"],
+                          format_func=_builder_label if _builder_options else str,
                           key="builder_select")
     sel_dict = None
     if valid_ids and sel_id in valid_ids:
@@ -941,9 +1065,11 @@ def render_forward_runner() -> None:
     _tc = st.columns(3)
     _tc[0].metric("Active profile", om.active_profile_display(chosen_profile_id))
     _tc[1].metric("Symbol", (_tester_prof.symbol if _tester_prof else SYMBOL))
-    _tc[2].metric("Data source", om.providers_to_data_source(
-        (_tester_prof.structure_provider if _tester_prof else chosen_structure),
-        (_tester_prof.quote_provider if _tester_prof else chosen_quote)).split(":")[0])
+    # Phase 9I — this is the APP data source (top controls). The resolved
+    # source for the actual run is shown in the "Data source for this run" panel
+    # below (which reconciles app vs profile and warns on mismatch).
+    _tc[2].metric("App data source",
+                  om.data_source_short(om.providers_to_data_source(chosen_structure, chosen_quote)))
 
     _hb = forward_review.load_latest_heartbeat() or {}
     view = control_ui.status_view(control_ui.get_status())
@@ -983,12 +1109,24 @@ def render_forward_runner() -> None:
     )
 
     _runner_summaries = {s["profile_id"]: s for s in pb.list_summaries() if s.get("ok")}
-    # Dynamic presets FIRST in the dropdown; friendly labels (badge · name).
-    runner_profiles = om.order_profiles_for_dropdown(list(_runner_summaries))
+    _summaries_list = list(_runner_summaries.values())
+    _all_runner_profiles = om.order_profiles_for_dropdown(list(_runner_summaries))
 
     def _runner_label(pid: str) -> str:
         s = _runner_summaries.get(pid, {})
         return om.profile_dropdown_label(pid, s.get("profile_name"), s.get("preset_kind"))
+
+    # ── Phase 9I — Simple Mode shows ONLY Main Strategies (the 9G dynamic-first
+    # presets); a checkbox reveals comparison + research + legacy. Advanced = all. ──
+    if simple_mode:
+        _show_all = st.checkbox(
+            "Show comparison and legacy profiles", value=False, key="runner_show_all",
+            help="Off = only your Main Strategies. On = comparison tests, research, "
+                 "and legacy/archived profiles too.")
+        runner_profiles = (om.simple_mode_profile_ids(_summaries_list, show_all=_show_all)
+                           or _all_runner_profiles)
+    else:
+        runner_profiles = _all_runner_profiles
 
     rc = st.columns([2, 1, 1]) if simple_mode else st.columns([2, 1, 1, 1])
     sel_profile = rc[0].selectbox(
@@ -1008,13 +1146,59 @@ def render_forward_runner() -> None:
     st.caption(f"Scan every: **{int(interval)} seconds**"
                + ("  ·  single scan then stop" if once else ""))
     market_hours_only = st.checkbox("Market hours only (RTH)", value=False, key="runner_mho")
-    # Selected-profile info card (shared with the Builder).
-    if runner_profiles and sel_profile in _runner_summaries:
-        st.caption(f"**Selected profile:** {_runner_label(sel_profile)}")
+    # ── Selected profile (Phase 9H section) ──
+    _sel_known = bool(runner_profiles and sel_profile in _runner_summaries)
+    _sel_runner_dict = None
+    if _sel_known:
+        st.markdown(f"**Selected profile:** {_runner_label(sel_profile)}")
         _sel_runner_dict, _ = pb.load_dict_for_edit(sel_profile)
         if _sel_runner_dict:
             with st.expander("Selected profile details", expanded=simple_mode):
                 _render_profile_info_card(om.profile_info_fields(_sel_runner_dict))
+
+    # ── Phase 9I — App vs Profile data source for THIS run (never silently mismatch) ──
+    _ovr_struct = _ovr_quote = None
+    if _sel_known and _sel_runner_dict:
+        _app_ds = om.providers_to_data_source(chosen_structure, chosen_quote)
+        # Simple Mode: app data source wins by default (explicit, see caption).
+        # Advanced Mode: an explicit toggle lets the profile's own source win.
+        _prefer = om.RUN_SOURCE_APP if simple_mode else st.radio(
+            "Data source for this run", list(om.RUN_SOURCE_MODES), index=0,
+            horizontal=True, key="runner_src_prefer",
+            help="Which source wins when the app controls and the profile disagree.")
+        _run = om.resolve_run_source(
+            _app_ds, _sel_runner_dict.get("structure_provider"),
+            _sel_runner_dict.get("quote_provider"), prefer=_prefer)
+        _status = om.run_source_status(chain_available=chain is not None,
+                                       mismatch=_run["mismatch"])
+        _badge = {"ready": "✅ ready", "warning": "⚠ warning", "unavailable": "⛔ unavailable"}
+        _sc = st.columns(4)
+        _sc[0].metric("Data source", _run["data_source"])
+        _sc[1].metric("Exposure source", _run["exposure_label"])
+        _sc[2].metric("Market data source", _run["market_data_label"])
+        _sc[3].metric("Status", _badge[_status])
+        if _run["mismatch"]:
+            st.warning("⚠ " + _run["message"])
+            if simple_mode:
+                st.caption("Simple Mode runs this test on the **app** data source. Switch to "
+                           "Advanced Mode to run on the profile's own source instead.")
+        # Pass provider overrides ONLY when the app source wins (else profile decides).
+        if _run["winner"] == "app":
+            _ovr_struct, _ovr_quote = _run["structure_provider"], _run["quote_provider"]
+
+    # ── Latest completed test + mismatch warning (Phase 9H) ──
+    _latest_man = forward_review.load_latest_manifest() or {}
+    _latest_pid = _latest_man.get("profile_id")
+    _latest_pname = _latest_man.get("profile_name") or _latest_pid or "—"
+    st.markdown("**Latest completed test**")
+    if _latest_pid:
+        st.caption(f"Profile: `{_latest_pname}`  ·  status: {_latest_man.get('status') or '—'}  ·  "
+                   f"{_latest_run_label}")
+    else:
+        st.caption("No completed local paper test yet.")
+    _mismatch = om.run_profile_mismatch(sel_profile if _sel_known else None, _latest_pid)
+    if _mismatch["mismatch"]:
+        st.warning("⚠ " + _mismatch["message"])
 
     can, why = control_ui.can_start(control_ui.get_status())
     bcols = st.columns(5)
@@ -1024,7 +1208,8 @@ def render_forward_runner() -> None:
                        key="runner_preview",
                        help="Runs a single local paper-test tick (no broker)."):
         ok, msg, pid = control_ui.start_runner(
-            sel_profile, once=True, market_hours_only=bool(market_hours_only))
+            sel_profile, once=True, market_hours_only=bool(market_hours_only),
+            structure_provider=_ovr_struct, quote_provider=_ovr_quote)
         (st.success if ok else st.error)(("Preview launched. " if ok else "") + str(msg)
                                          + (f" (pid {pid})" if pid else ""))
         if ok:
@@ -1033,7 +1218,8 @@ def render_forward_runner() -> None:
                        disabled=not runner_profiles or not can, key="runner_start"):
         ok, msg, pid = control_ui.start_runner(
             sel_profile, interval_seconds=float(interval), once=bool(once),
-            max_ticks=(int(max_ticks) or None), market_hours_only=bool(market_hours_only))
+            max_ticks=(int(max_ticks) or None), market_hours_only=bool(market_hours_only),
+            structure_provider=_ovr_struct, quote_provider=_ovr_quote)
         (st.success if ok else st.error)(f"{msg}" + (f" (pid {pid})" if pid else ""))
         if ok:
             st.rerun()
@@ -1052,22 +1238,27 @@ def render_forward_runner() -> None:
         value=False, key="runner_force",
     )
 
-    with st.expander("Advanced details / terminal commands", expanded=False):
-        st.caption(
-            f"Full run id: `{view['run_id'] or _hb.get('run_id') or '—'}`  ·  "
-            f"PID: `{view['pid'] or '—'}`  ·  scan interval: `{int(interval)}s`  ·  "
-            f"stop after scans: `{int(max_ticks) or '∞'}`  ·  "
-            f"status: `{view['status']}`")
-        _ctl_profile = sel_profile if runner_profiles else "vertical_wing_score_best_1dte"
-        st.caption("Exact command (copy into a terminal — equivalent to the buttons):")
-        st.code(
-            control_ui.safe_command(_ctl_profile, interval_seconds=float(interval),
-                                    once=bool(once), market_hours_only=bool(market_hours_only)) + "\n"
-            "python -m scripts.control_forward stop\n"
-            "python -m scripts.control_forward cleanup-stale\n"
-            "python -m scripts.review_forward --latest",
-            language="powershell",
-        )
+    # Phase 9I — terminal commands are an ADVANCED-only affordance (Simple Mode
+    # is button-driven only; full run id + PID live here too).
+    if not simple_mode:
+        with st.expander("Advanced details / terminal commands", expanded=False):
+            st.caption(
+                f"Full run id: `{view['run_id'] or _hb.get('run_id') or '—'}`  ·  "
+                f"PID: `{view['pid'] or '—'}`  ·  scan interval: `{int(interval)}s`  ·  "
+                f"stop after scans: `{int(max_ticks) or '∞'}`  ·  "
+                f"status: `{view['status']}`")
+            _ctl_profile = sel_profile if runner_profiles else "vertical_wing_score_best_1dte"
+            st.caption("Exact command (copy into a terminal — equivalent to the buttons):")
+            st.code(
+                control_ui.safe_command(
+                    _ctl_profile, interval_seconds=float(interval), once=bool(once),
+                    market_hours_only=bool(market_hours_only),
+                    structure_provider=_ovr_struct, quote_provider=_ovr_quote) + "\n"
+                "python -m scripts.control_forward stop\n"
+                "python -m scripts.control_forward cleanup-stale\n"
+                "python -m scripts.review_forward --latest",
+                language="powershell",
+            )
 
     st.divider()
     st.markdown("**Strategy test review (read-only)**")
@@ -1207,18 +1398,33 @@ def render_portfolio() -> None:
 
     _pf_profiles = ",".join(_pf_man.get("profiles") or ["vertical_wing_score_best_1dte", "vertical_wing_no_trade"]) \
         if _pf_man else "vertical_wing_score_best_1dte,vertical_wing_no_trade"
-    st.markdown("**Run a local paper portfolio (copy into a terminal — the UI never launches it):**")
-    st.code(
-        f"python -m scripts.run_portfolio_forward --profiles {_pf_profiles} --once\n"
-        "python -m scripts.review_portfolio_forward --latest\n"
-        "python -m scripts.review_portfolio_forward --reconcile latest",
-        language="powershell",
-    )
+    # Phase 9I — Simple Mode is button-driven (no terminal blocks); Advanced keeps
+    # the exact copy-paste commands.
+    if simple_mode:
+        _pf_btns = st.columns(2)
+        if _pf_btns[0].button("🔄 Refresh portfolio", key="pf_refresh",
+                              help="Re-read the latest local paper portfolio files."):
+            st.rerun()
+        if _pf_btns[1].button("🧾 Reconcile local paper ledger", key="pf_reconcile",
+                              help="Re-read the latest local reconciliation report (read-only)."):
+            st.rerun()
+        st.caption("Starting a new local paper portfolio (and regenerating reconciliation) is an "
+                   "Advanced action — switch to Advanced Mode for the exact commands. "
+                   "Local paper accounting only — no broker execution.")
+    else:
+        st.markdown("**Run a local paper portfolio (copy into a terminal — the UI never launches it):**")
+        st.code(
+            f"python -m scripts.run_portfolio_forward --profiles {_pf_profiles} --once\n"
+            "python -m scripts.review_portfolio_forward --latest\n"
+            "python -m scripts.review_portfolio_forward --reconcile latest",
+            language="powershell",
+        )
 
 
 def render_manual_desk() -> None:
-    st.subheader("Manual paper desk")
-    st.caption("Local paper tracking only — records to CSV + in-memory PaperAccount. No brokerage.")
+    st.subheader("Manual local paper entry")
+    st.caption("Manual entries are local records only — written to CSV + the in-memory "
+               "PaperAccount. No brokerage, no execution.")
     with st.form("manual_trade"):
         cols = st.columns(4)
         side = cols[0].selectbox("Side", ["CALL_CREDIT", "PUT_CREDIT"])
@@ -1319,14 +1525,20 @@ def render_logs() -> None:
     _fwd_root = OUTPUT_ROOT / "forward"
     _pf_root = OUTPUT_ROOT / "portfolio_forward"
 
-    # ── A. Latest run summary ──
-    st.markdown("**Latest run summary**")
+    # ── A. Latest run summary (Phase 9I — friendly label first; raw id in Advanced) ──
+    st.markdown("**Latest completed test**")
     latest = ch.latest_run_stats(_fwd_root, _pf_root)
+    _lman = forward_review.load_latest_manifest(_fwd_root) or {}
+    _latest_label = om.friendly_run_label(
+        run_id=latest["run_id"], profile_name=_lman.get("profile_name") or latest["profile"],
+        strategy_id=_lman.get("strategy_id"), started_at=_lman.get("started_at"))
     la = st.columns(4)
-    la[0].metric("Run id", str(latest["run_id"]))
+    la[0].metric("Latest run", _latest_label)
     la[1].metric("Profile", str(latest["profile"]))
     la[2].metric("Ticks", latest["ticks"])
     la[3].metric("Selected", latest["signals"])
+    if not simple_mode and latest["has_data"]:
+        st.caption(f"Full run id: `{latest['run_id']}`")
     lb = st.columns(4)
     lb[0].metric("No-trade", latest["no_trade"])
     lb[1].metric("Open paper", latest["open_paper"])
@@ -1363,6 +1575,53 @@ def render_logs() -> None:
                 f"{ch.fmt_strike(_best.get('short_strike'))}/{ch.fmt_strike(_best.get('long_strike'))} "
                 f"· credit {_best.get('credit')} · score {_best.get('score')}")
 
+    # ── B2. Performance charts (Phase 9I — Streamlit-native, flat-file derived) ──
+    st.markdown("**Performance charts**")
+    _all_closed: list[dict] = []
+    for _prun in (portfolio_ledger.list_portfolio_run_summaries(root=_pf_root) or []):
+        _rid = _prun.get("portfolio_run_id")
+        if _rid:
+            _all_closed.extend(portfolio_ledger.load_closed_trades(_rid, _pf_root) or [])
+    _equity = ch.equity_curve_from_closed_trades(_all_closed)
+    if not _equity:
+        st.info("More stats will appear after additional local paper runs.")
+    else:
+        _cum = [p["cumulative"] for p in _equity]
+        _mdd = ch.max_drawdown(_cum, starting_balance=getattr(session, "starting_balance", None))
+        _oc = ch.trade_outcome_counts(_all_closed)
+        _mc = st.columns(4)
+        _mc[0].metric("Closed trades", _oc["total"])
+        _mc[1].metric("Win rate", f"{_oc['win_rate']}%", f"{_oc['wins']}W / {_oc['losses']}L")
+        _mc[2].metric("Realized P&L", ch.fmt_money(_cum[-1]))
+        _mc[3].metric("Max drawdown", ch.fmt_money(_mdd["max_drawdown"]),
+                      f"{_mdd['max_drawdown_pct']}%" if _mdd["max_drawdown_pct"] is not None else None)
+        st.caption("Cumulative realized P&L (equity curve)")
+        st.line_chart({"cumulative P&L": _cum})
+        st.caption("Drawdown (peak-to-trough, $)")
+        st.area_chart({"drawdown": [d["drawdown"] for d in ch.drawdown_series(_cum)]})
+        _daily = ch.daily_pnl_from_closed_trades(_all_closed)
+        if _daily:
+            st.caption("Daily realized P&L")
+            st.bar_chart({"daily P&L": [d["realized_pnl"] for d in _daily]})
+            if not simple_mode:
+                st.dataframe(_daily, use_container_width=True, hide_index=True)
+        _byprof = ch.pnl_by_profile(_all_closed)
+        if _byprof:
+            st.caption("P&L by profile")
+            st.dataframe(_byprof, use_container_width=True, hide_index=True)
+        _exits = ch.exit_reason_counts(_all_closed)
+        if _exits:
+            st.caption("Exit reasons")
+            st.dataframe([{"exit_reason": r, "count": c} for r, c in _exits],
+                         use_container_width=True, hide_index=True)
+    # Selected signals over runs (from forward run summaries; oldest → newest).
+    _runsum = forward_review.list_run_summaries(root=_fwd_root) or []
+    if _runsum:
+        _sig = [int(r.get("signal_count") or 0) for r in reversed(_runsum)]
+        if any(_sig):
+            st.caption("Selected signals over runs (oldest → newest)")
+            st.bar_chart({"selected signals": _sig})
+
     # ── C. Downloads / exports (operator-friendly labels) ──
     st.markdown("**Downloads / exports**")
     _exports = (ch.forward_export_files(_fwd_root) + ch.portfolio_export_files(_pf_root)
@@ -1383,21 +1642,45 @@ def render_logs() -> None:
     if not _any_export:
         st.info("No logs yet. Run a strategy test (Zσ Strat Tester) or a paper portfolio to generate logs.")
 
-    # ── D. Review prompt ──
-    st.markdown("**Copy review prompt** (paste into your assistant with the downloaded logs):")
-    st.code(ch.review_prompt((forward_review.load_latest_manifest() or {}).get("run_id")),
-            language="text")
+    # ── D. Review prompt (under an expander to keep the trader view clean) ──
+    with st.expander("Copy review prompt (paste into your assistant with the logs)",
+                     expanded=False):
+        st.code(ch.review_prompt((forward_review.load_latest_manifest() or {}).get("run_id")),
+                language="text")
 
+    # ── E. EOD summary (Phase 9I — prominent button + last-generated + staleness
+    # + a SAFE one-shot auto-generate; never a background loop, never a broker). ──
     st.divider()
     st.subheader("EOD summary")
-    if st.button("Generate EOD summary now"):
-        out = generate_eod_summary(REPO_ROOT)
-        st.success(f"Wrote {out}")
+    _eod = ch.eod_summary_status(OUTPUT_ROOT, _fwd_root)
+    _runner_live = bool(control_ui.status_view(control_ui.get_status()).get("active"))
+    if (_eod["stale"] and latest["has_data"] and not _runner_live
+            and not st.session_state.get("_eod_autogen_done")):
+        try:
+            generate_eod_summary(REPO_ROOT)
+            st.session_state["_eod_autogen_done"] = True
+            _eod = ch.eod_summary_status(OUTPUT_ROOT, _fwd_root)
+            st.caption("Auto-generated a fresh EOD summary (was stale on open).")
+        except Exception as _exc:   # never let EOD IO break the Stats page
+            st.caption(f"Auto EOD generation skipped: {type(_exc).__name__}")
+    _ecols = st.columns([2, 1])
+    if _ecols[0].button("🧾 Generate / Refresh EOD summary", type="primary", key="eod_gen"):
+        try:
+            out = generate_eod_summary(REPO_ROOT)
+            st.session_state["_eod_autogen_done"] = True
+            _eod = ch.eod_summary_status(OUTPUT_ROOT, _fwd_root)
+            st.success(f"Wrote {out}")
+        except Exception as _exc:   # surface failure, never crash the page
+            st.error(f"EOD generation failed: {type(_exc).__name__}: {_exc}")
+    _ecols[1].metric("EOD status",
+                     "⚠ stale" if _eod["stale"] else ("✅ up to date" if _eod["exists"] else "—"))
+    st.caption(f"Last generated: {_eod['generated_at'] or '—'}  ·  for date {_eod['date'] or '—'}  ·  "
+               f"{_eod['note']}")
     eod_md = OUTPUT_ROOT / "latest" / "eod_summary.md"
     if eod_md.exists():
         st.markdown(eod_md.read_text(encoding="utf-8"))
     else:
-        st.caption("Run the scanner + Generate EOD summary above to populate.")
+        st.caption("Run a strategy test, then **Generate / Refresh EOD summary** above to populate.")
 
     st.divider()
     with st.expander("Session config (current overrides)", expanded=False):
@@ -1563,6 +1846,7 @@ tab_live, tab_builder, tab_tester, tab_portfolio, tab_logs, tab_settings = st.ta
 
 with tab_live:
     render_symbol_health()
+    render_operator_decision()   # Phase 9H — operator read, above Market / structure
     render_provider_status()
     render_market()
     render_candidates()
@@ -1572,8 +1856,14 @@ with tab_tester:
     render_forward_runner()
 with tab_portfolio:
     render_portfolio()
-    st.divider()
-    render_manual_desk()
+    # Phase 9I — Manual Paper Desk is hidden in Simple Mode (not part of Dan's
+    # workflow); available in Advanced Mode only.
+    if not simple_mode:
+        st.divider()
+        render_manual_desk()
+    else:
+        st.caption("Manual paper entry is available in Advanced Mode "
+                   "(Manual entries are local records only).")
 with tab_logs:
     render_logs()
 with tab_settings:

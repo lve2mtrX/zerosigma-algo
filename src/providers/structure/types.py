@@ -38,8 +38,15 @@ class ExposureContext:
     put_ceiling_5k:  float | None = None
     call_floor_2k:   float | None = None
     call_floor_5k:   float | None = None
+    # ── 10K wing tier (Phase 9H) ──
+    # Same derivation as 2K/5K (strike where put/call volume crosses 10000),
+    # just a stricter threshold. Requires the per-strike volume series; the
+    # single-level public `wings.*` cannot synthesize a 10K tier, so under
+    # public/wings-only data these stay None (like the 5K tier).
+    put_ceiling_10k: float | None = None
+    call_floor_10k:  float | None = None
 
-    # ── Anchor volumes (Phase 2.8) ──
+    # ── Anchor volumes (Phase 2.8 + 9H) ──
     # Actual volume at each VW anchor strike, as reported by the structure
     # source. SEPARATE from whatever the QuoteProvider says at the same
     # strike — the structure owns "which volume qualified this level."
@@ -47,11 +54,25 @@ class ExposureContext:
     # reported" (e.g. structure derived the level from a non-volume source).
     put_ceiling_2k_volume: float | None = None
     put_ceiling_5k_volume: float | None = None
+    put_ceiling_10k_volume: float | None = None
     call_floor_2k_volume:  float | None = None
     call_floor_5k_volume:  float | None = None
+    call_floor_10k_volume: float | None = None
     maxvol_volume:         float | None = None   # combined volume at maxvol strike
 
-    # DDOI pin (open-interest concentration level)
+    # ── Gamma clusters (Phase 9H) ──
+    # The most/next-most relevant gamma levels influencing spot. Mapped from
+    # the ZS payload `gamma.cluster_primary` / `gamma.cluster_secondary` when
+    # present. When absent, the UI derives a display-only primary/secondary
+    # from the available gamma structure (walls / flip) — see
+    # `cockpit_helpers.primary_secondary_gamma`.
+    gamma_primary:   float | None = None
+    gamma_secondary: float | None = None
+
+    # DDOI pin (open-interest concentration / dealer-positioning gravity level).
+    # NOT in the public ZS payload today → typically None. Phase 9H removed it
+    # from the prime cockpit cards; it is only shown under Advanced Structure /
+    # raw diagnostics when a value is actually present.
     ddoi_pin:        float | None = None
 
 

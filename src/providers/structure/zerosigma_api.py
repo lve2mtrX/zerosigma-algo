@@ -288,6 +288,30 @@ class ZeroSigmaApiStructureProvider:
                 )
                 self._state.has_subscription = vol_series is not None
 
+        self._state.last_refresh_ts[sym] = datetime.now().timestamp()
+        self._state.last_error = None
+        return self.build_snapshot_from_payload(
+            snap_payload, vol_series, missing=missing, symbol=sym,
+        )
+
+    def build_snapshot_from_payload(
+        self,
+        snap_payload: dict[str, Any],
+        vol_series: dict[str, Any] | None = None,
+        *,
+        missing: list[str] | None = None,
+        symbol: str | None = None,
+        source: str | None = None,
+    ) -> StructureSnapshot:
+        """Pure mapping: ZS payload (+ optional volume series) → StructureSnapshot.
+
+        Extracted (Phase 9H) so the SAME mapping serves both the live fetch and
+        the Phase 10 replay/backtest loader — there is no second mapper to drift.
+        No network here. `source` overrides the snapshot's provider tag (e.g.
+        "replay") for replayed snapshots."""
+        missing = missing if missing is not None else []
+        sym = (symbol or self.symbol or "SPX").upper()
+
         exposures = self._build_exposures(snap_payload, vol_series, missing)
         spot_payload = snap_payload.get("spot") or {}
         # ZS worker_watchlist writes spot_json as a FLAT dict whose price
@@ -323,9 +347,7 @@ class ZeroSigmaApiStructureProvider:
             dte_raw = snap_payload.get("dte")
         dte = _safe_int(dte_raw)
 
-        self._state.last_refresh_ts[sym] = datetime.now().timestamp()
         self._state.last_missing_fields = missing
-        self._state.last_error = None
 
         return StructureSnapshot(
             symbol=sym,
@@ -334,7 +356,7 @@ class ZeroSigmaApiStructureProvider:
             exposures=exposures,
             expiry=expiry,
             dte=dte,
-            source=self.name,
+            source=source or self.name,
             raw={
                 "missing_fields": list(missing),
                 "subscription_active": self._state.has_subscription,
@@ -426,6 +448,19 @@ class ZeroSigmaApiStructureProvider:
             )
         gamma_flip = _safe_float(gamma.get("flip") or exp.get("gamma_flip"))
 
+        # ── gamma clusters (Phase 9H): primary / secondary gamma levels ──
+        # ZS `gamma` block is documented to carry `cluster_primary` (and a
+        # `cluster_secondary` companion). Map both with a small alias chain;
+        # absent → None (the UI derives a display fallback from walls/flip).
+        gamma_primary = _safe_float(
+            gamma.get("cluster_primary") or gamma.get("primary")
+            or gamma.get("primary_strike")
+        )
+        gamma_secondary = _safe_float(
+            gamma.get("cluster_secondary") or gamma.get("secondary")
+            or gamma.get("secondary_strike")
+        )
+
         # ── walls (public metrics_json carries these as max OI strikes) ──
         call_wall = _safe_float(exp.get("max_call_oi_strike") or exp.get("call_wall"))
         put_wall  = _safe_float(exp.get("max_put_oi_strike")  or exp.get("put_wall"))
@@ -439,9 +474,10 @@ class ZeroSigmaApiStructureProvider:
         wings_call_floor   = _safe_float(wings.get("call_floor"))
 
         # ── per-strike volume series (subscription-gated) ──
-        put_ceiling_2k = put_ceiling_5k = call_floor_2k = call_floor_5k = None
-        put_ceiling_2k_volume = put_ceiling_5k_volume = None
-        call_floor_2k_volume  = call_floor_5k_volume  = None
+        put_ceiling_2k = put_ceiling_5k = put_ceiling_10k = None
+        call_floor_2k = call_floor_5k = call_floor_10k = None
+        put_ceiling_2k_volume = put_ceiling_5k_volume = put_ceiling_10k_volume = None
+        call_floor_2k_volume  = call_floor_5k_volume  = call_floor_10k_volume = None
         maxvol = None
         maxvol_volume: float | None = None
         if vol_series:
@@ -451,13 +487,17 @@ class ZeroSigmaApiStructureProvider:
             if strikes and len(strikes) == len(calls) == len(puts):
                 put_ceiling_2k = _highest_strike_where(strikes, puts, 2000.0)
                 put_ceiling_5k = _highest_strike_where(strikes, puts, 5000.0)
+                put_ceiling_10k = _highest_strike_where(strikes, puts, 10000.0)  # Phase 9H
                 call_floor_2k  = _lowest_strike_where(strikes, calls, 2000.0)
                 call_floor_5k  = _lowest_strike_where(strikes, calls, 5000.0)
-                # Phase 2.8: also capture the ACTUAL volume at each anchor.
+                call_floor_10k = _lowest_strike_where(strikes, calls, 10000.0)   # Phase 9H
+                # Phase 2.8/9H: also capture the ACTUAL volume at each anchor.
                 put_ceiling_2k_volume = _volume_at(strikes, puts,  put_ceiling_2k)
                 put_ceiling_5k_volume = _volume_at(strikes, puts,  put_ceiling_5k)
+                put_ceiling_10k_volume = _volume_at(strikes, puts, put_ceiling_10k)
                 call_floor_2k_volume  = _volume_at(strikes, calls, call_floor_2k)
                 call_floor_5k_volume  = _volume_at(strikes, calls, call_floor_5k)
+                call_floor_10k_volume = _volume_at(strikes, calls, call_floor_10k)
                 combined = [(c or 0) + (p or 0) for c, p in zip(calls, puts, strict=False)]
                 if combined:
                     maxvol_idx = combined.index(max(combined))
@@ -488,13 +528,19 @@ class ZeroSigmaApiStructureProvider:
         ddoi_pin = None
 
         # Track which fields stayed None so the cockpit can show diagnostics.
+        # 10K + gamma clusters are tracked too (they're often None unless the
+        # subscription volume series / a gamma-cluster payload is present).
         for name, value in (
             ("put_ceiling_2k", put_ceiling_2k),
             ("put_ceiling_5k", put_ceiling_5k),
+            ("put_ceiling_10k", put_ceiling_10k),
             ("call_floor_2k",  call_floor_2k),
             ("call_floor_5k",  call_floor_5k),
+            ("call_floor_10k", call_floor_10k),
             ("maxvol",         maxvol),
             ("gamma_flip",     gamma_flip),
+            ("gamma_primary",  gamma_primary),
+            ("gamma_secondary", gamma_secondary),
             ("call_wall",      call_wall),
             ("put_wall",       put_wall),
             ("ddoi_pin",       ddoi_pin),
@@ -513,13 +559,19 @@ class ZeroSigmaApiStructureProvider:
             da_gex_signed=da_gex_signed,
             put_ceiling_2k=put_ceiling_2k,
             put_ceiling_5k=put_ceiling_5k,
+            put_ceiling_10k=put_ceiling_10k,
             call_floor_2k=call_floor_2k,
             call_floor_5k=call_floor_5k,
+            call_floor_10k=call_floor_10k,
             put_ceiling_2k_volume=put_ceiling_2k_volume,
             put_ceiling_5k_volume=put_ceiling_5k_volume,
+            put_ceiling_10k_volume=put_ceiling_10k_volume,
             call_floor_2k_volume=call_floor_2k_volume,
             call_floor_5k_volume=call_floor_5k_volume,
+            call_floor_10k_volume=call_floor_10k_volume,
             maxvol_volume=maxvol_volume,
+            gamma_primary=gamma_primary,
+            gamma_secondary=gamma_secondary,
             ddoi_pin=ddoi_pin,
         )
 

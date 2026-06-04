@@ -344,6 +344,164 @@ def running_display(active: Any) -> str:
     return "Yes" if bool(active) else "No"
 
 
+# ── Phase 9H/9I — profile grouping by purpose + run/selection mismatch ───────
+
+# Phase 9I — trader-friendly category labels (was: Primary live paper tests /
+# Controls / Research-Observe / Legacy). Main first (Simple Mode default).
+MAIN_CATEGORY = "Main Strategies"
+PROFILE_CATEGORIES: tuple[str, ...] = (
+    "Main Strategies", "Comparison Tests", "Research / Disabled", "Legacy / Archived",
+)
+DEFAULT_SIMPLE_CATEGORY = MAIN_CATEGORY
+
+
+def profile_category(preset_kind: Any) -> str:
+    """Map a preset_kind to its operator category. Legacy profiles (no
+    preset_kind) fall into 'Legacy / Archived'."""
+    k = str(preset_kind or "").strip().lower()
+    if k == "dynamic":
+        return "Main Strategies"
+    if k == "control":
+        return "Comparison Tests"
+    if k in ("regime", "observe"):
+        return "Research / Disabled"
+    return "Legacy / Archived"
+
+
+def group_profiles_by_category(
+    summaries: list[dict[str, Any]],
+) -> list[tuple[str, list[str]]]:
+    """Group profile summaries (each with profile_id + preset_kind) into ordered
+    (category, [profile_id...]) buckets. Within a bucket, ids use the dynamic-
+    first dropdown order. Empty categories are omitted."""
+    buckets: dict[str, list[str]] = {c: [] for c in PROFILE_CATEGORIES}
+    for s in summaries:
+        pid = s.get("profile_id")
+        if not pid:
+            continue
+        buckets[profile_category(s.get("preset_kind"))].append(pid)
+    out: list[tuple[str, list[str]]] = []
+    for cat in PROFILE_CATEGORIES:
+        ids = order_profiles_for_dropdown(buckets[cat])
+        if ids:
+            out.append((cat, ids))
+    return out
+
+
+def profiles_in_category(summaries: list[dict[str, Any]], category: str) -> list[str]:
+    """Ordered profile ids in one category (dynamic-first)."""
+    for cat, ids in group_profiles_by_category(summaries):
+        if cat == category:
+            return ids
+    return []
+
+
+def run_profile_mismatch(selected_id: Any, latest_run_profile_id: Any) -> dict[str, Any]:
+    """Compare the SELECTED profile against the profile that produced the LATEST
+    completed run. Returns {mismatch, message}. When they differ, the operator is
+    warned that stale results do NOT belong to the selected profile."""
+    sel = str(selected_id).strip() if selected_id else ""
+    latest = str(latest_run_profile_id).strip() if latest_run_profile_id else ""
+    if sel and latest and sel != latest:
+        return {
+            "mismatch": True,
+            "message": (
+                f"Latest run is from a different profile (`{latest}`), not the selected "
+                f"`{sel}`. Start a new local paper test to generate results for the "
+                "selected profile."
+            ),
+        }
+    return {"mismatch": False, "message": None}
+
+
+def simple_mode_profile_ids(summaries: list[dict[str, Any]], *,
+                            show_all: bool = False) -> list[str]:
+    """Simple-Mode dropdown ids: ONLY Main Strategies by default (hides legacy +
+    comparison + research); the full ordered list when ``show_all`` (the operator
+    ticked 'Show comparison and legacy profiles')."""
+    if show_all:
+        all_ids = [s.get("profile_id") for s in summaries if s.get("profile_id")]
+        return order_profiles_for_dropdown(all_ids)
+    return profiles_in_category(summaries, MAIN_CATEGORY)
+
+
+# ── Phase 9I — app-vs-profile data-source resolution (never silently mismatch) ─
+
+RUN_SOURCE_APP = "Use app data source for this run"
+RUN_SOURCE_PROFILE = "Use the profile's own data source"
+RUN_SOURCE_MODES = (RUN_SOURCE_APP, RUN_SOURCE_PROFILE)
+
+
+def data_source_short(label: Any) -> str:
+    """'Live: …' / 'Sandbox: …' → 'Live' / 'Sandbox' (else the part before ':')."""
+    s = str(label or "")
+    low = s.lower()
+    if low.startswith("live"):
+        return "Live"
+    if low.startswith("sandbox"):
+        return "Sandbox"
+    return s.split(":")[0].strip() if s else "—"
+
+
+def resolve_run_source(app_data_source: Any, profile_structure: Any,
+                       profile_quote: Any, *, prefer: str = RUN_SOURCE_APP) -> dict[str, Any]:
+    """Deterministically resolve which data source a preview/test run will use.
+
+    ``app_data_source`` = the top-controls Live/Sandbox choice (a DATA_SOURCES
+    value). ``profile_structure``/``profile_quote`` = the selected profile's
+    providers. ``prefer`` = RUN_SOURCE_APP (default — app controls win) or
+    RUN_SOURCE_PROFILE. Returns the resolved providers + a mismatch flag + a clear
+    message. NEVER silently mismatches: on conflict the message explains which won."""
+    app_providers = data_source_to_providers(app_data_source)
+    app_src = data_source_short(app_data_source)
+    profile_src = data_source_short(
+        providers_to_data_source(profile_structure or "stub", profile_quote or "mock"))
+    mismatch = app_src != profile_src
+    use_app = prefer != RUN_SOURCE_PROFILE
+
+    if use_app:
+        structure_provider = app_providers["structure_provider"]
+        quote_provider = app_providers["quote_provider"]
+        resolved = app_src
+        winner = "app"
+    else:
+        structure_provider = profile_structure or "stub"
+        quote_provider = profile_quote or "mock"
+        resolved = profile_src
+        winner = "profile"
+
+    message = None
+    if mismatch:
+        message = (
+            f"Selected profile is configured for {profile_src}, but app controls are "
+            f"{app_src}. This run will use the {resolved} source "
+            f"({'app controls' if use_app else 'profile'} win). "
+            "Choose which source should win before starting a test."
+        )
+    return {
+        "mismatch": mismatch,
+        "winner": winner,
+        "data_source": resolved,                 # "Live" | "Sandbox"
+        "app_source": app_src,
+        "profile_source": profile_src,
+        "structure_provider": structure_provider,
+        "quote_provider": quote_provider,
+        "exposure_label": exposure_engine_label(structure_provider),
+        "market_data_label": market_data_engine_label(quote_provider),
+        "message": message,
+    }
+
+
+def run_source_status(*, chain_available: bool, mismatch: bool) -> str:
+    """Tester readiness badge: 'unavailable' (no quote chain to price candidates),
+    'warning' (app/profile source mismatch to resolve), else 'ready'."""
+    if not chain_available:
+        return "unavailable"
+    if mismatch:
+        return "warning"
+    return "ready"
+
+
 # ── Phase 9F — preset strategy descriptions ──────────────────────────────────
 
 PRESET_DESCRIPTIONS: dict[str, str] = {

@@ -68,9 +68,12 @@ def can_start(status: dict[str, Any]) -> tuple[bool, str]:
 
 def start_runner(profile: str, *, root: Any = None, interval_seconds: float | None = None,
                  once: bool = False, max_ticks: int | None = None,
-                 market_hours_only: bool = False) -> tuple[bool, str, int | None]:
+                 market_hours_only: bool = False, quote_provider: str | None = None,
+                 structure_provider: str | None = None) -> tuple[bool, str, int | None]:
     """Guarded start: refuses a second live runner, then delegates to
-    control.start. Returns (ok, message, pid)."""
+    control.start. Returns (ok, message, pid). Phase 9I — optional
+    ``quote_provider`` / ``structure_provider`` overrides (already supported by
+    control.start) let the Tester run a profile under the APP data source."""
     if not profile:
         return False, "select a run profile first", None
     ok, why = can_start(control.status(root))
@@ -79,6 +82,7 @@ def start_runner(profile: str, *, root: Any = None, interval_seconds: float | No
     return control.start(
         profile, root=root, interval_seconds=interval_seconds, once=once,
         max_ticks=max_ticks, market_hours_only=market_hours_only,
+        quote_provider=quote_provider, structure_provider=structure_provider,
     )
 
 
@@ -94,11 +98,15 @@ def cleanup(root: Any = None) -> tuple[bool, str]:
 
 
 def safe_command(profile: str, *, interval_seconds: float | None = None,
-                 once: bool = False, market_hours_only: bool = False) -> str:
+                 once: bool = False, market_hours_only: bool = False,
+                 quote_provider: str | None = None,
+                 structure_provider: str | None = None) -> str:
     """A copy-pasteable run_forward command (NOT launched). Never includes
-    secrets or execution intent."""
+    secrets or execution intent. Phase 9I — reflects the run-source provider
+    overrides so the printed command matches what the buttons run."""
     argv = control.build_command(
         profile, interval_seconds=interval_seconds, once=once,
         market_hours_only=market_hours_only,
+        quote_provider=quote_provider, structure_provider=structure_provider,
     )
     return " ".join(argv)

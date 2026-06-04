@@ -27,8 +27,10 @@ from src.utils.time import now_et
 def _build_exposures() -> ExposureContext:
     pc2 = highest_strike_where_put_volume_ge(2000)
     pc5 = highest_strike_where_put_volume_ge(5000)
+    pc10 = highest_strike_where_put_volume_ge(10000)   # Phase 9H (mock peaks ~5.5K → None)
     cf2 = lowest_strike_where_call_volume_ge(2000)
     cf5 = lowest_strike_where_call_volume_ge(5000)
+    cf10 = lowest_strike_where_call_volume_ge(10000)   # Phase 9H (mock peaks ~5.4K → None)
     return ExposureContext(
         total_gex_bn=4.2,
         total_vex_bn=-1.1,
@@ -40,14 +42,24 @@ def _build_exposures() -> ExposureContext:
         da_gex_signed=1.8,
         put_ceiling_2k=pc2,
         put_ceiling_5k=pc5,
+        put_ceiling_10k=pc10,
         call_floor_2k=cf2,
         call_floor_5k=cf5,
-        # Phase 2.8 — actual volumes that qualified each anchor.
+        call_floor_10k=cf10,
+        # Phase 2.8/9H — actual volumes that qualified each anchor.
         put_ceiling_2k_volume=put_volume_at(pc2),
         put_ceiling_5k_volume=put_volume_at(pc5),
+        put_ceiling_10k_volume=put_volume_at(pc10),
         call_floor_2k_volume=call_volume_at(cf2),
         call_floor_5k_volume=call_volume_at(cf5),
+        call_floor_10k_volume=call_volume_at(cf10),
         maxvol_volume=maxvol_total_volume(),
+        # Phase 9H — demo gamma clusters for the sandbox (stub is mock/demo data,
+        # so these are illustrative; the live provider maps gamma.cluster_*).
+        gamma_primary=5795.0,    # flip cluster
+        gamma_secondary=5825.0,  # call-wall cluster
+        # DDOI not surfaced in prime cockpit (Phase 9H). Kept here for Advanced /
+        # raw diagnostics only.
         ddoi_pin=5800.0,
     )
 

@@ -1455,3 +1455,75 @@ returns "configured … not active yet" even when `dynamic_exit_enabled=true`. T
 later (Phase 11): read `stop_loss_pct`/`take_profit_pct` off the active profile in the
 portfolio runner and pass them into `PaperLifecycleConfig` per profile — the lifecycle
 TP/SL math already supports those inputs; only the per-profile plumbing is missing.
+
+### Phase 9H — 10K wings, primary/secondary gamma, DDOI removal, shared mapper
+10K wings derive identically to 2K/5K: `_highest_strike_where(strikes, puts, 10000.0)`
+/ `_lowest_strike_where(strikes, calls, 10000.0)` on the subscription `/exposure/series`
+arrays. The single-level public `wings.*` cannot synthesize a stricter threshold, so
+under public/wings-only data 10K stays None (same caveat as 5K). The stub derives 10K
+from the mock chain (peaks ~5.5K volume → None) — a real, honest "unavailable" path.
+
+Primary/secondary gamma: the ZS `gamma` block is documented to carry `cluster_primary`
+(+ a `cluster_secondary` companion). The mapper maps both with an alias chain
+(`cluster_primary|primary|primary_strike`, `cluster_secondary|secondary|secondary_strike`).
+When absent, `cockpit_helpers.primary_secondary_gamma` DERIVES a display-only
+primary/secondary from `{call_wall, put_wall, gamma_flip}` ranked by |strike − spot|
+(deterministic), tagging `source='derived_from_walls'`; with nothing available,
+`source='unavailable'` and the copy says so. Never invents a value.
+
+DDOI: `ddoi_pin` is still None from the public payload ("still not in the public
+payload"). Phase 9H REMOVED it from the prime cockpit cards (it only ever showed "—")
+and confined it to the Advanced structure / raw diagnostics expander +
+`cockpit_helpers.ddoi_advanced` / `DDOI_HELP`. The operator decision layer never
+mentions DDOI.
+
+Wing Stack / decision layer / grouping helpers are pure (`cockpit_helpers.wing_stack`,
+`primary_secondary_gamma`, `operator_decision_layer`, `fmt_distance`;
+`operator_mode.profile_category` / `group_profiles_by_category` / `run_profile_mismatch`)
+so they unit-test without Streamlit. The Live Cockpit's "Best Eligible Setup" uses a
+guarded read-only `_compute_best_eligible()` that re-derives the top eligible candidate;
+any error → None → honest "no eligible setup" (no scanner/selector math changed).
+
+Shared mapper extraction: `ZeroSigmaApiStructureProvider.build_snapshot_from_payload(
+snap_payload, vol_series, *, symbol, source)` was extracted from `get_snapshot`
+(behavior-preserving) so the Phase 10 replay loader (`src/replay/snapshot_loader.py`)
+reuses the EXACT live mapping — one implementation, no backtest fork. The replay loader
+constructs a no-network provider (`base_url='', auth_mode='none'`) purely for that
+mapping. See `docs/phase10_backtest_plan.md`.
+
+### Phase 9I — source resolution, quote diagnostics, stats math, EOD staleness
+App-vs-profile source: `om.resolve_run_source(app_ds, profile_struct, profile_quote,
+prefer)` returns the resolved providers + `mismatch` + a message; the Tester passes the
+resolved providers to `control_ui.start_runner(..., structure_provider=, quote_provider=)`
+(which forwards to `control.start`/`build_command` — those ALREADY accepted provider
+overrides since Phase 9A, so this is additive, not a runner-behavior change). Simple
+Mode forces `prefer=RUN_SOURCE_APP`; Advanced exposes the toggle. Overrides are passed
+only when the app source wins (else the profile's own providers run).
+
+Quote diagnostics: `ch.quote_chain_status` reads `QuoteProviderStatus.last_error`
+patterns (`auth_failed:` / `chain_unresolved:` / `quote_fetch_failed:`) + provider name
+(mock/null) + `quote_provider_error` (Tasty-config fallback to mock) + `structure_error`
+→ a `reason_code` + a one-line `simple_reason`; the raw `advanced` dict (provider /
+connected / last_error / last_chain_ts / notes / errors) is shown only under an Advanced
+expander. It NEVER overclaims: an undetectable cause returns `unknown` →
+"provider returned no usable chain."
+
+Stats math (all pure, from `paper_trades_closed.csv` rows via
+`ledger.load_closed_trades`): `equity_curve_from_closed_trades` sorts by `closed_at` and
+cumulates `realized_pnl`; `drawdown_series`/`max_drawdown` run a running-peak (max_drawdown
+takes an optional `starting_balance` to report % vs peak EQUITY); `daily_pnl_from_closed_
+trades` groups by `closed_at[:10]`; `pnl_by_profile`, `trade_outcome_counts`,
+`exit_reason_counts`. Charts are Streamlit-native (`st.line_chart`/`area_chart`/`bar_chart`
+with plain lists — no pandas dependency added).
+
+EOD staleness: `generate_eod_summary(REPO_ROOT)` (in `src/reporting/eod.py`) is
+network-free and writes only local `outputs/`; it has NO `generated_at` field, so
+`ch.eod_summary_status` uses the file mtime of `outputs/latest/eod_summary.json` vs the
+forward manifest `started_at` (`is_eod_stale` is tz-safe — strips tzinfo before comparing).
+The Stats page auto-generates ONCE per session when stale + has run data + runner not live
+(guarded by `st.session_state['_eod_autogen_done']` — no background loop).
+
+Backtest discovery (`scripts/discover_backtest_sources.py`): roots resolve `--root` →
+`ZSA_TRADING_ROOT` → `Path.home()/Dropbox/Trading` (no hardcoded username; the SPX_RAW
+CSVs carry `Strike`/`CALL Volume`/`PUT Volume`, so the "usable" verdict is real). The
+example paths in docs are illustrative only.

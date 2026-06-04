@@ -1718,6 +1718,106 @@ Wing · Jun 2 · 10:31 PM"*) — the full run id + PID live under *Advanced deta
 
 ---
 
+## Operator decision layer + structure depth (Phase 9H)
+
+The Live Cockpit opens with an **Operator read** panel that translates raw
+structure into plain English (it never invents data — a missing field reads
+*unavailable*):
+
+- **Structure Read** — spot vs primary gamma, nearest wing, regime.
+- **Trade Bias** — what the gamma regime implies (pinning vs directional).
+- **Candidate Risk** — proximity to the nearest wing, accelerated by negative gamma.
+- **Best Eligible Setup** — the top eligible candidate this scan (or *none*).
+- **Why / Why Not** — the one-line rationale.
+
+> *"Primary gamma sits at 7600 with secondary gamma at 7570. Spot is below primary
+> gamma and near the 7550 floor. Negative gamma regime means structure may be less
+> pinning and moves can accelerate."*
+
+**Prime structure cards** are now Spot · Gamma regime · DA-GEX · MaxVol · **Primary
+gamma** · **Secondary gamma**. Primary/secondary gamma map from the ZS payload
+`gamma.cluster_primary` / `cluster_secondary`; when those are absent the UI derives
+a display-only primary/secondary from the gamma walls/flip nearest spot (labelled
+*derived*), and says *unavailable* when nothing is present.
+
+**DDOI was removed from the prime cockpit** (it is not in the public ZS payload, so
+it was always blank). It now appears only under **Advanced structure / raw
+diagnostics**, and only when a value is present.
+
+**Wing Stack** shows the structural levels by volume threshold:
+
+| | 2K | 5K | 10K |
+|---|---|---|---|
+| Put ceilings | ✓ | ✓ | ✓ (needs ≥10k-volume series) |
+| Call floors | ✓ | ✓ | ✓ (needs ≥10k-volume series) |
+
+plus the **nearest wing**, the **primary wing** (strongest available tier nearest
+spot), and the signed distance from spot to each. The **10K tier** is derived the
+same way as 2K/5K (strike where volume crosses 10,000) and populates from the live
+subscription volume series; sandbox/mock data peaks well below 10k, so 10K reads
+`—` there with an explanatory note.
+
+**Profiles are grouped by purpose** in Simple Mode — *Primary live paper tests*
+(dynamic) → *Controls* → *Research / Observe* → *Legacy* — defaulting to Primary;
+Advanced Mode exposes every profile. The Zσ Strat Tester also flags a **profile ↔
+latest-run mismatch**: if the latest completed test came from a different profile
+than the one selected, it warns you to start a fresh test rather than reading stale
+results as if they belonged to the selected profile.
+
+Backtest prep (Phase 10) landed as a plan + read-only scaffold:
+`docs/phase10_backtest_plan.md`, `src/replay/`, and
+`python -m scripts.discover_replay_data` — replay reuses the **same** structure
+mapping (`build_snapshot_from_payload`) and the same scanner/selector/lifecycle path,
+so there is no backtest fork.
+
+---
+
+## Trader cockpit cleanup (Phase 9I)
+
+Simple Mode is now a clean trader cockpit; Advanced Mode keeps the developer
+detail.
+
+- **Data source is never ambiguous.** The Zσ Strat Tester shows the **App data
+  source** (top controls) and a **Data source for this run** panel that reconciles
+  it against the selected profile — Data source · Exposure source · Market data
+  source · **Status** (ready / warning / unavailable). If the app and profile
+  disagree it warns: *"Selected profile is configured for Sandbox, but app controls
+  are Live…"*. Simple Mode runs on the app source (explicit); Advanced Mode offers a
+  *Use app / Use profile* toggle.
+- **Quotes say WHY they're unavailable.** Instead of a vague "chain unavailable",
+  you get a concise reason — *market closed or stale Tasty chain*, *Tasty returned no
+  chain for the selected expiry/root*, *Tastytrade is not configured*, *provider set
+  to manual marks* — with raw provider state under an Advanced expander. Unknown
+  causes never overclaim: *"provider returned no usable chain."*
+- **Less debug clutter in Simple Mode.** Advanced structure / raw diagnostics (and
+  DDOI) are Advanced-only; `python -m scripts …` terminal blocks are Advanced-only
+  (Simple Mode is button-driven); the Manual Paper Desk is hidden in Simple Mode.
+- **Strategy dropdown shows only Main Strategies** (the dynamic-first presets) with a
+  *Show comparison and legacy profiles* checkbox. Categories are **Main Strategies /
+  Comparison Tests / Research · Disabled / Legacy · Archived**.
+- **Stats & Review has charts.** Equity curve, drawdown curve, daily P&L,
+  P&L-by-profile, exit-reason and selected-signals breakdowns, plus a **max
+  drawdown** metric (with % when a starting balance is set). Empty data shows *"More
+  stats will appear after additional local paper runs."*
+- **EOD summary is one click.** A prominent **Generate / Refresh EOD summary** button
+  shows the last-generated timestamp + a ⚠ stale / ✅ up-to-date badge, and safely
+  auto-generates once when it's stale on open (no background loop, local outputs
+  only).
+- **Latest run vs selected profile stays honest.** The Tester flags a mismatch when
+  the latest completed test came from a different profile; the friendly run label
+  (*"Vertical Wing · Jun 2 · 10:31 PM"*) leads, the raw run id stays in Advanced.
+
+### Backtest data discovery
+
+`python -m scripts.discover_backtest_sources` (read-only; roots from `--root` →
+`ZSA_TRADING_ROOT` → `~/Dropbox/Trading`, **no hardcoded username**) locates the
+real exposure data for Phase 10: the SPX `SPX_RAW_*.csv` per-strike files and the
+Wingonomics outputs. Wingonomics detects 10K wings by the *same* volume-threshold
+rule this repo uses, so it's the validation ground-truth — see
+`docs/phase10_backtest_plan.md §13`. We consume it; we never run or modify it.
+
+---
+
 ## Safety guardrails
 
 - No code in this repo connects to a broker. The `ExecutionProvider` interface
