@@ -18,6 +18,7 @@ the exit SIMULATION are new (both read-only over saved snapshots).
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -133,11 +134,132 @@ def _selector_row(c, readiness: dict[str, Any]) -> dict[str, Any]:  # type: igno
     }
 
 
+def _as_bool(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    if isinstance(v, str):
+        return v.strip().lower() in ("true", "1", "yes", "y")
+    return False
+
+
+def _join_unique(values: list[Any]) -> str:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if isinstance(value, list):
+            items = value
+        else:
+            items = str(value or "").split(";")
+        for item in items:
+            s = str(item or "").strip()
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+    return "; ".join(out)
+
+
+def _top_value(rows: list[dict[str, Any]], key: str) -> str:
+    vals = [str(r.get(key) or "").strip() for r in rows if str(r.get(key) or "").strip()]
+    if not vals:
+        return ""
+    return Counter(vals).most_common(1)[0][0]
+
+
+def _top_blocker(rows: list[dict[str, Any]]) -> str:
+    vals: list[str] = []
+    for row in rows:
+        for key in (
+            "selector_blockers", "risk_rejection_type", "quote_quality_reason",
+            "rejection_type", "skipped_reason", "selector_reason",
+        ):
+            raw = row.get(key)
+            if isinstance(raw, list):
+                vals.extend(str(v).strip() for v in raw if str(v).strip())
+            else:
+                vals.extend(
+                    str(v).strip() for v in str(raw or "").split(";") if str(v).strip()
+                )
+    return Counter(vals).most_common(1)[0][0] if vals else ""
+
+
+def _no_trade_record(
+    *,
+    date: str,
+    symbol: str,
+    dte_label: str,
+    profile_id: str,
+    settings: Any | None = None,
+    status: str,
+    reason: str,
+    detail: str = "",
+    base: dict[str, Any] | None = None,
+    candidates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    base = base or {}
+    candidates = candidates or []
+    risk_filtered = [c for c in candidates if c.get("candidate_passes_risk_filters") is False]
+    quote_filtered = [c for c in candidates if c.get("candidate_passes_quote_filters") is False]
+    score_filtered = [
+        c for c in candidates
+        if c.get("candidate_passes_score_threshold") is False
+        or c.get("candidate_passes_score_edge") is False
+    ]
+    selector_filtered = [
+        c for c in candidates
+        if not _as_bool(c.get("selected_trade"))
+        and (c.get("selector_blockers") or c.get("selector_reason") or c.get("skipped_reason"))
+    ]
+    eligible = [
+        c for c in candidates
+        if _as_bool(c.get("selector_eligible_base")) and not c.get("selector_blockers")
+    ]
+    side_allowed = [
+        c.get("side_allowed_by_config") for c in candidates
+        if c.get("side_allowed_by_config") is not None
+    ]
+    return {
+        "date": date,
+        "symbol": symbol,
+        "dte": dte_label,
+        "profile_id": profile_id,
+        "entry_target": getattr(settings, "entry_target", "") if settings is not None else "",
+        "entry_timestamp": base.get("entry_timestamp"),
+        "entry_offset_minutes": base.get("entry_offset_minutes"),
+        "status": status,
+        "reason": reason,
+        "detail": detail,
+        "first_blocker": _top_blocker(candidates) or reason,
+        "candidate_count": len(candidates),
+        "eligible_candidate_count": len(eligible),
+        "selected_count": sum(1 for c in candidates if _as_bool(c.get("selected_trade"))),
+        "risk_filtered_count": len(risk_filtered),
+        "quote_filtered_count": len(quote_filtered),
+        "score_filtered_count": len(score_filtered),
+        "selector_filtered_count": len(selector_filtered),
+        "corridor_valid": base.get("corridor_valid"),
+        "active_wds": base.get("active_wds"),
+        "raw_wds": base.get("raw_wds"),
+        "wds_tier": base.get("wds_tier"),
+        "top_selector_reason": _top_value(selector_filtered, "selector_reason"),
+        "top_risk_reason": _top_value(risk_filtered, "risk_rejection_reason")
+        or _top_value(risk_filtered, "risk_rejection_type"),
+        "top_quote_reason": _top_value(quote_filtered, "quote_quality_reason"),
+        "side_allowed_by_config": (
+            all(_as_bool(v) for v in side_allowed) if side_allowed else None
+        ),
+        "missing_price_count": sum(
+            int(float(c.get("missing_price_count") or 0)) for c in candidates
+        ),
+    }
+
+
 # ── one (profile, date) evaluation ───────────────────────────────────────────
 
 def _evaluate(
     *, strat, session, profile, settings, selector_cfg, symbol, dte_label,
-    date, rows, day_index, scheme, warning,
+    date, rows, day_index, scheme, warning, contracts,
 ) -> dict[str, Any]:
     """Map → generate → filter → score → readiness → select → simulate.
 
@@ -148,7 +270,12 @@ def _evaluate(
     if not sel["ok"]:
         return {"candidates": [], "trades": [], "status": "skipped",
                 "skip_reason": sel["reason"],
-                "no_trade": {"reason": f"no_entry_snapshot:{sel['reason']}"}}
+                "no_trade": _no_trade_record(
+                    date=date, symbol=symbol, dte_label=dte_label,
+                    profile_id=profile.profile_id, settings=settings,
+                    status="skipped", reason=f"no_entry_snapshot:{sel['reason']}",
+                    detail=sel["reason"],
+                )}
 
     ts = sel["timestamp"]
     structure = M.map_structure(rows, ts, symbol)
@@ -208,19 +335,24 @@ def _evaluate(
     for i, c in enumerate(candidates):
         meta = sel_result.per_row[i]
         selected = bool(meta["selected_trade"])
-        rec = _candidate_record(base, c, settings, meta, selected)
+        rec = _candidate_record(base, c, settings, meta, readinesses[i], selected)
         cand_records.append(rec)
         if selected:
-            trade_records.append(_trade_record(rec, c, settings, day_index, ts))
+            trade_records.append(_trade_record(rec, c, settings, day_index, ts, contracts))
 
     no_trade = None
     if not sel_result.selected_indices:
-        no_trade = {"reason": sel_result.selector_no_trade_reason or "no_selection"}
+        reason = sel_result.selector_no_trade_reason or "no_selection"
+        no_trade = _no_trade_record(
+            date=date, symbol=symbol, dte_label=dte_label, profile_id=profile.profile_id,
+            settings=settings, status="ok", reason=reason, detail=sel_result.selector_explanation or "",
+            base=base, candidates=cand_records,
+        )
     return {"candidates": cand_records, "trades": trade_records,
             "no_trade": no_trade, "status": "ok", "skip_reason": ""}
 
 
-def _candidate_record(base, c, settings, sel_meta, selected) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+def _candidate_record(base, c, settings, sel_meta, readiness, selected) -> dict[str, Any]:  # type: ignore[no-untyped-def]
     spot = base["spot"] or 0.0
     width = round(c.max_risk + c.credit, 4)
     dist = abs(c.distance_from_spot)
@@ -254,21 +386,39 @@ def _candidate_record(base, c, settings, sel_meta, selected) -> dict[str, Any]: 
         "selector_score": sel_meta.get("selector_score"),
         "selector_score_components": components_to_str(sel_meta.get("selector_score_components")),
         "selector_reason": sel_meta.get("selector_reason"),
+        "rejection_type": c.rejection_type,
+        "risk_rejection_type": readiness.get("risk_rejection_type"),
+        "risk_rejection_reason": readiness.get("risk_rejection_reason"),
+        "quote_quality_reason": readiness.get("quote_quality_reason"),
+        "candidate_passes_trade_filters": readiness.get("candidate_passes_trade_filters"),
+        "candidate_passes_risk_filters": readiness.get("candidate_passes_risk_filters"),
+        "candidate_passes_quote_filters": readiness.get("candidate_passes_quote_filters"),
+        "candidate_passes_score_threshold": readiness.get("candidate_passes_score_threshold"),
+        "candidate_passes_score_edge": readiness.get("candidate_passes_score_edge"),
+        "selector_eligible_base": readiness.get("selector_eligible_base"),
+        "selector_blockers": _join_unique([
+            readiness.get("selector_blockers") or [],
+            sel_meta.get("selector_blockers") or [],
+        ]),
+        "side_allowed_by_config": sel_meta.get("side_allowed_by_config"),
         "selected_trade": selected,
         "skipped_reason": skipped_reason,
     }
 
 
-def _trade_record(rec, c, settings, day_index, entry_ts) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+def _trade_record(rec, c, settings, day_index, entry_ts, contracts) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+    qty = max(1, int(contracts or 1))
     exit_res = simulate_exit(
         day_index, entry_ts=entry_ts, side=c.side,
         short_strike=c.short_strike, long_strike=c.long_strike,
         entry_credit_points=c.credit,
         take_profit_capture=settings.take_profit_capture,
         stop_loss_loss=settings.stop_loss_loss,
+        contracts=qty,
     )
     trade = dict(rec)
     trade.update({
+        "contracts": qty,
         "tp_mode": settings.take_profit_label,
         "sl_mode": settings.stop_loss_label,
         "exit_timestamp": exit_res.exit_timestamp.isoformat() if exit_res.exit_timestamp else None,
@@ -307,9 +457,23 @@ def run_backtest(
     latest_days: int = 0,
     trading_root: str | None = None,
     run_label: str = "run",
+    starting_balance: float = 10000.0,
+    contracts: int = 1,
 ) -> BacktestResult:
     """Run the backtest for one symbol across a date range for the given profiles."""
     symbol = (symbol or "SPX").strip().upper()
+    try:
+        starting_balance = float(starting_balance)
+    except (TypeError, ValueError):
+        starting_balance = 10000.0
+    if starting_balance <= 0:
+        raise ValueError("starting_balance must be greater than 0")
+    try:
+        contracts = int(contracts)
+    except (TypeError, ValueError):
+        contracts = 1
+    if contracts <= 0:
+        raise ValueError("contracts must be greater than 0")
     dte_label = schemas.DTE_1 if int(dte) == 1 else schemas.DTE_0
     root = L.trading_root(trading_root)
     cfg, strat = _load_cfg_and_strategy()
@@ -340,7 +504,8 @@ def run_backtest(
         "limit": limit, "latest_days": latest_days, "run_label": run_label,
         "threshold_scheme": scheme, "threshold_warning": warning,
         "trading_root": str(root), "option_multiplier": OPTION_MULTIPLIER,
-        "contracts": 1, "selector_path": "live select_daily_trade (Phase 5, reused)",
+        "starting_balance": round(starting_balance, 2), "contracts": contracts,
+        "selector_path": "live select_daily_trade (Phase 5, reused)",
         "no_broker": True, "no_execution": True, "no_live_api": True,
     })
 
@@ -351,15 +516,21 @@ def run_backtest(
         csv_path = L.file_for_date(symbol, dte_label, date, root=root)
         if csv_path is None:
             result.no_trade_reasons.append(
-                {"date": date, "symbol": symbol, "profile_id": "*", "reason": "no_file_for_date"})
+                _no_trade_record(
+                    date=date, symbol=symbol, dte_label=dte_label, profile_id="*",
+                    status="skipped", reason="no_file_for_date",
+                ))
             continue
         files_found += 1
         try:
             rows = L.load_raw_rows(csv_path, symbol)
         except (OSError, ValueError) as exc:
             result.no_trade_reasons.append(
-                {"date": date, "symbol": symbol, "profile_id": "*",
-                 "reason": f"load_error:{type(exc).__name__}"})
+                _no_trade_record(
+                    date=date, symbol=symbol, dte_label=dte_label, profile_id="*",
+                    status="error", reason=f"load_error:{type(exc).__name__}",
+                    detail=str(exc),
+                ))
             continue
         day_index = build_day_index(rows, symbol)
         result.dates_evaluated.append(date)
@@ -372,16 +543,14 @@ def run_backtest(
                 strat=strat, session=session, profile=profile, settings=settings,
                 selector_cfg=selector_cfg, symbol=symbol, dte_label=dte_label, date=date,
                 rows=rows, day_index=day_index, scheme=scheme, warning=warning,
+                contracts=contracts,
             )
             result.candidates.extend(out["candidates"])
             result.trades.extend(out["trades"])
             if out["status"] == "ok" and out["candidates"]:
                 valid_entries += 1
             if out["no_trade"] is not None:
-                result.no_trade_reasons.append({
-                    "date": date, "symbol": symbol, "profile_id": profile.profile_id,
-                    "reason": out["no_trade"]["reason"],
-                })
+                result.no_trade_reasons.append(out["no_trade"])
 
     result.counters = {
         "dates_in_range": len(dates),

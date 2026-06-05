@@ -252,6 +252,7 @@ class TastytradeQuoteProvider:
 
         eff_expiry = (request.expiry if request else None) or expiry
         if not eff_expiry:
+            self._state.last_error = "expiration_unavailable:no_expiry"
             log.warning("TastytradeQuoteProvider.get_option_chain: no expiry supplied")
             return None
         if request is None or not request.required_strikes:
@@ -263,6 +264,7 @@ class TastytradeQuoteProvider:
                 "TastytradeQuoteProvider.get_option_chain: no required_strikes "
                 "in QuoteRequest — production provider does not pull whole chains"
             )
+            self._state.last_error = "no_required_strikes"
             return None
 
         # 1) resolve root (auto SPX→SPXW unless caller wrote it directly)
@@ -357,6 +359,10 @@ class TastytradeQuoteProvider:
                 validation_passed=passed,
                 validation_rejection_reason=reason,
             ))
+        if not quotes:
+            self._state.last_error = "quotes_unavailable:empty_response"
+        else:
+            self._state.last_error = None
 
         # 5) wrap in OptionChainSnapshot. Use the scanner's spot_hint
         # (= structure spot) when present; real broker spot isn't needed

@@ -216,7 +216,11 @@ def metric_card(label: Any, value: Any, sub: Any = None) -> str:
 # ── tiny formatting helpers (used across the cockpit) ────────────────────────
 
 def dash(v: Any) -> str:
-    return "—" if v is None or v == "" else str(v)
+    if v is None or v == "":
+        return "—"
+    if isinstance(v, float):
+        return f"{v:,.4f}".rstrip("0").rstrip(".")
+    return str(v)
 
 
 def fmt_money(v: Any, decimals: int = 2) -> str:

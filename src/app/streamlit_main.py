@@ -15,7 +15,7 @@ controller (a background `run_forward` monitor) — no brokerage anywhere.
 
 from __future__ import annotations
 
-import os
+import math
 import sys
 import uuid
 from pathlib import Path
@@ -222,10 +222,22 @@ with st.expander("⚙  Controls & data source", expanded=not simple_mode):
             (r.profile for r in _prof_results if r.profile.profile_id == chosen_profile_id), None,
         )
         if _active_profile is not None:
-            st.caption(
-                f"`{_active_profile.profile_id}` · symbol=`{_active_profile.symbol}` · "
-                f"selector=`{_active_profile.daily_selector}` · dte={_active_profile.target_dte}"
-            )
+            if simple_mode:
+                _ap_label = om.profile_dropdown_label(
+                    _active_profile.profile_id,
+                    getattr(_active_profile, "profile_name", None),
+                    getattr(_active_profile, "preset_kind", None),
+                )
+                st.caption(
+                    f"{_ap_label} · symbol {om.normalize_symbol(_active_profile.symbol)} · "
+                    f"selector {om.selector_to_style(_active_profile.daily_selector)} · "
+                    f"dte {ui.dash(_active_profile.target_dte)}"
+                )
+            else:
+                st.caption(
+                    f"`{_active_profile.profile_id}` · symbol=`{_active_profile.symbol}` · "
+                    f"selector=`{_active_profile.daily_selector}` · dte={_active_profile.target_dte}"
+                )
         _sel_yaml = (
             (CFG.scanner.get("selector") or {}).get("daily_trade_selector")
             if isinstance(CFG.scanner, dict) else None
@@ -287,6 +299,7 @@ QUOTE_STATUS = ch.cockpit_quote_status(
     max_spread_abs=QUOTE_VALIDATION.max_spread_abs,
     max_age_seconds=QUOTE_VALIDATION.max_age_seconds,
     requested_strikes=quote_request.required_strikes,
+    dte=getattr(structure, "dte", None),
 )
 
 # Phase 10C — after-hours preview DTE. The Live Cockpit previews 0DTE during RTH;
@@ -302,8 +315,13 @@ AFTER_HOURS_PREVIEW = om.after_hours_preview_active(now_et(), _PROFILE_DTE)
 # LIVE_QUOTES_STALE additionally requires a LIVE (non-sandbox) source — it disables
 # Start Paper Test and downgrades the live "Decision" to a preview. Never loosens
 # the underlying validation; it only changes what the UI claims.
-QUOTE_STALE = (QUOTE_STATUS["state"] == "chain_returned_validation_failed"
-               and str(QUOTE_STATUS["details"].get("top_blocker") or "").lower() == "stale")
+QUOTE_STALE = (
+    QUOTE_STATUS["state"] == "chain_returned_stale"
+    or (
+        QUOTE_STATUS["state"] == "chain_returned_validation_failed"
+        and str(QUOTE_STATUS["details"].get("top_blocker") or "").lower() == "stale"
+    )
+)
 LIVE_QUOTES_STALE = QUOTE_STALE and not om.is_sandbox(
     resolved_structure_name, resolved_quote_name)
 
@@ -324,6 +342,19 @@ def _fmt_quote(q: dict) -> str:
     if b is None or m is None or a is None:
         return "—"
     return f"{b:.2f} / {m:.2f} / {a:.2f}"
+
+
+def _chart_ready(values: list | tuple) -> bool:
+    """True when Streamlit/Vega has enough finite variation to render safely."""
+    nums: list[float] = []
+    for v in values or []:
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(x):
+            nums.append(x)
+    return len(nums) >= 2 and any(x != nums[0] for x in nums[1:])
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -358,20 +389,18 @@ def render_symbol_health() -> None:
     cols[1].metric("Quotes", view["market_data"] if sandbox else _q_short,
                    _quote_detail, delta_color="off")
     cols[2].metric("Exposures", view["exposures"])
-    _elig = ("blocked" if (not sandbox
-             and QUOTE_STATUS["state"] == "chain_returned_validation_failed")
-             else view["eligible"])
+    _elig = QUOTE_STATUS["eligible_hint"] if not sandbox else view["eligible"]
     cols[3].metric("Strategy eligible", _elig)
     cols[4].markdown("<div class='zsa-pill-cell'>" + ui.pill("NO BROKER EXECUTION", "green")
                      + "</div>", unsafe_allow_html=True)
     if view["note"]:
         st.caption(view["note"])
     # Precise, trader-facing quote-state banner (stale wording when after-hours).
-    _banner = None if sandbox else om.quote_state_banner(QUOTE_STATUS["state"], SYMBOL, _tb)
+    _banner = None if sandbox else om.quote_state_banner(QUOTE_STATUS["state"], SYMBOL, _tb,
+                                                         after_hours=AFTER_HOURS_PREVIEW)
     if _banner:
         st.warning(_banner)
-        if (QUOTE_STATUS["state"] == "chain_returned_validation_failed"
-                and str(_tb).lower() == "stale"):
+        if QUOTE_STALE:
             st.caption("🌙 After-hours / stale quote mode — " + om.stale_quote_mode_banner(SYMBOL))
     elif view["reason"]:
         st.warning(view["reason"])
@@ -435,7 +464,7 @@ def render_provider_status() -> None:
             if provider_status.get("public_only"):
                 st.info(
                     "`public_only` mode — no Authorization header sent. "
-                    "`/exposure/series` is skipped, so **PUT_CEILING / CALL_FLOOR / "
+                    "`/exposure/series` is skipped, so **Put Ceiling / Call Floor / "
                     "MaxVol will be None**. Switch to `bearer` / `login` / `service_token` "
                     "and set `ZS_API_ENABLE_EXPOSURE_SERIES=true` to populate them."
                 )
@@ -500,10 +529,11 @@ def render_operator_decision() -> None:
         gamma=gamma, wings=wings, best_eligible=best, chain_available=chain is not None,
         wds=wds,
     )
+    _display_text = om.friendly_text if simple_mode else str
     left, right = st.columns(2)
-    left.markdown(f"**Structure Read**  \n{layer['structure_read']}")
-    left.markdown(f"**Trade Bias**  \n{layer['trade_bias']}")
-    left.markdown(f"**Candidate Risk**  \n{layer['candidate_risk']}")
+    left.markdown(f"**Structure Read**  \n{_display_text(layer['structure_read'])}")
+    left.markdown(f"**Trade Bias**  \n{_display_text(layer['trade_bias'])}")
+    left.markdown(f"**Candidate Risk**  \n{_display_text(layer['candidate_risk'])}")
     # Phase 10B — only say "Best Eligible Setup" when quotes are actually usable.
     # A stale/validation-blocked top candidate is a PREVIEW, not an eligible setup.
     _tb = QUOTE_STATUS["details"].get("top_blocker")
@@ -518,16 +548,17 @@ def render_operator_decision() -> None:
             _setup += " — " + ", ".join(_bits)
         if QUOTE_STATUS["available"]:
             right.markdown(f"**Best Eligible Setup**  \n{_setup}")
-        elif (QUOTE_STATUS["state"] == "chain_returned_validation_failed"
-              and str(_tb).lower() == "stale"):
+        elif QUOTE_STALE:
             right.markdown(f"**Best Candidate Preview — Stale Quotes**  \n{_setup}  \n"
                            "_Blocked: stale quotes — preview pricing only._")
         else:
             right.markdown(f"**Best Candidate Preview — Blocked**  \n{_setup}  \n"
                            f"_Blocked: {om.quote_state_label(QUOTE_STATUS['state'], _tb).lower()}._")
     else:
-        right.markdown(f"**Best Eligible Setup**  \nNo eligible setup. {layer['best_eligible_setup']}")
-    right.markdown(f"**Why / Why Not**  \n{layer['why_why_not']}")
+        right.markdown(
+            f"**Best Eligible Setup**  \nNo eligible setup. "
+            f"{_display_text(layer['best_eligible_setup'])}")
+    right.markdown(f"**Why / Why Not**  \n{_display_text(layer['why_why_not'])}")
     st.caption(
         f"Gamma source: {gamma['source'].replace('_', ' ')} · {gamma['note']}  ·  "
         "Operator read only — no broker execution."
@@ -560,11 +591,13 @@ def render_market() -> None:
     st.markdown("**Wing Stack** — structural levels by volume threshold")
     pc = st.columns(3)
     for _i, _e in enumerate(ws["put_ceilings"]):
-        pc[_i].metric(_e["label"], _e["strike_fmt"],
+        _label = om.friendly_text(_e["label"]) if simple_mode else _e["label"]
+        pc[_i].metric(_label, _e["strike_fmt"],
                       f"{_e['distance_fmt']} pts" if _e["available"] else None)
     cf = st.columns(3)
     for _i, _e in enumerate(ws["call_floors"]):
-        cf[_i].metric(_e["label"], _e["strike_fmt"],
+        _label = om.friendly_text(_e["label"]) if simple_mode else _e["label"]
+        cf[_i].metric(_label, _e["strike_fmt"],
                       f"{_e['distance_fmt']} pts" if _e["available"] else None)
     # ── Wing corridor + dominant WDS (Phase 9J/10A) ──
     # Structure is ACTIVE only when CW1 < spot < PW1; a call floor above spot is
@@ -589,24 +622,34 @@ def render_market() -> None:
         _w2v = wd["call_w2_volume"] if _side == "CALL" else wd["put_w2_volume"]
         _wsr = wd["call_wsr"] if _side == "CALL" else wd["put_wsr"]
         dcols = st.columns(4)
-        dcols[0].metric(f"Active dominant {wd['dominant_wing_label']}",
+        _dom_label = (om.friendly_text(wd["dominant_wing_label"])
+                      if simple_mode else wd["dominant_wing_label"])
+        dcols[0].metric(f"Active dominant {_dom_label}",
                         ch.fmt_strike(wd["dominant_wing_strike"]),
                         f"WDS {wd['dominant_wing_wds_pct']} · Tier {wd['dominant_wing_tier']}")
         dcols[1].metric("W1 volume", ch.fmt_count(_w1v))
         dcols[2].metric(f"W2 @ {ch.fmt_strike(_w2s)}", ch.fmt_count(_w2v))
         dcols[3].metric("WSR (W2/W1)", f"{round(_wsr * 100)}%" if _wsr is not None else "—")
-        st.caption(wd["wds_reason"])
+        st.caption(om.friendly_text(wd["wds_reason"]) if simple_mode else wd["wds_reason"])
     elif wd["raw_wds_source"] == "true":
+        _raw_label = (om.friendly_text(wd["raw_dominant_label"])
+                      if simple_mode else wd["raw_dominant_label"])
         st.caption(f"Raw WDS only (corridor inactive — NOT active structure): "
-                   f"{wd['raw_dominant_label']} {ch.fmt_strike(wd['raw_dominant_strike'])} "
+                   f"{_raw_label} {ch.fmt_strike(wd['raw_dominant_strike'])} "
                    f"WDS {wd['raw_dominant_wds_pct']} Tier {wd['raw_dominant_tier']}.  "
-                   f"{wd['wds_reason']}")
+                   f"{om.friendly_text(wd['wds_reason']) if simple_mode else wd['wds_reason']}")
     else:
-        st.caption(f"WDS unavailable — {wd['wds_reason']}")
+        st.caption(
+            f"WDS unavailable — "
+            f"{om.friendly_text(wd['wds_reason']) if simple_mode else wd['wds_reason']}")
     near = ws["nearest_wing"]
-    near_txt = (f"{near['label']} {near['strike_fmt']} ({near['distance_fmt']} pts)"
+    _near_label = (om.friendly_text(near["label"]) if simple_mode and near else
+                   near["label"] if near else None)
+    near_txt = (f"{_near_label} {near['strike_fmt']} ({near['distance_fmt']} pts)"
                 if near else "unavailable")
-    _dom_txt = (f"{wd['dominant_wing_label']} {ch.fmt_strike(wd['dominant_wing_strike'])} "
+    _dom_label = (om.friendly_text(wd["dominant_wing_label"])
+                  if simple_mode and wd["dominant_wing_label"] else wd["dominant_wing_label"])
+    _dom_txt = (f"{_dom_label} {ch.fmt_strike(wd['dominant_wing_strike'])} "
                 f"(WDS {wd['dominant_wing_wds_pct']}, Tier {wd['dominant_wing_tier']})"
                 if wd["wds_active"]
                 else "none (corridor inactive)" if wd["raw_wds_source"] == "true" else "unavailable")
@@ -622,9 +665,15 @@ def render_market() -> None:
     # A returned-but-validation-blocked Tasty chain is NOT "unavailable" — say so.
     if not QUOTE_STATUS["available"]:
         _det = QUOTE_STATUS["details"]
-        if QUOTE_STATUS["state"] == "chain_returned_validation_failed":
+        if QUOTE_STATUS["state"] in (
+            "chain_returned_validation_failed",
+            "chain_returned_stale",
+            "chain_returned_missing_required_strikes",
+            "chain_resolved_quotes_unavailable",
+        ):
             _tb = _det.get("top_blocker")
-            st.warning(om.quote_state_banner(QUOTE_STATUS["state"], SYMBOL, _tb))
+            st.warning(om.quote_state_banner(
+                QUOTE_STATUS["state"], SYMBOL, _tb, after_hours=AFTER_HOURS_PREVIEW))
             st.caption(
                 f"Quotes: **{om.quote_state_label(QUOTE_STATUS['state'], _tb)}** — chain returned "
                 f"({_det['quote_count']} quotes · {_det['root'] or '—'} @ "
@@ -634,7 +683,11 @@ def render_market() -> None:
             )
         else:
             # genuine no-chain / auth / root / config state
-            st.warning(f"{QUOTE_STATUS['banner']} Showing Zσ structure context only.")
+            _banner = om.quote_state_banner(
+                QUOTE_STATUS["state"], SYMBOL, _det.get("top_blocker"),
+                after_hours=AFTER_HOURS_PREVIEW,
+            ) or QUOTE_STATUS["banner"]
+            st.warning(f"{_banner} Showing Zσ structure context only.")
             _actions = ch.chain_unavailable_actions(
                 resolved_quote_name, last_error=getattr(quote_status, "last_error", None))
             for _a in (_actions[:2] if simple_mode else _actions):
@@ -659,19 +712,25 @@ def render_market() -> None:
         st.markdown(f"**Cockpit quote state:** `{QUOTE_STATUS['state']}` → "
                     f"**{QUOTE_STATUS['label']}**")
         for _l, _v in (
-            ("QUOTE_PROVIDER (resolved)", resolved_quote_name),
-            ("TASTY_ENV", os.environ.get("TASTY_ENV") or "—"),
-            ("root / expiration", f"{_d['root'] or '—'} @ {_d['expiration'] or '—'}"),
+            ("quote provider", _d["quote_provider"] or resolved_quote_name),
+            ("auth mode configured", _d["auth_mode_configured"]),
+            ("auth mode", _d["auth_mode"] or "—"),
+            ("root", _d["root"] or "—"),
+            ("expiry", _d["expiration"] or "—"),
+            ("DTE", _d["dte"] if _d["dte"] is not None else "—"),
+            ("required strikes count", _d["required_strike_count"]),
+            ("required strikes", _d["requested_strikes"] or "—"),
             ("chain returned", _d["chain_returned"]),
             ("quote count", _d["quote_count"]),
+            ("validation state", _d["validation_state"]),
             ("validation passed / failed",
              f"{_d['validation_passed_count']} / {_d['validation_failed_count']}"),
-            ("top validation blocker", _d["top_blocker"] or "—"),
+            ("top blocker", _d["top_blocker"] or "—"),
             ("strike range", f"{_d['strike_min']} – {_d['strike_max']}"),
             ("max_spread_abs / max_age_s", f"{_d['max_spread_abs']} / {_d['max_age_seconds']}"),
-            ("observed worst spread", _d["observed_failing_spread"]),
+            ("observed worst spread", _d["observed_failing_spread"] or "—"),
             ("missing strikes", _d["missing_strikes"] or "—"),
-            ("last_error", _d["last_error"] or "—"),
+            ("last sanitized error", _d["last_error"] or "—"),
         ):
             st.text(f"{_l:<28}: {_v}")
         st.caption("max_spread_abs is the `TASTY_QUOTE_MAX_SPREAD_ABS` env cap (per-leg, "
@@ -1031,25 +1090,39 @@ def render_candidates() -> None:
         st.caption(_dh["note"])
 
 
-def _render_profile_info_card(info: dict) -> None:
+def _render_profile_info_card(info: dict, *, simple: bool = False) -> None:
     """Shared profile info card (Builder + Tester). Phase 9G — shows side policy,
     entry window, target time, threshold, TP/SL, selector mode + dynamic-exit
     status alongside the basics. Reads the pure ``om.profile_info_fields`` map."""
-    grid = (
-        "Profile", "Profile ID", "Symbol", "Strategy",
-        "Entry window", "Target time", "Target DTE", "Threshold",
-        "Side policy", "Selector mode", "Take profit (TP)", "Stop loss (SL)",
-        "Risk profile", "Data source",
-    )
+    if simple:
+        grid = (
+            "Profile", "Symbol", "Strategy", "Entry window",
+            "Target time", "Target DTE", "Threshold", "Side policy",
+            "Selector style", "Take profit (TP)", "Stop loss (SL)",
+            "Risk profile", "Data source",
+        )
+    else:
+        grid = (
+            "Profile", "Profile ID", "Symbol", "Strategy",
+            "Entry window", "Target time", "Target DTE", "Threshold",
+            "Side policy", "Selector mode", "Take profit (TP)", "Stop loss (SL)",
+            "Risk profile", "Data source",
+        )
     cols = st.columns(4)
     for _i, _k in enumerate(grid):
-        cols[_i % 4].metric(_k, ui.dash(info.get(_k)))
-    st.caption(f"**Dynamic exits:** {info.get('Dynamic exits')}")
-    st.caption(f"**Designed to test:** {info.get('Designed to test')}")
-    st.caption(
-        f"Enabled: `{info.get('Enabled')}`  ·  Safety: {info.get('Safety')}  ·  "
-        "TP/SL shown is the preset's intent; the paper lifecycle currently applies "
-        "the PAPER_* env values (per-profile wiring deferred).")
+        _v = info.get(_k)
+        if simple and _k in ("Risk profile", "Selector mode", "Stop loss (SL)"):
+            _v = om.friendly_enum_label(_v)
+        cols[_i % 4].metric(_k, ui.dash(om.friendly_text(_v) if simple else _v))
+    st.caption(f"**Dynamic exits:** {om.friendly_text(info.get('Dynamic exits'))}")
+    st.caption(f"**Designed to test:** {om.friendly_text(info.get('Designed to test'))}")
+    if simple:
+        st.caption("Safety: local paper / no broker execution. Raw profile IDs and JSON are in Advanced.")
+    else:
+        st.caption(
+            f"Enabled: `{info.get('Enabled')}`  ·  Safety: {info.get('Safety')}  ·  "
+            "TP/SL shown is the preset's intent; the paper lifecycle currently applies "
+            "the PAPER_* env values (per-profile wiring deferred).")
 
 
 def render_strategy_builder() -> None:
@@ -1088,7 +1161,7 @@ def render_strategy_builder() -> None:
     if valid_ids and sel_id in valid_ids:
         sel_dict, _serrs = pb.load_dict_for_edit(sel_id)
     if sel_dict:
-        _render_profile_info_card(om.profile_info_fields(sel_dict))
+        _render_profile_info_card(om.profile_info_fields(sel_dict), simple=simple_mode)
     with st.expander("All profiles (table)", expanded=False):
         if summaries:
             st.dataframe(
@@ -1464,7 +1537,8 @@ def render_forward_runner() -> None:
         _sel_runner_dict, _ = pb.load_dict_for_edit(sel_profile)
         if _sel_runner_dict:
             with st.expander("Selected profile details", expanded=simple_mode):
-                _render_profile_info_card(om.profile_info_fields(_sel_runner_dict))
+                _render_profile_info_card(
+                    om.profile_info_fields(_sel_runner_dict), simple=simple_mode)
 
     # ── Phase 9I — App vs Profile data source for THIS run (never silently mismatch) ──
     _ovr_struct = _ovr_quote = None
@@ -1943,6 +2017,35 @@ def render_backtests() -> None:
         "Run label", value=om.backtest_default_label(bt_symbol, bt_profile, bt_mode),
         key="bt_label")
 
+    # ── Fixed sizing (Phase 10D-B): account-adjusted reports only, no risk sizing ──
+    _preset_names = list(om.BACKTEST_SIZING_PRESETS)
+    _default_preset = "Standard paper"
+    if "bt_sizing_preset_prev" not in st.session_state:
+        st.session_state["bt_sizing_preset_prev"] = _default_preset
+        _bal, _qty = om.BACKTEST_SIZING_PRESETS[_default_preset]
+        st.session_state.setdefault("bt_starting_balance", _bal)
+        st.session_state.setdefault("bt_contracts", _qty)
+    bt_preset = st.selectbox(
+        "Sizing preset", _preset_names, index=_preset_names.index(_default_preset),
+        key="bt_sizing_preset",
+        help="Fixed-size replay presets. This does not enable risk-based sizing.")
+    if st.session_state.get("bt_sizing_preset_prev") != bt_preset:
+        _bal, _qty = om.BACKTEST_SIZING_PRESETS[bt_preset]
+        st.session_state["bt_starting_balance"] = _bal
+        st.session_state["bt_contracts"] = _qty
+        st.session_state["bt_sizing_preset_prev"] = bt_preset
+    _sz = st.columns(2)
+    bt_starting_balance = float(_sz[0].number_input(
+        "Starting Balance", value=float(st.session_state.get("bt_starting_balance", 10000.0)),
+        min_value=1.0, step=500.0, key="bt_starting_balance"))
+    bt_contracts = int(_sz[1].number_input(
+        "Contracts / Lots", value=int(st.session_state.get("bt_contracts", 1)),
+        min_value=1, step=1, key="bt_contracts"))
+    st.caption(
+        f"Backtest sizing: {ch.fmt_money(bt_starting_balance)} starting balance · "
+        f"{bt_contracts} contract{'s' if bt_contracts != 1 else ''} per spread. "
+        "Fixed sizing only; risk-based sizing is deferred.")
+
     # ── Run (in-process, spinner) / Refresh ──
     _runnable = bool(_rng["available"]) and _range_ok
     rcol = st.columns([1, 1, 2])
@@ -1963,7 +2066,9 @@ def render_backtests() -> None:
             try:
                 _res = run_backtest(symbol=bt_symbol, profile_ids=_profs, start=_start,
                                     end=_end, dte=bt_dte, latest_days=_latest_days,
-                                    run_label=bt_label)
+                                    run_label=bt_label,
+                                    starting_balance=bt_starting_balance,
+                                    contracts=bt_contracts)
                 _stamp = _datetime.now().strftime("%Y-%m-%d_%H%M%S")
                 _R.write_reports(_res, [_M.latest_dir(),
                                         _M.run_dir(_stamp, f"{bt_symbol}_{bt_label}")],
@@ -1996,29 +2101,153 @@ def render_backtests() -> None:
             _ctx.append(str(_rcfg.get("stamp")))
         if _ctx:
             st.caption(" · ".join(_ctx))
-        k = st.columns(5)
-        k[0].metric("Trades", _m.get("total_trades", 0))
-        _wr = _m.get("win_rate")
-        k[1].metric("Win Rate", f"{_wr * 100:.0f}%" if isinstance(_wr, (int, float)) else "—")
-        k[2].metric("Total P&L", ch.fmt_money(_m.get("total_pnl_dollars", 0.0)))
+        _contracts = _m.get("contracts") or _rcfg.get("contracts") or 1
+        _starting_balance = _m.get("starting_balance") or _rcfg.get("starting_balance")
+        _ending_balance = _m.get("ending_balance")
+        _ret = _m.get("return_pct")
         _dd = _m.get("max_drawdown_dollars")
-        k[3].metric("Max Drawdown", ch.fmt_money(_dd) if isinstance(_dd, (int, float)) else "—")
-        k[4].metric("TP / SL / EOD",
-                    f"{_m.get('tp_count', 0)} / {_m.get('sl_count', 0)} / {_m.get('eod_count', 0)}")
-        _bp = _results.get("by_profile") or []
-        if _bp:
-            st.markdown("**By profile**")
-            st.dataframe(_bp, use_container_width=True, hide_index=True)
+        _dd_pct = _m.get("max_drawdown_pct")
+        _wr = _m.get("win_rate")
+        st.caption(
+            f"Account-adjusted result for {ch.fmt_money(_starting_balance)} starting balance · "
+            f"{_contracts} contract{'s' if int(_contracts or 1) != 1 else ''}.")
+        k = st.columns(4)
+        k[0].metric("Ending Balance", ch.fmt_money(_ending_balance))
+        k[1].metric("Total P&L", ch.fmt_money(_m.get("total_pnl_dollars", 0.0)))
+        k[2].metric("Return %", ch.fmt_pct(_ret, as_fraction=False, decimals=2))
+        k[3].metric("Max Drawdown %", ch.fmt_pct(_dd_pct, as_fraction=False, decimals=2))
+        kk = st.columns(4)
+        kk[0].metric("Profit Factor", _m.get("profit_factor", "—"))
+        kk[1].metric("Expectancy", ch.fmt_money(_m.get("expectancy_dollars")))
+        kk[2].metric("Trades", _m.get("total_trades", 0))
+        kk[3].metric("Win Rate", f"{_wr * 100:.0f}%" if isinstance(_wr, (int, float)) else "—")
+        km = st.columns(5)
+        km[0].metric("Starting Balance", ch.fmt_money(_starting_balance))
+        km[1].metric("Contracts", _contracts)
+        km[2].metric("Max Drawdown $", ch.fmt_money(_dd) if isinstance(_dd, (int, float)) else "—")
+        km[3].metric("Avg Win / Loss", f"{ch.fmt_money(_m.get('avg_win_dollars'))} / "
+                     f"{ch.fmt_money(_m.get('avg_loss_dollars'))}")
+        km[4].metric("TP / SL / EOD",
+                     f"{_m.get('tp_count', 0)} / {_m.get('sl_count', 0)} / {_m.get('eod_count', 0)}")
+
+        _explain = _results.get("explainability") or {}
+        if _explain.get("summary"):
+            st.info(_explain["summary"])
+
+        def _num(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        st.markdown("**Charts**")
+        _eq = _results.get("equity_curve") or []
+        _eq_chart = []
+        for _r in _eq:
+            _trade_index = _num(_r.get("trade_index"))
+            _equity = _num(_r.get("account_equity"))
+            _drawdown = _num(_r.get("drawdown_dollars"))
+            if _trade_index is not None and _equity is not None:
+                _eq_chart.append({
+                    "trade_index": int(_trade_index),
+                    "account_equity": _equity,
+                    "drawdown_dollars": _drawdown,
+                })
+        _eq_vals = [r.get("account_equity") for r in _eq_chart]
+        if _chart_ready(_eq_vals):
+            st.line_chart(_eq_chart, x="trade_index", y="account_equity", use_container_width=True)
+        else:
+            st.caption("More data will appear after runs.")
+        _dd_vals = [r.get("drawdown_dollars") for r in _eq_chart]
+        if _chart_ready(_dd_vals):
+            st.line_chart(_eq_chart, x="trade_index", y="drawdown_dollars", use_container_width=True)
+        _daily = _results.get("daily_pnl") or []
+        _daily_chart = []
+        for _r in _daily:
+            _pnl = _num(_r.get("pnl_dollars"))
+            if _pnl is not None:
+                _daily_chart.append({"date": _r.get("date"), "pnl_dollars": _pnl})
+        _daily_vals = [r.get("pnl_dollars") for r in _daily_chart]
+        if _chart_ready(_daily_vals):
+            st.bar_chart(_daily_chart, x="date", y="pnl_dollars", use_container_width=True)
+
+        st.markdown("**Trades**")
+        _trade_rows = _results.get("trade_rows") or []
+        if not _trade_rows:
+            st.info("No trades selected in this run. Review skipped days below.")
+        else:
+            _tf = st.columns(5)
+            _profiles = sorted({str(r.get("_profile") or "") for r in _trade_rows if r.get("_profile")})
+            _sides = sorted({str(r.get("_side") or "") for r in _trade_rows if r.get("_side")})
+            _exits = sorted({str(r.get("_exit_reason") or "") for r in _trade_rows if r.get("_exit_reason")})
+            _corridors = ["Yes", "No"]
+            _tiers = sorted({str(r.get("_wds_tier") or "") for r in _trade_rows if r.get("_wds_tier")})
+            _sel_profiles = _tf[0].multiselect("Profile", _profiles, default=_profiles, key="bt_f_profile")
+            _sel_sides = _tf[1].multiselect("Side", _sides, default=_sides, key="bt_f_side")
+            _sel_exits = _tf[2].multiselect("Exit", _exits, default=_exits, key="bt_f_exit")
+            _sel_corridors = _tf[3].multiselect("Corridor", _corridors, default=_corridors,
+                                                key="bt_f_corridor")
+            _sel_tiers = _tf[4].multiselect("WDS", _tiers, default=_tiers, key="bt_f_wds")
+            _filtered = [
+                r for r in _trade_rows
+                if str(r.get("_profile") or "") in _sel_profiles
+                and str(r.get("_side") or "") in _sel_sides
+                and str(r.get("_exit_reason") or "") in _sel_exits
+                and str(r.get("Corridor") or "") in _sel_corridors
+                and str(r.get("_wds_tier") or "") in _sel_tiers
+            ]
+            _show = [
+                {k: v for k, v in r.items() if not k.startswith("_") and k != "P&L Raw"}
+                for r in _filtered
+            ]
+            st.dataframe(_show, use_container_width=True, hide_index=True)
+
+        st.markdown("**Why Trades Did Not Fire**")
+        _top = _explain.get("top_reasons") or []
+        if _top:
+            st.dataframe(_top, use_container_width=True, hide_index=True)
+        _no_trade = _results.get("no_trade_reasons") or []
+        if _no_trade:
+            _cols = [
+                "date", "profile_id", "entry_target", "status", "reason", "first_blocker",
+                "candidate_count", "eligible_candidate_count", "risk_filtered_count",
+                "quote_filtered_count", "score_filtered_count", "selector_filtered_count",
+                "top_selector_reason", "top_risk_reason", "top_quote_reason",
+            ]
+            st.dataframe([{c: r.get(c) for c in _cols} for r in _no_trade],
+                         use_container_width=True, hide_index=True)
+        else:
+            st.caption("More data will appear after runs.")
+
+        st.markdown("**Breakdowns**")
+        _break_tabs = st.tabs(["Profile", "Side", "Exit", "Corridor", "WDS", "Day"])
+        _breaks = [
+            _results.get("by_profile") or [],
+            _results.get("by_side") or [],
+            _results.get("by_exit_reason") or [],
+            _results.get("by_corridor") or [],
+            _results.get("by_wds_tier") or [],
+            _results.get("by_day") or [],
+        ]
+        for _tab, _rows in zip(_break_tabs, _breaks, strict=False):
+            with _tab:
+                if _rows:
+                    st.dataframe(_rows, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("More data will appear after runs.")
     st.caption("Historical simulation only — no broker, no order preview, no execution.")
 
     # ── Advanced — CLI equivalent (secondary fallback; not the main workflow) ──
     with st.expander("Advanced — CLI command (optional, runs the same thing)", expanded=False):
         _cli_days = _latest_days if bt_mode == "Latest N days" else 0
-        st.code(om.backtest_command(bt_symbol, bt_profile, _cli_days, bt_dte, bt_label),
+        st.code(om.backtest_command(
+            bt_symbol, bt_profile, _cli_days, bt_dte, bt_label,
+            bt_starting_balance, bt_contracts),
                 language="bash")
         if bt_mode != "Latest N days" and _start and _end:
             st.code(f"python -m scripts.backtest_run --symbol {bt_symbol} --profile {bt_profile} "
-                    f"--start {_start} --end {_end} --dte {bt_dte} --run-label {bt_label}",
+                    f"--start {_start} --end {_end} --dte {bt_dte} --run-label {bt_label} "
+                    f"--starting-balance {bt_starting_balance:g} --contracts {bt_contracts}",
                     language="bash")
         st.caption("The buttons above run this in-process; the CLI is here only as a fallback.")
 
@@ -2102,16 +2331,27 @@ def render_logs() -> None:
         _mc[2].metric("Realized P&L", ch.fmt_money(_cum[-1]))
         _mc[3].metric("Max drawdown", ch.fmt_money(_mdd["max_drawdown"]),
                       f"{_mdd['max_drawdown_pct']}%" if _mdd["max_drawdown_pct"] is not None else None)
-        st.caption("Cumulative realized P&L (equity curve)")
-        st.line_chart({"cumulative P&L": _cum})
-        st.caption("Drawdown (peak-to-trough, $)")
-        st.area_chart({"drawdown": [d["drawdown"] for d in ch.drawdown_series(_cum)]})
+        _charts_rendered = False
+        if _chart_ready(_cum):
+            st.caption("Cumulative realized P&L (equity curve)")
+            st.line_chart({"cumulative P&L": _cum})
+            _charts_rendered = True
+        _dd_series = [d["drawdown"] for d in ch.drawdown_series(_cum)]
+        if _chart_ready(_dd_series):
+            st.caption("Drawdown (peak-to-trough, $)")
+            st.area_chart({"drawdown": _dd_series})
+            _charts_rendered = True
         _daily = ch.daily_pnl_from_closed_trades(_all_closed)
         if _daily:
-            st.caption("Daily realized P&L")
-            st.bar_chart({"daily P&L": [d["realized_pnl"] for d in _daily]})
+            _daily_pnls = [d["realized_pnl"] for d in _daily]
+            if _chart_ready(_daily_pnls):
+                st.caption("Daily realized P&L")
+                st.bar_chart({"daily P&L": _daily_pnls})
+                _charts_rendered = True
             if not simple_mode:
                 st.dataframe(_daily, use_container_width=True, hide_index=True)
+        if not _charts_rendered:
+            st.info("More data will appear after runs.")
         _byprof = ch.pnl_by_profile(_all_closed)
         if _byprof:
             st.caption("P&L by profile")
@@ -2125,9 +2365,11 @@ def render_logs() -> None:
     _runsum = forward_review.list_run_summaries(root=_fwd_root) or []
     if _runsum:
         _sig = [int(r.get("signal_count") or 0) for r in reversed(_runsum)]
-        if any(_sig):
+        if _chart_ready(_sig):
             st.caption("Selected signals over runs (oldest → newest)")
             st.bar_chart({"selected signals": _sig})
+        else:
+            st.info("More data will appear after runs.")
 
     # ── C. Downloads / exports (operator-friendly labels) ──
     st.markdown("**Downloads / exports**")
@@ -2251,6 +2493,7 @@ def render_settings() -> None:
              "SL_150_PERCENT_LOSS", "SL_200_PERCENT_LOSS"],
             index=["BASELINE_CASH_SETTLE", "SL_100_PERCENT_LOSS",
                    "SL_150_PERCENT_LOSS", "SL_200_PERCENT_LOSS"].index(session.default_stop_variant),
+            format_func=(om.friendly_enum_label if simple_mode else str),
         )
         profit_target_str = s3.text_input(
             "Profit targets (comma-sep fractions)",
@@ -2315,11 +2558,14 @@ def render_settings() -> None:
         "profile schema. They are read from env (`PAPER_*`) / CLI flags / "
         "`config/portfolio_profiles.yaml`. Shown here read-only for reference."
     )
-    try:
-        from src.paper.models import PaperLifecycleConfig
-        st.json(PaperLifecycleConfig.from_env().to_dict(), expanded=False)
-    except Exception as exc:  # never block settings on this
-        st.caption(f"_(could not load PaperLifecycleConfig: {type(exc).__name__})_")
+    if simple_mode:
+        st.caption("Paper lifecycle JSON is available in Advanced Mode.")
+    else:
+        try:
+            from src.paper.models import PaperLifecycleConfig
+            st.json(PaperLifecycleConfig.from_env().to_dict(), expanded=False)
+        except Exception as exc:  # never block settings on this
+            st.caption(f"_(could not load PaperLifecycleConfig: {type(exc).__name__})_")
 
 
 # ──────────────────────────────────────────────────────────────────────

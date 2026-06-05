@@ -135,8 +135,15 @@ def test_enabled_curates_simple_list_with_safe_fallback():
 def test_backtest_command_is_read_only_cli():
     cmd = om.backtest_command("spx", "all-main", 20, 0, "smoke")
     assert cmd == ("python -m scripts.backtest_run --symbol SPX --profile all-main "
-                   "--latest-days 20 --dte 0 --run-label smoke")
+                   "--latest-days 20 --dte 0 --run-label smoke "
+                   "--starting-balance 10000 --contracts 1")
     assert "submit" not in cmd and "order" not in cmd
+
+
+def test_backtest_command_custom_sizing():
+    cmd = om.backtest_command("SPX", "all-main", 5, 0, "sizing_5lot", 2500, 5)
+    assert "--starting-balance 2500" in cmd
+    assert "--contracts 5" in cmd
 
 
 def test_read_backtest_results_missing_dir_is_graceful(tmp_path):
@@ -153,9 +160,26 @@ def test_read_backtest_results_empty_dir_is_graceful(tmp_path):
 
 def test_read_backtest_results_reads_trades(tmp_path):
     (tmp_path / "trades.csv").write_text(
-        "pnl_dollars,exit_reason,side\n45,TP,PUT_CREDIT\n-30,SL,CALL_CREDIT\n20,EOD,PUT_CREDIT\n",
+        "date,profile_id,symbol,pnl_dollars,exit_reason,side,short_strike,long_strike,"
+        "entry_credit_dollars,exit_debit_dollars,contracts,corridor_valid,wds_tier,"
+        "score,selector_score\n"
+        "2026-06-01,p1,SPX,45,TP,PUT_CREDIT,7570,7565,120,75,1,True,1,0.72,0.81\n"
+        "2026-06-02,p1,SPX,-30,SL,CALL_CREDIT,7600,7605,120,150,1,False,2,0.61,0.44\n"
+        "2026-06-03,p1,SPX,20,EOD,PUT_CREDIT,7570,7565,120,100,1,True,1,0.65,0.50\n",
         encoding="utf-8")
-    (tmp_path / "run_config.json").write_text('{"symbol": "SPX", "stamp": "x"}', encoding="utf-8")
+    (tmp_path / "candidates.csv").write_text(
+        "selector_blockers,risk_rejection_type,quote_quality_reason\n"
+        "score_below_threshold,,\n"
+        ",planned_loss,\n",
+        encoding="utf-8")
+    (tmp_path / "no_trade_reasons.csv").write_text(
+        "date,profile_id,reason,first_blocker,candidate_count,eligible_candidate_count\n"
+        "2026-06-04,p1,no_selection,score_below_threshold,2,0\n",
+        encoding="utf-8")
+    (tmp_path / "run_config.json").write_text(
+        '{"symbol": "SPX", "stamp": "x", "profiles": ["p1"], '
+        '"counters": {"dates_evaluated": 4, "valid_entry_snapshots": 4, "candidates": 5}}',
+        encoding="utf-8")
     res = ch.read_backtest_results(tmp_path)
     assert res["available"] is True
     m = res["metrics"]
@@ -163,6 +187,11 @@ def test_read_backtest_results_reads_trades(tmp_path):
     assert m["total_pnl_dollars"] == 35.0
     assert (m["tp_count"], m["sl_count"], m["eod_count"]) == (1, 1, 1)
     assert res["run_config"].get("symbol") == "SPX"
+    assert res["trade_rows"][0]["Side"] == "Put Credit"
+    assert res["trade_rows"][0]["P&L"] == "$45.00"
+    assert res["explainability"]["low_trade_count"] is True
+    assert "selected trades" in res["explainability"]["summary"]
+    assert res["explainability"]["top_reasons"][0]["reason"] == "score_below_threshold"
 
 
 # ── source-level wiring (no Streamlit import) ─────────────────────────────────
@@ -240,6 +269,56 @@ def test_backtests_tab_discoverable_and_local_only():
     assert "▶ Run Backtest" in _SRC
     assert "Advanced — CLI command" in _SRC
     assert "run_backtest(" in _SRC
+    for tok in ("Starting Balance", "Contracts / Lots", "Sizing preset"):
+        assert tok in _SRC
+    assert om.BACKTEST_SIZING_PRESETS == {
+        "Small account": (2500.0, 1),
+        "Standard paper": (10000.0, 1),
+        "Aggressive paper": (10000.0, 5),
+        "Large paper": (100000.0, 5),
+    }
+    for tok in ("Ending Balance", "Return %", "Max Drawdown $", "Max Drawdown %", "Contracts"):
+        assert tok in _SRC
+    for tok in ("Profit Factor", "Expectancy", "**Trades**", "**Why Trades Did Not Fire**",
+                "**Breakdowns**", "bt_f_profile", "bt_f_side", "bt_f_exit",
+                "bt_f_corridor", "bt_f_wds"):
+        assert tok in _SRC
+    assert "summary_by_side.csv" in (_REPO / "src" / "backtesting" / "reports.py").read_text(
+        encoding="utf-8")
+
+
+def test_simple_mode_friendly_label_cleanup_wired():
+    assert om.friendly_enum_label("CALL_FLOOR") == "Call Floor"
+    assert om.friendly_enum_label("PUT_CEILING") == "Put Ceiling"
+    assert om.friendly_enum_label("balanced_structure_premium_valid") == \
+        "Balanced Structure/Premium"
+    assert om.friendly_enum_label("score_best_valid") == "Best Score"
+    assert om.friendly_enum_label("best_credit_valid") == "Best Credit"
+    assert om.friendly_enum_label("aggressive_paper_10k") == "Aggressive Paper 10K"
+    assert om.friendly_enum_label("SL_150_PERCENT_LOSS") == "150% Stop"
+    assert om.friendly_enum_label("SL_200_PERCENT_LOSS") == "200% Stop"
+    assert om.friendly_text("Dominant wing is CALL_FLOOR 10K") == \
+        "Dominant wing is Call Floor 10K"
+    assert "_render_profile_info_card(om.profile_info_fields(sel_dict), simple=simple_mode)" in _SRC
+    assert "Raw profile IDs and JSON are in Advanced" in _SRC
+
+
+def test_settings_raw_json_hidden_in_simple_mode():
+    assert "Paper lifecycle JSON is available in Advanced Mode." in _SRC
+    assert "if simple_mode:" in _SRC and "st.json(PaperLifecycleConfig.from_env().to_dict()" in _SRC
+    assert "format_func=(om.friendly_enum_label if simple_mode else str)" in _SRC
+
+
+def test_empty_charts_are_guarded():
+    assert "def _chart_ready(" in _SRC
+    assert "if _chart_ready(_cum):" in _SRC
+    assert "if _chart_ready(_dd_series):" in _SRC
+    assert "if _chart_ready(_daily_pnls):" in _SRC
+    assert "if _chart_ready(_sig):" in _SRC
+    assert "if _chart_ready(_eq_vals):" in _SRC
+    assert "if _chart_ready(_dd_vals):" in _SRC
+    assert "if _chart_ready(_daily_vals):" in _SRC
+    assert "More data will appear after runs." in _SRC
 
 
 # Task I — friendly tab labels + no execution surface.

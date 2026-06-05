@@ -2969,3 +2969,54 @@ no-exec). Updated pins: profile_category(None)→Custom, cats→…Custom, "Show
 Deferred: heavy main-cockpit 1DTE chain re-fetch (label/diagnostic roll only); in-process backtest has
 no hard timeout (spinner + soft "All data" size note — large all-data runs block the tab while running);
 results charts (cards + by-profile table only); SPY/QQQ wing calibration; per-profile TP/SL lifecycle.
+
+---
+
+## 2026-06-05 — Phase 10D-B implementation plan: fixed sizing + output isolation + label cleanup
+
+Branch: `codex/phase-10d-backtest-sizing-ux-cleanup`.
+
+Scope is intentionally narrow: do not change strategy logic, selector math, risk math, quote validation,
+broker execution, or order preview behavior.
+
+Plan:
+
+1. Isolate backtest test outputs so pytest never refreshes app-visible `outputs/backtests/latest`.
+2. Add fixed sizing only: `--starting-balance` (default 10000) and `--contracts` (default 1).
+3. Thread contracts through replay exit simulation and reports; equity starts at starting balance;
+   report ending balance, return %, max drawdown $, and drawdown % from prior equity peak.
+4. Add Backtests tab sizing controls, presets, account-adjusted cards, and result sizing context.
+5. Clean Simple Mode raw labels / enum display, hide raw JSON in Simple Mode, and round long floats.
+6. Suppress empty chart renders that produce Vega extent warnings.
+7. Apply a small Windows-safe diagnostic encoding fix if it stays local to CLI output.
+8. Validate with pytest, ruff, profile validation, diagnostics, and 1-lot vs 5-lot smoke backtests.
+
+Completion notes: pytest backtest/scaffold tests now write under temp `OUTPUT_DIR`/`--output-root`
+and fingerprint repo-local `outputs/backtests/latest`; fixed sizing flows through replay, reports,
+Backtests UI, and run_config; Simple Mode hides raw JSON/profile IDs and maps remaining raw labels
+to trader-facing copy. Validation passed with `.venv`: `pytest -q` (827), `ruff check .`,
+`manage_profiles --validate-all`, diagnostics, and 1-lot vs 5-lot smoke backtests.
+
+---
+
+## 2026-06-05 — Phase 10D-C: backtest explainability + quote diagnostics
+
+- Added backtest explainability artifacts without changing strategy, selector,
+  risk, or quote-validation math.
+- Candidate/trade CSVs now carry readiness, risk, quote, selector blocker, and
+  side-allowed fields.
+- `no_trade_reasons.csv` now records structured skip context: entry target,
+  status, first blocker, candidate/eligible counts, filter counts, top selector,
+  risk, and quote reasons.
+- Reports now include avg win/loss, largest win/loss, avg hold, max consecutive
+  losses, best/worst day, side/corridor/WDS P&L, and new summary CSVs by side,
+  exit reason, and day.
+- Backtests tab now shows account cards, a generated low-trade explanation,
+  guarded charts, filtered trade log, skipped/no-trade tables, and breakdown
+  tabs.
+- Tasty diagnostics now distinguish no config/auth/root/expiry, no required
+  strikes, no chain, empty quote payloads, missing required strikes, stale
+  quotes, validation-blocked quotes, and usable quotes. No validation caps were
+  loosened.
+- Deferred: risk-based backtest sizing, selector weighting changes, broker
+  execution, order preview, and any live order path.

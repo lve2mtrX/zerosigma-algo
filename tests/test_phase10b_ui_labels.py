@@ -62,6 +62,9 @@ def test_quote_state_label_stale_vs_validation_split():
             == "Validation Blocked")
     # the long pinned label is unchanged; this is the SHORT card label only
     assert om.quote_state_label("chain_returned_usable") == "Available"
+    assert om.quote_state_label("chain_returned_stale") == "Quotes Stale"
+    assert om.quote_state_label("quote_request_skipped") == "No Strikes"
+    assert om.quote_state_label("chain_returned_missing_required_strikes") == "Missing Strikes"
     assert om.quote_state_label("chain_unavailable") == "No Chain"
     assert om.quote_state_label("mock") == "Sandbox"
 
@@ -71,6 +74,8 @@ def test_quote_state_label_never_returns_raw_enum():
     # "chain_returned_validation_failed" in a status card.
     for state in (
         "chain_returned_validation_failed", "chain_returned_usable",
+        "chain_returned_stale", "quote_request_skipped",
+        "chain_returned_missing_required_strikes", "chain_resolved_quotes_unavailable",
         "chain_unavailable", "not_configured", "auth_failed", "root_unresolved",
         "expiration_unavailable", "mock", "unknown_error",
     ):
@@ -89,6 +94,8 @@ def test_quote_state_banner_stale_message():
     # usable / sandbox → no banner (nothing to warn about)
     assert om.quote_state_banner("chain_returned_usable", "SPX") is None
     assert om.quote_state_banner("mock", "SPX") is None
+    ah = om.quote_state_banner("chain_returned_stale", "SPX", after_hours=True)
+    assert ah == "After-hours: chain returned, quotes stale. Preview only."
 
 
 def test_quote_state_banner_validation_nonstale_names_reason():
@@ -124,6 +131,9 @@ def test_candidate_status_label_pills():
     assert om.candidate_status_label(
         quote_state="chain_returned_validation_failed", top_blocker="spread_abs",
     ) == "Blocked: quote validation"
+    assert om.candidate_status_label(
+        quote_state="chain_returned_missing_required_strikes",
+    ) == "Blocked: missing strikes"
     # risk cap
     assert om.candidate_status_label(risk_rejection_type="theoretical_max_loss") == "Blocked: risk cap"
     # plain filter rejection

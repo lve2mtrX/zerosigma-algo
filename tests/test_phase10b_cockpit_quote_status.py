@@ -58,7 +58,8 @@ def test_stale_blocker_recorded():
     quotes = [_q(7600, vp=False, reason="stale(age=30.0s>10s)"),
               _q(7605, vp=False, reason="stale(age=31.0s>10s)")]
     s = _status(_chain(quotes), max_age_seconds=10.0)
-    assert s["state"] == "chain_returned_validation_failed"
+    assert s["state"] == "chain_returned_stale"
+    assert s["label"] == "chain returned / quotes stale"
     assert s["details"]["top_blocker"] == "stale" and s["details"]["max_age_seconds"] == 10.0
 
 
@@ -107,7 +108,25 @@ def test_mock_provider_is_available_and_labeled_mock():
 
 def test_missing_strikes_recorded():
     s = _status(_chain([_q(7600, vp=True)]), requested_strikes=[7600.0, 7605.0])
+    assert s["state"] == "chain_returned_missing_required_strikes"
     assert s["details"]["missing_strikes"] == [7605.0]
+
+
+def test_chain_resolved_but_quotes_unavailable_state():
+    s = _status(_chain([]), requested_strikes=[7600.0])
+    assert s["state"] == "chain_resolved_quotes_unavailable"
+    assert "quotes unavailable" in s["banner"].lower()
+    assert s["available"] is False
+
+
+def test_quote_request_skipped_no_required_strikes_state():
+    s = _status(None, requested_strikes=(), quote_status=SimpleNamespace(
+        last_error="no_required_strikes", notes="auth_mode=oauth; execution_blocked=true"))
+    assert s["state"] == "quote_request_skipped"
+    assert "no required strikes" in s["banner"]
+    assert s["details"]["auth_mode_configured"] is True
+    assert s["details"]["auth_mode"] == "oauth"
+    assert s["details"]["required_strike_count"] == 0
 
 
 # ── build_quote_request mirrors the scanner's structure-anchored request ──────
@@ -162,8 +181,8 @@ def test_cockpit_status_cli_parity(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "cockpit quote provider" in out and "tastytrade" in out
-    assert "chain_returned_validation_failed" in out
-    assert "chain returned / validation blocked" in out
+    assert "chain_returned_stale" in out
+    assert "chain returned / quotes stale" in out
     assert "stale" in out
     assert "No secrets shown" in out
 

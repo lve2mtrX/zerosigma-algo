@@ -396,6 +396,10 @@ def runner_state_label(status: Any) -> str:
 _QUOTE_STATE_SHORT = {
     "chain_returned_usable": "Available",
     "chain_unavailable": "No Chain",
+    "quote_request_skipped": "No Strikes",
+    "chain_resolved_quotes_unavailable": "Chain Resolved",
+    "chain_returned_missing_required_strikes": "Missing Strikes",
+    "chain_returned_stale": "Quotes Stale",
     "mock": "Sandbox",
     "not_configured": "Not Configured",
     "auth_failed": "Auth Failed",
@@ -410,21 +414,42 @@ def quote_state_label(state: Any, top_blocker: Any = None) -> str:
     validation-blocked state splits on the blocker: stale → 'Stale', else →
     'Validation Blocked'. Keeps the long cockpit_quote_status['label'] untouched."""
     s = str(state or "").strip()
+    if s == "chain_returned_stale":
+        return "Quotes Stale"
     if s == "chain_returned_validation_failed":
         return "Stale" if str(top_blocker or "").lower() == "stale" else "Validation Blocked"
     return _QUOTE_STATE_SHORT.get(s, "Unknown")
 
 
-def quote_state_banner(state: Any, symbol: Any, top_blocker: Any = None) -> str | None:
+def quote_state_banner(
+    state: Any,
+    symbol: Any,
+    top_blocker: Any = None,
+    *,
+    after_hours: bool = False,
+) -> str | None:
     """Trader-facing banner for a quote state. None when quotes are usable/sandbox."""
     s = str(state or "").strip()
     sym = str(symbol or "—")
+    if s == "chain_returned_stale":
+        if after_hours:
+            return "After-hours: chain returned, quotes stale. Preview only."
+        return ("Tasty chain returned, but quotes are stale. Structure preview only — "
+                "live eligibility will re-check during RTH.")
     if s == "chain_returned_validation_failed":
         if str(top_blocker or "").lower() == "stale":
+            if after_hours:
+                return "After-hours: chain returned, quotes stale. Preview only."
             return ("Tasty chain returned, but quotes are stale. Structure preview only — "
                     "live eligibility will re-check during RTH.")
         return ("Tasty chain returned, but quote validation blocked usable candidates. "
                 f"Reason: {top_blocker or 'validation'}.")
+    if s == "quote_request_skipped":
+        return "Quote request skipped — no required strikes."
+    if s == "chain_resolved_quotes_unavailable":
+        return "Chain resolved, quotes unavailable."
+    if s == "chain_returned_missing_required_strikes":
+        return "Tasty chain returned, but required strikes were missing."
     if s in ("chain_returned_usable", "mock"):
         return None
     if s == "not_configured":
@@ -435,6 +460,10 @@ def quote_state_banner(state: Any, symbol: Any, top_blocker: Any = None) -> str 
         return f"Tasty could not resolve the option root for {sym}."
     if s == "expiration_unavailable":
         return f"Tasty has no matching expiration for {sym} right now."
+    if s == "chain_unavailable" and after_hours:
+        return "After-hours: Tasty chain may resolve only when fresh market data is available."
+    if s == "chain_unavailable":
+        return "No chain returned. Check root/expiry resolution in diagnostics."
     return (f"Tasty market data unavailable for {sym}. The market may be closed or the "
             "symbol unsupported by the market-data engine. Try during RTH or use Sandbox.")
 
@@ -466,9 +495,18 @@ def candidate_status_label(*, rejected: Any = False, risk_rejection_type: Any = 
     'Blocked: risk cap' / 'Blocked: filters' / 'Eligible'."""
     if str(preset_kind or "").lower() == "observe":
         return "Observe only"
-    if str(quote_state or "") == "chain_returned_validation_failed":
+    qs = str(quote_state or "")
+    if qs == "chain_returned_stale":
+        return "Blocked: stale quotes"
+    if qs == "chain_returned_validation_failed":
         return ("Blocked: stale quotes" if str(top_blocker or "").lower() == "stale"
                 else "Blocked: quote validation")
+    if qs == "chain_returned_missing_required_strikes":
+        return "Blocked: missing strikes"
+    if qs == "chain_resolved_quotes_unavailable":
+        return "Blocked: no quotes"
+    if qs == "quote_request_skipped":
+        return "Blocked: no strikes"
     if risk_rejection_type:
         return "Blocked: risk cap"
     if rejected:
@@ -632,13 +670,19 @@ def decision_headline(*, available: Any, quote_state: Any = None,
                 "note": "Why: this side cleared selector, quote, and risk gates."}
     s = str(quote_state or "")
     tb = str(top_blocker or "").lower()
-    if s == "chain_returned_validation_failed" and tb == "stale":
+    if s == "chain_returned_stale" or (s == "chain_returned_validation_failed" and tb == "stale"):
         return {"live": False, "title": "No Live Decision — Quotes Stale",
                 "note": ("Why not: quote validation failed because quotes are stale. This "
                          "candidate is preview-only until fresh RTH quotes arrive.")}
     if s == "chain_returned_validation_failed":
         return {"live": False, "title": "No Live Decision — Quotes Blocked",
                 "note": f"Why not: quote validation failed: {top_blocker or 'validation'}."}
+    if s == "chain_returned_missing_required_strikes":
+        return {"live": False, "title": "No Live Decision — Missing Strikes",
+                "note": "Why not: the returned chain did not include every required strike."}
+    if s == "quote_request_skipped":
+        return {"live": False, "title": "No Live Decision — No Strikes",
+                "note": "Why not: no required strikes were available for the quote request."}
     return {"live": False, "title": "No Live Decision — Quotes Unavailable",
             "note": "Why not: no usable quote chain right now — structure preview only."}
 
@@ -665,11 +709,67 @@ def humanize_runner_message(message: Any) -> str:
 BACKTEST_SYMBOLS = ("SPX", "SPY", "QQQ")
 BACKTEST_NOTE = ("Uses local saved snapshots only. No live API calls. No broker "
                  "execution. No order preview.")
+BACKTEST_SIZING_PRESETS: dict[str, tuple[float, int]] = {
+    "Small account": (2500.0, 1),
+    "Standard paper": (10000.0, 1),
+    "Aggressive paper": (10000.0, 5),
+    "Large paper": (100000.0, 5),
+}
+
+
+_FRIENDLY_ENUM_LABELS = {
+    "CALL_FLOOR": "Call Floor",
+    "PUT_CEILING": "Put Ceiling",
+    "balanced_structure_premium_valid": "Balanced Structure/Premium",
+    "score_best_valid": "Best Score",
+    "best_credit_valid": "Best Credit",
+    "aggressive_paper_10k": "Aggressive Paper 10K",
+    "SL_150_PERCENT_LOSS": "150% Stop",
+    "SL_200_PERCENT_LOSS": "200% Stop",
+    "SL_100_PERCENT_LOSS": "100% Stop",
+    "BASELINE_CASH_SETTLE": "Cash Settle",
+}
+
+
+def friendly_enum_label(value: Any) -> str:
+    """Friendly display for raw enum/profile IDs used in Simple Mode."""
+    if value is None or value == "":
+        return "—"
+    s = str(value)
+    if s in _FRIENDLY_ENUM_LABELS:
+        return _FRIENDLY_ENUM_LABELS[s]
+    out = s
+    for raw, friendly in (("CALL_FLOOR", "Call Floor"), ("PUT_CEILING", "Put Ceiling")):
+        out = out.replace(raw, friendly)
+    if out != s:
+        return out
+    if "_" in s or "-" in s:
+        pretty = re.sub(r"[_-]+", " ", s).title()
+        for raw, repl in (
+            ("Dte", "DTE"), ("Eod", "EOD"), ("Tp", "TP"), ("Sl", "SL"),
+            ("SpX", "SPX"), ("Spx", "SPX"), ("Spy", "SPY"), ("Qqq", "QQQ"),
+        ):
+            pretty = pretty.replace(raw, repl)
+        pretty = re.sub(r"\b(\d+)K\b", r"\1K", pretty)
+        return pretty
+    return s
+
+
+def friendly_text(value: Any) -> str:
+    """Replace known raw labels inside a longer display sentence."""
+    if value is None:
+        return "—"
+    s = str(value)
+    for raw, friendly in sorted(_FRIENDLY_ENUM_LABELS.items(), key=lambda kv: -len(kv[0])):
+        s = s.replace(raw, friendly)
+    return s
 
 
 def backtest_command(symbol: Any = "SPX", profile: Any = "all-main",
                      latest_days: Any = 20, dte: Any = 0,
-                     run_label: Any = "smoke") -> str:
+                     run_label: Any = "smoke",
+                     starting_balance: Any = 10000.0,
+                     contracts: Any = 1) -> str:
     """The exact read-only CLI to run a local backtest (NOT executed from the UI)."""
     sym = normalize_symbol(symbol)
     prof = str(profile or "all-main").strip() or "all-main"
@@ -682,8 +782,18 @@ def backtest_command(symbol: Any = "SPX", profile: Any = "all-main",
     except (TypeError, ValueError):
         d = 0
     label = str(run_label or "smoke").strip() or "smoke"
+    try:
+        bal = float(starting_balance)
+    except (TypeError, ValueError):
+        bal = 10000.0
+    try:
+        qty = int(contracts)
+    except (TypeError, ValueError):
+        qty = 1
+    bal_s = str(int(bal)) if bal == int(bal) else f"{bal:.2f}"
     return (f"python -m scripts.backtest_run --symbol {sym} --profile {prof} "
-            f"--latest-days {days} --dte {d} --run-label {label}")
+            f"--latest-days {days} --dte {d} --run-label {label} "
+            f"--starting-balance {bal_s} --contracts {qty}")
 
 
 def backtest_default_label(symbol: Any = "SPX", profile: Any = "all-main",

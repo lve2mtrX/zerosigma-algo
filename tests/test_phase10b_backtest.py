@@ -9,11 +9,11 @@ exercise the same field-derived knobs the live operator uses.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 
 import scripts.backtest_run as cli
-from src.backtesting import mappers as M
 from src.backtesting import reports
 from src.backtesting.lifecycle_sim import DayIndex, simulate_exit
 from src.backtesting.profile_runtime import derive_run_settings, threshold_scheme
@@ -21,6 +21,18 @@ from src.backtesting.replay_runner import resolve_profiles, run_backtest
 from src.config.strategy_profiles import load_profile_file
 
 _ENTRY = datetime(2026, 6, 2, 11, 0, 0)
+_REPO = Path(__file__).resolve().parents[1]
+
+
+def _repo_latest_fingerprint() -> list[tuple[str, int, int]]:
+    latest = _REPO / "outputs" / "backtests" / "latest"
+    if not latest.exists():
+        return []
+    return sorted(
+        (str(p.relative_to(latest)), p.stat().st_size, p.stat().st_mtime_ns)
+        for p in latest.rglob("*")
+        if p.is_file()
+    )
 
 
 # ── synthetic raw data (valid corridor 7570 < 7585 < 7600; both wings 5k/10k) ─
@@ -158,6 +170,16 @@ def test_observe_profile_selects_no_trades(tmp_path):
     assert res.candidates                       # candidates are still logged …
     assert res.trades == []                      # … but nothing is selected
     assert all(not c["selected_trade"] for c in res.candidates)
+    assert res.no_trade_reasons
+    row = res.no_trade_reasons[0]
+    for key in ("entry_target", "candidate_count", "eligible_candidate_count",
+                "selector_filtered_count", "first_blocker", "top_selector_reason"):
+        assert key in row
+    assert row["candidate_count"] > 0
+    for c in res.candidates:
+        assert "candidate_passes_risk_filters" in c
+        assert "candidate_passes_quote_filters" in c
+        assert "selector_blockers" in c
 
 
 # ── lifecycle exit simulation (TP75 / TP50 / SL150 / SL200 / EOD / missing) ──
@@ -258,7 +280,8 @@ def _trade(date, *, pid="p1", pnl=10.0, corridor=True, tier=1, side="CALL_CREDIT
             "entry_timestamp": ts or f"{date}T11:00:00", "corridor_valid": corridor,
             "wds_tier": tier, "side": side, "exit_reason": reason,
             "entry_credit_points": 0.5, "max_risk_points": 4.5,
-            "distance_from_spot_to_short": 15.0, "selected_trade": True}
+            "distance_from_spot_to_short": 15.0, "hold_minutes": 60,
+            "selected_trade": True}
 
 
 def test_daily_pnl_aggregation():
@@ -284,6 +307,23 @@ def test_equity_curve_and_drawdown():
     assert curve[-1]["cum_pnl_dollars"] == 0.0 and curve[2]["drawdown_dollars"] == 130.0
 
 
+def test_account_metrics_starting_balance_return_and_drawdown_pct():
+    trades = [_trade("2026-06-01", pnl=100.0, ts="2026-06-01T11:00:00"),
+              _trade("2026-06-02", pnl=-400.0, ts="2026-06-02T11:00:00"),
+              _trade("2026-06-03", pnl=50.0, ts="2026-06-03T11:00:00")]
+    m = reports.metrics(trades, starting_balance=1000.0, contracts=2)
+    assert m["starting_balance"] == 1000.0
+    assert m["contracts"] == 2
+    assert m["ending_balance"] == 750.0
+    assert m["return_pct"] == -25.0
+    assert m["max_drawdown_dollars"] == 400.0
+    assert m["max_drawdown_pct"] == 36.3636       # peak 1100 → trough 700
+    curve = reports.equity_curve(trades, starting_balance=1000.0, contracts=2)
+    assert curve[0]["account_equity"] == 1100.0
+    assert curve[0]["peak_dollars"] == 1100.0
+    assert curve[1]["drawdown_pct"] == 36.3636
+
+
 def test_summary_by_corridor_valid_vs_invalid():
     trades = [_trade("2026-06-01", corridor=True, pnl=40.0),
               _trade("2026-06-02", corridor=False, pnl=-20.0)]
@@ -306,28 +346,115 @@ def test_metrics_profit_factor_and_winrate():
     assert m["tp_count"] == 1 and m["sl_count"] == 1
 
 
+def test_metrics_include_explainability_breakdowns():
+    trades = [
+        _trade("2026-06-01", pnl=100.0, side="CALL_CREDIT", reason="TP", tier=1),
+        _trade("2026-06-02", pnl=-50.0, side="PUT_CREDIT", reason="SL", tier=2,
+               corridor=False),
+        _trade("2026-06-03", pnl=-20.0, side="PUT_CREDIT", reason="EOD", tier=2,
+               corridor=False),
+    ]
+    m = reports.metrics(trades, starting_balance=1000.0, contracts=1)
+    assert m["avg_win_dollars"] == 100.0
+    assert m["avg_loss_dollars"] == -35.0
+    assert m["largest_win_dollars"] == 100.0
+    assert m["largest_loss_dollars"] == -50.0
+    assert m["avg_hold_minutes"] == 60.0
+    assert m["max_consecutive_losses"] == 2
+    assert m["best_day"] == "2026-06-01" and m["best_day_pnl_dollars"] == 100.0
+    assert m["worst_day"] == "2026-06-02" and m["worst_day_pnl_dollars"] == -50.0
+    assert m["call_pnl_dollars"] == 100.0
+    assert m["put_pnl_dollars"] == -70.0
+    assert m["inactive_corridor_pnl_dollars"] == -70.0
+    assert m["wds_tier2_pnl_dollars"] == -70.0
+    assert reports.summary_by_side(trades, trades)[0]["side"] in {"CALL_CREDIT", "PUT_CREDIT"}
+    assert {r["exit_reason"] for r in reports.summary_by_exit_reason(trades)} == {"TP", "SL", "EOD"}
+
+
 # ── CLI smoke + repo-local outputs ───────────────────────────────────────────
 
-def test_cli_smoke_outputs_repo_local(tmp_path, capsys, monkeypatch):
+def test_cli_smoke_outputs_temp_latest_not_repo_latest(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("OUTPUT_DIR", raising=False)
     monkeypatch.delenv("DATA_DIR", raising=False)
+    before = _repo_latest_fingerprint()
     root = _make_root(tmp_path)
+    output_root = tmp_path / "isolated_outputs"
     rc = cli.main(["--symbol", "SPX", "--profile", "morning_5k_dynamic_tp75",
-                   "--run-label", "pytest", "--trading-root", str(root)])
+                   "--run-label", "pytest", "--trading-root", str(root),
+                   "--output-root", str(output_root)])
     out = capsys.readouterr().out
     assert rc == 0
     assert "trades selected" in out and "no broker" in out.lower()
     assert "outputs" in out and "backtests" in out
     assert str(root) not in out and "TOS Data" not in out
-    written = M.latest_dir() / "trades.csv"
+    assert _repo_latest_fingerprint() == before
+    latest = output_root / "backtests" / "latest"
+    written = latest / "trades.csv"
     assert written.is_file()
     header = written.read_text(encoding="utf-8").splitlines()[0]
-    for col in ("pnl_dollars", "exit_reason", "corridor_valid", "wds_tier"):
+    for col in ("contracts", "pnl_dollars", "exit_reason", "corridor_valid", "wds_tier"):
         assert col in header
     for name in ("candidates", "daily_pnl", "equity_curve", "summary_by_profile",
-                 "summary_by_corridor", "summary_by_wds_tier", "no_trade_reasons"):
-        assert (M.latest_dir() / f"{name}.csv").is_file()
-    assert (M.latest_dir() / "run_config.json").is_file()
+                 "summary_by_side", "summary_by_exit_reason", "summary_by_corridor",
+                 "summary_by_wds_tier", "summary_by_day", "no_trade_reasons"):
+        assert (latest / f"{name}.csv").is_file()
+    no_trade_header = (latest / "no_trade_reasons.csv").read_text(
+        encoding="utf-8").splitlines()[0]
+    for col in ("entry_target", "candidate_count", "first_blocker", "top_quote_reason"):
+        assert col in no_trade_header
+    cfg = json.loads((latest / "run_config.json").read_text(encoding="utf-8"))
+    assert cfg["starting_balance"] == 10000.0
+    assert cfg["contracts"] == 1
+    assert cfg["overall"]["ending_balance"] == 10000.0 + cfg["overall"]["total_pnl_dollars"]
+
+
+def test_cli_custom_sizing_written_to_run_config(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("OUTPUT_DIR", raising=False)
+    monkeypatch.delenv("DATA_DIR", raising=False)
+    root = _make_root(tmp_path)
+    output_root = tmp_path / "custom_outputs"
+    rc = cli.main(["--symbol", "SPX", "--profile", "morning_5k_dynamic_tp75",
+                   "--run-label", "pytest_custom", "--trading-root", str(root),
+                   "--output-root", str(output_root),
+                   "--starting-balance", "2500", "--contracts", "5"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "starting_balance=$2,500.00" in out and "contracts=5" in out
+    cfg = json.loads(
+        (output_root / "backtests" / "latest" / "run_config.json").read_text(encoding="utf-8"))
+    assert cfg["starting_balance"] == 2500.0
+    assert cfg["contracts"] == 5
+    assert cfg["overall"]["contracts"] == 5
+    assert cfg["overall"]["return_pct"] == round(
+        cfg["overall"]["total_pnl_dollars"] / 2500.0 * 100.0, 4)
+
+
+def test_contracts_scale_pnl_without_changing_selection(tmp_path):
+    root = _make_root(tmp_path)
+    one = run_backtest(symbol="SPX", profile_ids=["morning_5k_dynamic_tp75"],
+                       trading_root=str(root), dte=0,
+                       starting_balance=10000.0, contracts=1)
+    five = run_backtest(symbol="SPX", profile_ids=["morning_5k_dynamic_tp75"],
+                        trading_root=str(root), dte=0,
+                        starting_balance=10000.0, contracts=5)
+    one_key = [(t["date"], t["profile_id"], t["side"], t["short_strike"], t["long_strike"])
+               for t in one.trades]
+    five_key = [(t["date"], t["profile_id"], t["side"], t["short_strike"], t["long_strike"])
+                for t in five.trades]
+    assert one_key == five_key
+    assert all(t["contracts"] == 1 for t in one.trades)
+    assert all(t["contracts"] == 5 for t in five.trades)
+    one_total = sum(t["pnl_dollars"] for t in one.trades)
+    five_total = sum(t["pnl_dollars"] for t in five.trades)
+    assert round(five_total, 2) == round(one_total * 5, 2)
+    m = reports.metrics(five.trades, starting_balance=10000.0, contracts=5)
+    assert m["ending_balance"] == round(10000.0 + five_total, 2)
+    assert m["return_pct"] == round(five_total / 10000.0 * 100.0, 4)
+    curve = reports.equity_curve(five.trades, starting_balance=10000.0, contracts=5)
+    assert curve[0]["starting_balance"] == 10000.0
+    assert curve[0]["account_equity"] == round(10000.0 + five.trades[0]["pnl_dollars"], 2)
+    assert five.run_config["starting_balance"] == 10000.0
+    assert five.run_config["contracts"] == 5
 
 
 # ── no broker / no execution / no hardcoded user ─────────────────────────────

@@ -17,6 +17,19 @@ from src.backtesting import mappers as M
 from src.backtesting import raw_snapshot_loader as L
 from src.backtesting import schemas
 
+_REPO = Path(__file__).resolve().parents[1]
+
+
+def _repo_latest_fingerprint() -> list[tuple[str, int, int]]:
+    latest = _REPO / "outputs" / "backtests" / "latest"
+    if not latest.exists():
+        return []
+    return sorted(
+        (str(p.relative_to(latest)), p.stat().st_size, p.stat().st_mtime_ns)
+        for p in latest.rglob("*")
+        if p.is_file()
+    )
+
 
 def _csv(spot_col: str) -> str:
     # 11:00:00 snapshot forms a VALID corridor (CW1 7570 < spot 7585 < PW1 7600);
@@ -179,11 +192,11 @@ def test_dry_run_cli_on_mocked_file(tmp_path, capsys):
     assert "no broker" in out.lower()
 
 
-def test_scan_dates_cli_outputs_repo_local(tmp_path, capsys, monkeypatch):
-    # Force the documented default (repo-local outputs/backtests). output_base()
-    # honors OUTPUT_DIR/DATA_DIR, so clear any ambient value (a dotenv override or
-    # another test) to keep this assertion hermetic and order-independent.
-    monkeypatch.delenv("OUTPUT_DIR", raising=False)
+def test_scan_dates_cli_outputs_temp_not_repo_latest(tmp_path, capsys, monkeypatch):
+    # Tests must not refresh app-visible outputs/backtests/latest. The mapper
+    # honors OUTPUT_DIR, so isolate this scaffold output under tmp_path.
+    before = _repo_latest_fingerprint()
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path / "isolated_outputs"))
     monkeypatch.delenv("DATA_DIR", raising=False)
     root = _make_root(tmp_path)
     rc = scan.main(["--symbol", "SPX", "--profile", "eod_5k_dynamic_sl150_no_tp",
@@ -191,9 +204,10 @@ def test_scan_dates_cli_outputs_repo_local(tmp_path, capsys, monkeypatch):
                     "--entry", "11:00", "--stamp", "pytest", "--trading-root", str(root)])
     out = capsys.readouterr().out
     assert rc == 0
-    # output path is repo-local (outputs/backtests/…), never the raw data folder
+    # output path is isolated under tmp_path, never the raw data folder or app latest
     assert "outputs" in out and "backtests" in out
     assert str(root) not in out and "TOS Data" not in out   # never the raw data root
+    assert _repo_latest_fingerprint() == before
     written = M.latest_dir() / "scan_SPX_0DTE_1100.csv"
     assert written.is_file()
     text = written.read_text(encoding="utf-8")

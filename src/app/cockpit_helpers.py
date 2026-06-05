@@ -10,6 +10,7 @@ var PRESENCE (never reads or returns secret values).
 from __future__ import annotations
 
 import os
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -167,6 +168,13 @@ def provider_label(name: str) -> str:
 def chain_unavailable_actions(quote_name: str, *, last_error: str | None = None) -> list[str]:
     """Compact, copy-safe suggestions when the quote chain is unavailable.
     last_error is already sanitized by the provider (safe to show)."""
+    le = str(last_error or "").lower()
+    if "no_required_strikes" in le:
+        return [
+            "The quote request had no required strikes.",
+            "Check whether the current structure payload has enough anchors for the strategy.",
+            "Switch the Quote provider to `mock` (sandbox) for UI testing.",
+        ]
     actions = [
         "Quotes may be unavailable because the market is closed or quotes are stale.",
         "Try again during RTH (09:30–16:00 ET).",
@@ -785,8 +793,9 @@ def quote_chain_status(*, resolved_quote_name: Any, quote_status: Any = None,
 
 COCKPIT_QUOTE_STATES: tuple[str, ...] = (
     "not_configured", "auth_failed", "root_unresolved", "expiration_unavailable",
-    "chain_unavailable", "chain_returned_validation_failed", "chain_returned_usable",
-    "mock", "unknown_error",
+    "quote_request_skipped", "chain_unavailable", "chain_resolved_quotes_unavailable",
+    "chain_returned_missing_required_strikes", "chain_returned_stale",
+    "chain_returned_validation_failed", "chain_returned_usable", "mock", "unknown_error",
 )
 
 _COCKPIT_QUOTE_LABELS: dict[str, str] = {
@@ -794,7 +803,11 @@ _COCKPIT_QUOTE_LABELS: dict[str, str] = {
     "auth_failed": "auth failed",
     "root_unresolved": "root unresolved",
     "expiration_unavailable": "expiration unavailable",
+    "quote_request_skipped": "quote request skipped / no required strikes",
     "chain_unavailable": "chain unavailable",
+    "chain_resolved_quotes_unavailable": "chain resolved / quotes unavailable",
+    "chain_returned_missing_required_strikes": "chain returned / missing required strikes",
+    "chain_returned_stale": "chain returned / quotes stale",
     "chain_returned_validation_failed": "chain returned / validation blocked",
     "chain_returned_usable": "available",
     "mock": "mock",
@@ -811,7 +824,12 @@ _GENERIC_NO_CHAIN_BANNER = (
 def _eligible_hint(state: str) -> str:
     if state == "chain_returned_usable":
         return "yes"
-    if state == "chain_returned_validation_failed":
+    if state in (
+        "chain_returned_stale",
+        "chain_returned_validation_failed",
+        "chain_returned_missing_required_strikes",
+        "chain_resolved_quotes_unavailable",
+    ):
         return "blocked"
     if state == "mock":
         return "sandbox"
@@ -828,6 +846,16 @@ def _cockpit_banner(state: str, symbol: str, top_blocker: Any) -> str | None:
             f"candidates{blk}. No eligible setup could be priced under the current "
             "quote-validation rules."
         )
+    if state == "chain_returned_stale":
+        return (f"Tasty chain returned for {symbol}, but quotes are stale. Structure "
+                "preview only until fresh RTH quotes arrive.")
+    if state == "chain_returned_missing_required_strikes":
+        return (f"Tasty chain returned for {symbol}, but it did not include every "
+                "required strike. No eligible setup can be priced from this payload.")
+    if state == "chain_resolved_quotes_unavailable":
+        return f"Chain resolved, quotes unavailable for {symbol}."
+    if state == "quote_request_skipped":
+        return "Quote request skipped — no required strikes. Structure anchors may be missing."
     if state == "not_configured":
         return (f"Tasty is not configured for {symbol}. Add TASTY_* OAuth credentials "
                 "to .env (see the 'Why are quotes unavailable?' details).")
@@ -854,6 +882,7 @@ def cockpit_quote_status(
     max_spread_abs: Any = None,
     max_age_seconds: Any = None,
     requested_strikes: Any = None,
+    dte: Any = None,
 ) -> dict[str, Any]:
     """Classify the cockpit's quote state from the ALREADY-FETCHED chain + provider.
 
@@ -865,12 +894,27 @@ def cockpit_quote_status(
     name = str(resolved_quote_name or "").lower()
     last_error = getattr(quote_status, "last_error", None)
     le = str(last_error).lower() if last_error else ""
+    notes = str(getattr(quote_status, "notes", "") or "")
+    auth_mode = ""
+    for part in notes.split(";"):
+        part = part.strip()
+        if part.startswith("auth_mode="):
+            auth_mode = part.split("=", 1)[1].strip()
+            break
+    auth_configured = bool(auth_mode and auth_mode.lower() not in ("none", "unconfigured"))
     quotes = list(getattr(chain, "quotes", None) or []) if chain is not None else []
     root = getattr(chain, "resolved_root_symbol", None) if chain is not None else None
     expiry = getattr(chain, "expiry", None) if chain is not None else None
     strikes = sorted({
         q.strike for q in quotes if getattr(q, "strike", None) is not None
     })
+    requested_strikes_provided = requested_strikes is not None
+    try:
+        req = sorted({float(s) for s in (requested_strikes or [])})
+    except (TypeError, ValueError):
+        req = []
+    returned = set(strikes)
+    missing = [s for s in req if s not in returned]
 
     failed = [q for q in quotes if getattr(q, "validation_passed", None) is False]
     usable = [
@@ -882,7 +926,7 @@ def cockpit_quote_status(
     observed_failing_spread: float | None = None
     for q in failed:
         reason = str(getattr(q, "validation_rejection_reason", None) or "unknown")
-        key = reason.split("(")[0]
+        key = reason.split("(")[0].strip().lower()
         blockers[key] = blockers.get(key, 0) + 1
         b, a = getattr(q, "bid", None), getattr(q, "ask", None)
         if b is not None and a is not None and "spread" in key:
@@ -894,6 +938,8 @@ def cockpit_quote_status(
     elif chain is None:
         if quote_provider_error:
             state = "not_configured"
+        elif (requested_strikes_provided and not req) or "no_required_strikes" in le:
+            state = "quote_request_skipped"
         elif "auth" in le:
             state = "auth_failed"
         elif "expir" in le:
@@ -911,17 +957,25 @@ def cockpit_quote_status(
         else:
             state = "chain_unavailable"
     else:
-        state = ("chain_returned_validation_failed" if (quotes and not usable)
-                 else "chain_returned_usable")
-
-    req = sorted({float(s) for s in (requested_strikes or [])})
-    returned = set(strikes)
-    missing = [s for s in req if s not in returned]
+        if requested_strikes_provided and not req:
+            state = "quote_request_skipped"
+        elif not quotes:
+            state = "chain_resolved_quotes_unavailable"
+        elif requested_strikes_provided and missing:
+            state = "chain_returned_missing_required_strikes"
+        elif quotes and not usable and str(top_blocker or "").lower() == "stale":
+            state = "chain_returned_stale"
+        else:
+            state = ("chain_returned_validation_failed" if (quotes and not usable)
+                     else "chain_returned_usable")
 
     details = {
         "quote_provider": resolved_quote_name,
+        "auth_mode": auth_mode or None,
+        "auth_mode_configured": auth_configured,
         "chain_returned": chain is not None,
         "quote_count": len(quotes),
+        "validation_state": state,
         "validation_passed_count": len(usable),
         "validation_failed_count": len(failed),
         "validation_blockers": blockers,
@@ -932,9 +986,11 @@ def cockpit_quote_status(
                                     if observed_failing_spread is not None else None),
         "root": root,
         "expiration": expiry,
+        "dte": dte,
         "strike_min": strikes[0] if strikes else None,
         "strike_max": strikes[-1] if strikes else None,
         "requested_strikes": req,
+        "required_strike_count": len(req),
         "missing_strikes": missing,
         "last_error": last_error,
     }
@@ -1225,19 +1281,180 @@ def wds_pct(wds: Any) -> str:
 # broker, no order preview. Reuses the pure backtesting metrics so the cockpit
 # cards match the CLI's printed summary. Missing dir/files degrade gracefully.
 
+def _read_csv_rows(path: Path) -> list[dict[str, Any]]:
+    import csv as _csv
+
+    if not path.exists():
+        return []
+    try:
+        with path.open(encoding="utf-8", newline="") as fh:
+            return list(_csv.DictReader(fh))
+    except OSError:
+        return []
+
+
+def _bt_float(v: Any) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bt_bool(v: Any) -> bool | None:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "1", "yes", "y"):
+            return True
+        if s in ("false", "0", "no", "n"):
+            return False
+    return None
+
+
+def _bt_side(v: Any) -> str:
+    if v == "CALL_CREDIT":
+        return "Call Credit"
+    if v == "PUT_CREDIT":
+        return "Put Credit"
+    return str(v or "—")
+
+
+def _bt_exit(v: Any) -> str:
+    return {
+        "TP": "Take Profit",
+        "SL": "Stop Loss",
+        "EOD": "End of Day",
+        "SKIPPED": "Skipped",
+    }.get(str(v or ""), str(v or "—"))
+
+
+def _bt_bool_label(v: Any) -> str:
+    b = _bt_bool(v)
+    if b is True:
+        return "Yes"
+    if b is False:
+        return "No"
+    return "—"
+
+
+def backtest_trade_display_rows(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Friendly, rounded trade-log rows for the Backtests tab."""
+    out: list[dict[str, Any]] = []
+    for t in trades:
+        pnl = _bt_float(t.get("pnl_dollars"))
+        score = _bt_float(t.get("score"))
+        selector_score = _bt_float(t.get("selector_score"))
+        raw_wds = _bt_float(t.get("raw_wds"))
+        active_wds = _bt_float(t.get("active_wds"))
+        out.append({
+            "Date": t.get("date"),
+            "Profile": t.get("profile_id"),
+            "Symbol": t.get("symbol"),
+            "Side": _bt_side(t.get("side")),
+            "Short": fmt_strike(t.get("short_strike")),
+            "Long": fmt_strike(t.get("long_strike")),
+            "Entry": t.get("entry_timestamp"),
+            "Exit": t.get("exit_timestamp"),
+            "Exit Reason": _bt_exit(t.get("exit_reason")),
+            "Credit": fmt_money(t.get("entry_credit_dollars")),
+            "Exit Debit": fmt_money(t.get("exit_debit_dollars")),
+            "P&L": fmt_money(pnl) if pnl is not None else "—",
+            "P&L Raw": pnl,
+            "Contracts": t.get("contracts"),
+            "Hold Min": t.get("hold_minutes"),
+            "Corridor": _bt_bool_label(t.get("corridor_valid")),
+            "WDS Tier": t.get("wds_tier") or "—",
+            "Active WDS": f"{active_wds:.2f}" if active_wds is not None else "—",
+            "Raw WDS": f"{raw_wds:.2f}" if raw_wds is not None else "—",
+            "Distance": fmt_price(t.get("distance_from_spot_to_short")),
+            "Score": f"{score:.3f}" if score is not None else "—",
+            "Selector Score": f"{selector_score:.3f}" if selector_score is not None else "—",
+            "_profile": t.get("profile_id"),
+            "_side": t.get("side"),
+            "_exit_reason": t.get("exit_reason"),
+            "_corridor_valid": _bt_bool(t.get("corridor_valid")),
+            "_wds_tier": str(t.get("wds_tier") or ""),
+        })
+    return out
+
+
+def _reason_counts(
+    no_trade_rows: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    counts: Counter[str] = Counter()
+    for row in no_trade_rows:
+        reason = (
+            row.get("first_blocker") or row.get("top_selector_reason")
+            or row.get("top_risk_reason") or row.get("top_quote_reason")
+            or row.get("reason")
+        )
+        if reason:
+            counts[str(reason)] += 1
+    for cand in candidates:
+        for key in ("selector_blockers", "risk_rejection_type", "quote_quality_reason"):
+            raw = cand.get(key)
+            if not raw:
+                continue
+            for item in str(raw).split(";"):
+                item = item.strip()
+                if item:
+                    counts[item] += 1
+    return [{"reason": reason, "count": count} for reason, count in counts.most_common(12)]
+
+
+def backtest_explainability(
+    *,
+    run_config: dict[str, Any],
+    metrics: dict[str, Any],
+    trades: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    no_trade_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    counters = run_config.get("counters") if isinstance(run_config.get("counters"), dict) else {}
+    valid_entries = counters.get("valid_entry_snapshots") or 0
+    total_candidates = counters.get("candidates") or len(candidates)
+    total_trades = metrics.get("total_trades") if metrics else len(trades)
+    top_reasons = _reason_counts(no_trade_rows, candidates)
+    reason_text = top_reasons[0]["reason"] if top_reasons else "limited valid entries"
+    profile_count = len(run_config.get("profiles") or [])
+    expected_slots = int(valid_entries or 0)
+    if profile_count > 0:
+        expected_slots *= profile_count
+    parts = [
+        f"Evaluated {counters.get('dates_evaluated', 0)} dates",
+        f"{valid_entries} valid entry snapshots",
+        f"{total_candidates} candidates",
+        f"{total_trades} selected trades",
+    ]
+    if expected_slots and int(total_trades or 0) < expected_slots:
+        parts.append(f"most non-trade rows point to {reason_text}")
+    summary = ". ".join(parts) + "."
+    return {
+        "summary": summary,
+        "top_reasons": top_reasons,
+        "low_trade_count": bool(expected_slots and int(total_trades or 0) < expected_slots),
+        "expected_trade_slots": expected_slots,
+    }
+
+
 def read_backtest_results(results_dir: Any) -> dict[str, Any]:
     """Read a backtest results directory and return cockpit-renderable summary:
 
-        {available, reason, run_config, metrics, by_profile, results_dir}
+        {available, reason, run_config, metrics, by_profile, trades, ...}
 
     ``available`` is False (with a friendly ``reason``) when the directory or
     ``trades.csv`` is missing — the UI shows the reason instead of erroring."""
-    import csv as _csv
     import json as _json
 
     out: dict[str, Any] = {
         "available": False, "reason": "", "run_config": {}, "metrics": {},
-        "by_profile": [], "results_dir": str(results_dir),
+        "by_profile": [], "by_side": [], "by_exit_reason": [], "by_corridor": [],
+        "by_wds_tier": [], "by_day": [], "daily_pnl": [], "equity_curve": [],
+        "candidates": [], "trades": [], "trade_rows": [], "no_trade_reasons": [],
+        "explainability": {"summary": "", "top_reasons": []},
+        "results_dir": str(results_dir),
     }
     try:
         d = Path(results_dir)
@@ -1259,24 +1476,35 @@ def read_backtest_results(results_dir: Any) -> dict[str, Any]:
             out["run_config"] = _json.loads(rc_path.read_text(encoding="utf-8"))
         except (ValueError, OSError):
             out["run_config"] = {}
-    try:
-        with trades_path.open(encoding="utf-8", newline="") as fh:
-            trades = list(_csv.DictReader(fh))
-    except OSError as exc:
-        out["reason"] = f"Could not read trades.csv ({type(exc).__name__})."
-        return out
+    trades = _read_csv_rows(trades_path)
+    out["trades"] = trades
+    out["trade_rows"] = backtest_trade_display_rows(trades)
+    out["candidates"] = _read_csv_rows(d / "candidates.csv")
+    out["no_trade_reasons"] = _read_csv_rows(d / "no_trade_reasons.csv")
+    out["daily_pnl"] = _read_csv_rows(d / "daily_pnl.csv")
+    out["equity_curve"] = _read_csv_rows(d / "equity_curve.csv")
     try:
         from src.backtesting import reports as _reports
-        out["metrics"] = _reports.metrics(trades)
+        out["metrics"] = _reports.metrics(
+            trades,
+            starting_balance=out["run_config"].get("starting_balance") or 0.0,
+            contracts=out["run_config"].get("contracts"),
+        )
     except Exception:                                  # never break the cockpit
         out["metrics"] = {"total_trades": len(trades)}
-    sp_path = d / "summary_by_profile.csv"
-    if sp_path.exists():
-        try:
-            with sp_path.open(encoding="utf-8", newline="") as fh:
-                out["by_profile"] = list(_csv.DictReader(fh))
-        except OSError:
-            out["by_profile"] = []
+    out["by_profile"] = _read_csv_rows(d / "summary_by_profile.csv")
+    out["by_side"] = _read_csv_rows(d / "summary_by_side.csv")
+    out["by_exit_reason"] = _read_csv_rows(d / "summary_by_exit_reason.csv")
+    out["by_corridor"] = _read_csv_rows(d / "summary_by_corridor.csv")
+    out["by_wds_tier"] = _read_csv_rows(d / "summary_by_wds_tier.csv")
+    out["by_day"] = _read_csv_rows(d / "summary_by_day.csv")
+    out["explainability"] = backtest_explainability(
+        run_config=out["run_config"],
+        metrics=out["metrics"],
+        trades=trades,
+        candidates=out["candidates"],
+        no_trade_rows=out["no_trade_reasons"],
+    )
     out["available"] = True
     return out
 

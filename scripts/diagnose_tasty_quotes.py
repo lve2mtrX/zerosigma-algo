@@ -13,11 +13,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from src.providers.quotes import tasty_diagnostics as diag
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _configure_cli_encoding() -> None:
+    """Keep Unicode banners printable in default Windows consoles."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
 
 
 def _load_env() -> None:
@@ -35,6 +46,7 @@ def _load_env() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_cli_encoding()
     ap = argparse.ArgumentParser(
         description="Read-only Tastytrade quote-path diagnostic (no orders, no secrets).")
     ap.add_argument("--symbol", default="SPX")
