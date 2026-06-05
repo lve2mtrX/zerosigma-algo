@@ -1220,6 +1220,67 @@ def wds_pct(wds: Any) -> str:
     return f"{round(w * 100)}%" if w is not None else "—"
 
 
+# ── Phase 10C — read the latest LOCAL backtest results (Task G) ───────────────
+# Pure file read of the repo-local outputs/backtests/<dir>. No live API, no
+# broker, no order preview. Reuses the pure backtesting metrics so the cockpit
+# cards match the CLI's printed summary. Missing dir/files degrade gracefully.
+
+def read_backtest_results(results_dir: Any) -> dict[str, Any]:
+    """Read a backtest results directory and return cockpit-renderable summary:
+
+        {available, reason, run_config, metrics, by_profile, results_dir}
+
+    ``available`` is False (with a friendly ``reason``) when the directory or
+    ``trades.csv`` is missing — the UI shows the reason instead of erroring."""
+    import csv as _csv
+    import json as _json
+
+    out: dict[str, Any] = {
+        "available": False, "reason": "", "run_config": {}, "metrics": {},
+        "by_profile": [], "results_dir": str(results_dir),
+    }
+    try:
+        d = Path(results_dir)
+    except (TypeError, ValueError):
+        out["reason"] = "No results directory configured."
+        return out
+    if not d.exists() or not d.is_dir():
+        out["reason"] = ("No backtest results yet. Run the command below in a "
+                         "terminal, then click Refresh.")
+        return out
+    trades_path = d / "trades.csv"
+    if not trades_path.exists():
+        out["reason"] = (f"No trades.csv under {d.name}/. Run a backtest, then Refresh "
+                         "(a backtest with zero selected trades writes empty reports).")
+        return out
+    rc_path = d / "run_config.json"
+    if rc_path.exists():
+        try:
+            out["run_config"] = _json.loads(rc_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            out["run_config"] = {}
+    try:
+        with trades_path.open(encoding="utf-8", newline="") as fh:
+            trades = list(_csv.DictReader(fh))
+    except OSError as exc:
+        out["reason"] = f"Could not read trades.csv ({type(exc).__name__})."
+        return out
+    try:
+        from src.backtesting import reports as _reports
+        out["metrics"] = _reports.metrics(trades)
+    except Exception:                                  # never break the cockpit
+        out["metrics"] = {"total_trades": len(trades)}
+    sp_path = d / "summary_by_profile.csv"
+    if sp_path.exists():
+        try:
+            with sp_path.open(encoding="utf-8", newline="") as fh:
+                out["by_profile"] = list(_csv.DictReader(fh))
+        except OSError:
+            out["by_profile"] = []
+    out["available"] = True
+    return out
+
+
 def compute_wds(w1_strike: Any, w1_volume: Any, w2_strike: Any, w2_volume: Any) -> dict[str, Any]:
     """True WDS for ONE wing from its W1 (10K wing) + adjacent W2 strike.
     WSR = W2_volume / W1_volume; WDS = 1 - WSR. ``source`` is 'unavailable' (never

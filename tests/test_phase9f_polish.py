@@ -34,7 +34,8 @@ def test_tab_labels_renamed():
     assert "Stats / Review" in joined            # renamed Logs / Review
     assert "Forward Runner" not in joined
     assert "Logs / Review" not in joined         # no longer a visible main tab
-    assert len(labels) == 6
+    assert "Backtests" in joined                 # Phase 10C — discoverable backtests tab
+    assert len(labels) == 7
 
 
 # ── sandbox vs live symbol health ────────────────────────────────────────────
@@ -112,7 +113,9 @@ def test_button_label_helpers():
     assert labels["preview"] == "👁 Preview Strategy"
     assert labels["stop"] == "■ Stop Test"
     assert labels["review"] == "📄 Review Latest"
-    assert labels["clear_stale"] == "🧹 Clear stale runner"
+    # Phase 10C — "runner" is never user-facing; "Validate strategy" → "Check Strategy Setup".
+    assert labels["clear_stale"] == "🧹 Clear stale test"
+    assert labels["validate"] == "Check Strategy Setup"
     assert labels["record_manual"] == "Record manual paper trade"
     assert labels["apply_session"] == "Apply local session settings"
     # verb-first (after the emoji)

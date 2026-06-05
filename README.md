@@ -1455,6 +1455,36 @@ limitation:* its select is a baseweb component (not a native `<select>`), so the
 caret/cursor are tamed rather than fully replaced — keyboard accessibility is
 preserved.
 
+##### Phase 10C — full trader UX audit + Simple-Mode cleanup + after-hours DTE + backtests
+
+A trader-first pass over Simple Mode (UI only — no strategy/selector/risk/backtest logic changed, no
+execution surface added):
+
+- **No dev jargon in Simple Mode.** Candidate cards split into a clean Simple view (Setup · Score ·
+  Credit · Quote Status · Risk Status · Blocker · Anchor · Anchor volume · Distance) and an Advanced-only
+  raw view (threshold / gap / score_edge / quote bucket / b/a quality / clock skew / Phase 4.x notes /
+  raw `st.json`). New friendly labels in `operator_mode` (`anchor_label`, `candidate_quote_status_label`,
+  `candidate_risk_status_label`, `candidate_blocker_label`).
+- **"Runner" → "Test Status".** The tester card reads **Test Status** / **Active paper test**; "Clear
+  stale test"; force-stop + PID are Advanced-only (force-stop = "⏹ Force stop local test process").
+- **Corridor explainer.** "Corridor is active only when the 10K call floor is below spot AND the 10K put
+  ceiling is above spot — CW1 (10K call floor) < Spot < PW1 (10K put ceiling)." Labels relabeled
+  *10K call floor (CW1)* / *10K put ceiling (PW1)*.
+- **After-hours DTE preview.** `resolve_preview_dte(now_et, profile_dte, mode)` previews 1DTE for a 0DTE
+  profile after 17:00 ET (pre-midnight), back to 0DTE next session. Live Cockpit + Run Strategy show a
+  "🌙 after-hours preview … Profile DTE 0DTE / Preview chain 1DTE" banner; the on-demand Tasty quote
+  diagnostic defaults to the rolled DTE. **The profile / paper-test / backtest DTE are never mutated.**
+- **Strategy Builder.** "Validate strategy" → **Check Strategy Setup** (+ "does not run or trade"
+  explainer); the **enabled** checkbox is now "Show in main strategy list" and actually curates the
+  Simple list (with an all-disabled fallback so it's never empty); the data-source radio is **Profile
+  default data source** with a *Current run source* caption + a mismatch warning (the app source wins).
+- **📈 Backtests tab (new, 7th).** Builds the exact read-only CLI
+  (`python -m scripts.backtest_run --symbol SPX --profile all-main --latest-days 20 --dte 0 …`) and a
+  **Refresh Latest Results** reader of `outputs/backtests/latest` → Trades / Win Rate / Total P&L / Max
+  Drawdown / TP-SL-EOD cards + a by-profile table. *"Uses local saved snapshots only. No live API calls.
+  No broker execution. No order preview."* (Backtests are not launched from the UI — a run can take
+  minutes; the heavy main-chain 1DTE re-fetch is deferred.)
+
 ##### What's still missing under `public_only`
 
 | Field | Still None under public_only? | How to populate |

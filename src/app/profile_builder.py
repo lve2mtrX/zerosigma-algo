@@ -49,7 +49,10 @@ PROFILE_FIELDS: list[dict[str, Any]] = [
     # Identity
     {"name": "profile_id", "label": "Profile id", "kind": "str", "section": "Identity"},
     {"name": "profile_name", "label": "Profile name", "kind": "str", "section": "Identity"},
-    {"name": "enabled", "label": "Enabled", "kind": "bool", "section": "Identity"},
+    {"name": "enabled", "label": "Show in main strategy list", "kind": "bool", "section": "Identity",
+     "help": ("Curates Simple Mode's strategy list: when ANY profiles are checked, only those "
+              "show as Main Strategies. When none are checked (the default), all Main Strategies "
+              "show. Advisory only — never affects strategy, selector, or risk logic.")},
     {"name": "strategy_id", "label": "Strategy id", "kind": "str", "section": "Identity"},
     {"name": "strategy_type", "label": "Strategy type", "kind": "str", "section": "Identity"},
     {"name": "symbol", "label": "Symbol", "kind": "str", "section": "Identity"},

@@ -180,7 +180,11 @@ def test_tester_renames_max_ticks_to_stop_after_scans():
 def test_tester_latest_run_and_running_labels():
     assert "Latest test run" in _STREAMLIT_SRC
     assert "friendly_run_label" in _STREAMLIT_SRC
-    assert '"Running"' in _STREAMLIT_SRC
+    # Phase 10C — "Runner" is never user-facing: card is "Test Status", the
+    # running indicator is "Active paper test".
+    assert '"Test Status"' in _STREAMLIT_SRC
+    assert '"Active paper test"' in _STREAMLIT_SRC
+    assert 'metric("Runner"' not in _STREAMLIT_SRC
     # the old raw "Active" / "Run id" metrics are gone
     assert '"Active"' not in _STREAMLIT_SRC
 

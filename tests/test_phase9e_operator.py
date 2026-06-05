@@ -124,7 +124,7 @@ def test_unsupported_symbol_warnings():
 
 def test_tab_labels_branded_no_forward_runner():
     labels = om.tab_labels()
-    assert len(labels) == 6
+    assert len(labels) == 7   # Phase 10C — added the Backtests tab
     joined = " ".join(labels)
     # Phase 10B: the Tester tab is relabeled "🧪 Run Strategy" (trader-first).
     assert "Run Strategy" in joined

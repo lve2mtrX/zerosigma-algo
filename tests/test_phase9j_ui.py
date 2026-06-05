@@ -16,10 +16,11 @@ def test_operator_read_uses_wing_dominance():
 
 def test_wing_stack_shows_dominant_wds_wing():
     # Phase 10A — corridor-aware Wing Stack (CW1/Spot/PW1 + Active/Inactive)
-    assert "Wing corridor + dominant WDS" in _SRC
+    assert "Wing corridor + dominant wing" in _SRC   # Phase 10C — plainer heading
     assert "WSR (W2/W1)" in _SRC
     assert "immediate breach" in _SRC
-    assert "CW1 (call floor 10K)" in _SRC and "PW1 (put ceiling 10K)" in _SRC
+    # Phase 10C — CW1/PW1 explained as "10K call floor" / "10K put ceiling".
+    assert "10K call floor (CW1)" in _SRC and "10K put ceiling (PW1)" in _SRC
     assert '"✅ Active" if wd["corridor_valid"] else "⛔ Inactive"' in _SRC
     # the old tier-based "Primary wing" caption is gone from the Wing Stack
     assert "Primary wing: **" not in _SRC

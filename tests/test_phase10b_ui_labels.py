@@ -141,8 +141,10 @@ def test_header_status_cells_shape_and_labels():
     )
     assert len(cells) == 7
     labels = [c[0] for c in cells]
-    assert labels == ["Strategy", "Structure", "Quotes", "Runner",
+    # Phase 10C — "Runner" is never user-facing; the header cell reads "Test Status".
+    assert labels == ["Strategy", "Structure", "Quotes", "Test Status",
                       "Last Signal", "Paper P&L", "Safety"]
+    assert "Runner" not in labels
     # Safety defaults to the no-broker assurance
     assert cells[-1] == ("Safety", "No Broker")
 
@@ -210,8 +212,11 @@ def test_candidate_views_use_friendly_helpers():
 
 # 10. raw score breakdown JSON only in Advanced Mode (Simple shows a caption)
 def test_raw_breakdown_gated_to_advanced():
-    assert "Full score breakdown (raw) is shown in Advanced Mode." in _SRC
+    # Phase 10C — Simple Mode points to Advanced; raw st.json lives in the
+    # Advanced-only candidate detail helper.
+    assert "Full score breakdown, thresholds, and quote diagnostics are in Advanced Mode." in _SRC
     assert "st.json(c.score_breakdown" in _SRC
+    assert "_render_candidate_advanced" in _SRC and "_render_candidate_simple" in _SRC
 
 
 # 12. no broker execution / order-preview surface introduced by the hotfix

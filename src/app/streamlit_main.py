@@ -289,6 +289,14 @@ QUOTE_STATUS = ch.cockpit_quote_status(
     requested_strikes=quote_request.required_strikes,
 )
 
+# Phase 10C — after-hours preview DTE. The Live Cockpit previews 0DTE during RTH;
+# after 17:00 ET (pre-midnight) 0DTE quotes are stale/dead, so the PREVIEW rolls
+# to 1DTE. This is display/diagnostic-only — the profile, paper-test, and backtest
+# DTE are NEVER mutated (see operator_mode.resolve_preview_dte).
+_PROFILE_DTE = structure.dte if (structure and structure.dte is not None) else 0
+PREVIEW_DTE = om.resolve_preview_dte(now_et(), _PROFILE_DTE)
+AFTER_HOURS_PREVIEW = om.after_hours_preview_active(now_et(), _PROFILE_DTE)
+
 session: SessionConfig = st.session_state["session_config"]
 baseline: SessionConfig = st.session_state["session_baseline"]
 paper_account: PaperAccount = st.session_state["paper_account"]
@@ -353,6 +361,12 @@ def render_symbol_health() -> None:
             st.caption("🌙 After-hours / stale quote mode — " + om.stale_quote_mode_banner(SYMBOL))
     elif view["reason"]:
         st.warning(view["reason"])
+    # Phase 10C — after-hours DTE preview roll (0DTE → 1DTE after the close).
+    if AFTER_HOURS_PREVIEW and not sandbox:
+        st.info("🌙 " + om.after_hours_preview_banner(SYMBOL, _PROFILE_DTE))
+        st.caption(f"Profile DTE: **{om.dte_label(_PROFILE_DTE)}**  ·  Preview chain: "
+                   f"**{om.dte_label(PREVIEW_DTE)} after-hours** (preview only — your "
+                   "profile DTE is unchanged).")
 
 
 def render_provider_status() -> None:
@@ -541,11 +555,17 @@ def render_market() -> None:
     # Structure is ACTIVE only when CW1 < spot < PW1; a call floor above spot is
     # NOT an active floor. Raw WDS may exist but is not active out of corridor.
     wd = ch.wing_dominance(ex, spot_val)
-    st.markdown("**Wing corridor + dominant WDS** — active only when CW1 < spot < PW1")
+    st.markdown("**Wing corridor + dominant wing**")
+    # Phase 10C — plain-English corridor explainer (CW1/PW1 are always defined).
+    st.caption(
+        "Corridor is active only when the **10K call floor** is below spot AND the "
+        "**10K put ceiling** is above spot — i.e. CW1 (10K call floor) < Spot < "
+        "PW1 (10K put ceiling). Outside that band the structure is not yet formed."
+    )
     cc = st.columns(4)
-    cc[0].metric("CW1 (call floor 10K)", ch.fmt_strike(wd["corridor_cw1"]))
+    cc[0].metric("10K call floor (CW1)", ch.fmt_strike(wd["corridor_cw1"]))
     cc[1].metric("Spot", ch.fmt_price(spot_val))
-    cc[2].metric("PW1 (put ceiling 10K)", ch.fmt_strike(wd["corridor_pw1"]))
+    cc[2].metric("10K put ceiling (PW1)", ch.fmt_strike(wd["corridor_pw1"]))
     cc[3].metric("Corridor", "✅ Active" if wd["corridor_valid"] else "⛔ Inactive")
     if wd["wds_active"]:
         _side = wd["dominant_wing_side"]
@@ -648,7 +668,11 @@ def render_market() -> None:
             "chain → validation). No orders, no order preview, no secrets."
         )
         _dc = st.columns([1, 2])
-        _ddte = int(_dc[0].selectbox("Target DTE", [0, 1], index=0, key="tasty_diag_dte"))
+        # Phase 10C — after-hours, default the probe to the rolled preview DTE (1)
+        # so the on-demand Tasty check fetches the fresh 1DTE chain, not dead 0DTE.
+        _ddte = int(_dc[0].selectbox("Target DTE", [0, 1],
+                                     index=(1 if PREVIEW_DTE == 1 else 0),
+                                     key="tasty_diag_dte"))
         _dspot = (structure.spot if getattr(structure, "spot", 0) and structure.spot > 0
                   else None)
         _dc[1].caption(f"ATM probe hint (Zσ spot): {ch.fmt_strike(_dspot) if _dspot else '—'}")
@@ -685,6 +709,119 @@ def render_market() -> None:
             _missing = (structure.raw or {}).get("missing_fields") or []
             if _missing:
                 st.caption("Structure fields unavailable from payload: " + ", ".join(_missing))
+
+
+def _render_candidate_simple(c, rd: dict) -> None:
+    """Phase 10C — clean Simple-Mode candidate detail (trader labels, no dev
+    jargon: no threshold / gap / edge / bucket / skew / raw breakdown)."""
+    _tb = QUOTE_STATUS["details"].get("top_blocker")
+    s1 = st.columns(4)
+    s1[0].metric("Setup", om.side_label(c.side))
+    s1[1].metric("Short / Long",
+                 f"{ch.fmt_strike(c.short_strike)} / {ch.fmt_strike(c.long_strike)}")
+    s1[2].metric("Score", f"{c.score:.2f}")
+    s1[3].metric("Credit", ch.fmt_money(c.credit))
+    s2 = st.columns(4)
+    s2[0].metric("Quote Status", om.candidate_quote_status_label(
+        c.meta.get("short_leg") or {}, c.meta.get("long_leg") or {},
+        quote_state=QUOTE_STATUS["state"], top_blocker=_tb))
+    s2[1].metric("Risk Status", om.candidate_risk_status_label(rd.get("risk_rejection_type")))
+    s2[2].metric("Blocker", om.candidate_blocker_label(
+        rejected=c.rejected, risk_rejection_type=rd.get("risk_rejection_type"),
+        quote_state=QUOTE_STATUS["state"], top_blocker=_tb,
+        eligible_base=rd.get("selector_eligible_base")))
+    s2[3].metric("Anchor", om.anchor_label(c.meta.get("anchor_source")))
+    _av = c.meta.get("anchor_volume")
+    _av_txt = f"{_av:,.0f}" if isinstance(_av, (int, float)) else "—"
+    _dist = (f"{c.distance_from_spot:.1f} pts"
+             if isinstance(c.distance_from_spot, (int, float)) else "—")
+    st.caption(f"Anchor volume: **{_av_txt}**  ·  distance from spot: **{_dist}**")
+    st.caption("Full score breakdown, thresholds, and quote diagnostics are in Advanced Mode.")
+
+
+def _render_candidate_advanced(c, rd: dict) -> None:
+    """Advanced-Mode candidate detail — full raw breakdown (kept for diagnostics
+    only; never shown in Simple Mode)."""
+    etop = st.columns(4)
+    etop[0].metric("Score", f"{c.score:.4f}")
+    etop[1].metric("Threshold",
+                   f"{c.score_threshold:.2f}" if c.score_threshold is not None else "—")
+    etop[2].metric("Gap", f"{c.score_gap_to_threshold:+.4f}"
+                   if c.score_gap_to_threshold is not None else "—")
+    etop[3].metric("Rejection type", c.rejection_type or "—")
+
+    anchor_cols = st.columns(4)
+    anchor_cols[0].metric("Anchor", c.meta.get("anchor_source") or "—")
+    av = c.meta.get("anchor_volume")
+    anchor_cols[1].metric("Anchor volume", f"{av:,.0f}" if isinstance(av, (int, float)) else "—")
+    anchor_cols[2].metric("Volume source", c.meta.get("anchor_volume_source") or "—")
+    anchor_cols[3].metric("structure_strength_source",
+                          c.meta.get("structure_strength_source") or "—")
+
+    if c.weak_components:
+        st.markdown("**Weakest components:** " + ", ".join(f"`{w}`" for w in c.weak_components))
+    if c.rejection_reasons:
+        st.markdown("**Filter reasons:** " + ", ".join(f"`{r}`" for r in c.rejection_reasons))
+    short_meta = c.meta.get("short_leg") or {}
+    long_meta = c.meta.get("long_leg") or {}
+    if any(k in short_meta or k in long_meta
+           for k in ("validation_passed", "validation_rejection_reason", "quote_time")):
+        qcols = st.columns(2)
+        for col, leg_label, leg in (
+            (qcols[0], "Short leg", short_meta), (qcols[1], "Long leg", long_meta),
+        ):
+            passed = leg.get("validation_passed")
+            reason = leg.get("validation_rejection_reason")
+            qtime = leg.get("quote_time")
+            badge = ("—" if passed is None else ("✓ pass" if passed else f"✗ {reason or 'fail'}"))
+            col.metric(f"{leg_label} quote", badge, qtime or "")
+
+    if rd:
+        st.caption(
+            "Phase 4.1: `score_edge` (score − threshold), "
+            "`quote_quality_bucket` (good/acceptable/poor/wide/invalid), "
+            "`risk_rejection_type` (planned/theoretical cap), "
+            "`selector_blockers` (eligibility audit). "
+            "Phase 4.2: `bid_ask_quality` is RELATIVE (pct-of-mid) and shares the "
+            "SAME cutoffs as the bucket; quote VALIDATION (broker pass/fail per leg) "
+            "is separate from the quote QUALITY score. `quote_clock_skew_*` flags a "
+            "negative quote age clamped to 0. `strict_target_dte` (CLI scanner only)."
+        )
+        sc = st.columns(4)
+        sc[0].metric(
+            "Score edge",
+            f"{c.score_edge:+.4f}" if isinstance(c.score_edge, (int, float)) else "—",
+            "marginal" if c.marginal_score else ("passed" if c.score_edge_passed else "below"),
+        )
+        sc[1].metric("Quote bucket", rd.get("quote_quality_bucket") or "—")
+        sc[2].metric("Risk type", rd.get("risk_rejection_type") or "—")
+        sc[3].metric(
+            "Eligible (base)", "yes" if rd.get("selector_eligible_base") else "no",
+            rd.get("selector_readiness_note") or "",
+        )
+        blockers = rd.get("selector_blockers") or []
+        if blockers:
+            st.markdown("**Selector blockers:** " + ", ".join(f"`{b}`" for b in blockers))
+        p42 = st.columns(4)
+        p42[0].metric(
+            "b/a quality", f"{c.meta.get('bid_ask_quality', 0.0):.2f}",
+            c.meta.get("bid_ask_quality_mode") or "—",
+        )
+        p42[1].metric("b/a reason", c.meta.get("bid_ask_quality_reason") or "—")
+        skew_det = c.meta.get("quote_clock_skew_detected")
+        p42[2].metric("Clock skew", "yes" if skew_det else ("no" if skew_det is False else "—"))
+        skew_s = c.meta.get("quote_clock_skew_seconds")
+        p42[3].metric("Skew (s)", f"{skew_s:.2f}" if isinstance(skew_s, (int, float)) else "—")
+        q_reason = rd.get("quote_quality_reason")
+        if q_reason:
+            st.caption(f"Quote-quality reason: `{q_reason}`")
+        strict_on = rd.get("strict_target_dte")
+        strict_ok = rd.get("strict_target_dte_passed")
+        st.caption(
+            f"strict_target_dte: `{strict_on}`  ·  passed: `{strict_ok}`  "
+            "_(CLI scanner gate; not enforced in this inline preview)_"
+        )
+    st.json(c.score_breakdown, expanded=False)
 
 
 def render_candidates() -> None:
@@ -739,39 +876,55 @@ def render_candidates() -> None:
             )
             c.meta["_readiness"] = dict(readiness)
 
-            rows.append({
+            # Phase 10C — Simple Mode shows ONLY trader-facing columns (Setup /
+            # Score / Credit / Quote Status / Risk Status / Blocker / Anchor /
+            # Anchor Vol / Distance). Raw dev fields (b/a quality, gap, edge,
+            # bucket, risk_type, rejection internals) move to Advanced Mode.
+            _tb_row = QUOTE_STATUS["details"].get("top_blocker")
+            _av_row = c.meta.get("anchor_volume")
+            row = {
                 "Setup": om.candidate_label(c.side, c.short_strike, c.long_strike),
-                "Status": om.candidate_status_label(
+                "Score": round(c.score, 2),
+                "Credit": ch.fmt_money(c.credit),
+                "Quote Status": om.candidate_quote_status_label(
+                    short_leg, long_leg, quote_state=QUOTE_STATUS["state"], top_blocker=_tb_row),
+                "Risk Status": om.candidate_risk_status_label(readiness.get("risk_rejection_type")),
+                "Blocker": om.candidate_blocker_label(
                     rejected=c.rejected, risk_rejection_type=readiness.get("risk_rejection_type"),
-                    quote_state=QUOTE_STATUS["state"],
-                    top_blocker=QUOTE_STATUS["details"].get("top_blocker"),
+                    quote_state=QUOTE_STATUS["state"], top_blocker=_tb_row,
                     eligible_base=readiness.get("selector_eligible_base")),
-                "side": c.side,
-                "short K": c.short_strike,
-                "long K": c.long_strike,
-                "short b/a/m": _fmt_quote(short_leg),
-                "long b/a/m": _fmt_quote(long_leg),
-                "quote": quote_badge,
-                "credit ($)": round(c.credit, 2),
-                "width": round(c.max_risk + c.credit, 2),
-                "theoretical $": round(theoretical, 0),
-                "planned $": round(planned, 0),
-                "R:R": round(c.reward_risk, 2),
-                "b/a quality": round(c.meta.get("bid_ask_quality", 0.0), 2),
-                "b/a mode": c.meta.get("bid_ask_quality_mode") or "—",
-                "breakeven": round(c.breakeven, 2),
-                "score": round(c.score, 2),
-                "gap": (round(c.score_gap_to_threshold, 3)
-                        if c.score_gap_to_threshold is not None else None),
-                "edge": (round(c.score_edge, 4)
-                         if isinstance(c.score_edge, (int, float)) else None),
-                "bucket": readiness["quote_quality_bucket"],
-                "bucket_reason": readiness["quote_quality_reason"],
-                "risk_type": readiness["risk_rejection_type"] or "—",
-                "rejection": c.rejection_type or ("rejected" if c.rejected else None),
-                "weak": "; ".join(c.weak_components),
-                "rejection_reasons": "; ".join(c.rejection_reasons),
-            })
+                "Anchor": om.anchor_label(c.meta.get("anchor_source")),
+                "Anchor Vol": f"{_av_row:,.0f}" if isinstance(_av_row, (int, float)) else "—",
+                "Distance": (round(c.distance_from_spot, 1)
+                             if isinstance(c.distance_from_spot, (int, float)) else None),
+            }
+            if not simple_mode:
+                row.update({
+                    "side": c.side,
+                    "short K": c.short_strike,
+                    "long K": c.long_strike,
+                    "short b/a/m": _fmt_quote(short_leg),
+                    "long b/a/m": _fmt_quote(long_leg),
+                    "quote": quote_badge,
+                    "width": round(c.max_risk + c.credit, 2),
+                    "theoretical $": round(theoretical, 0),
+                    "planned $": round(planned, 0),
+                    "R:R": round(c.reward_risk, 2),
+                    "b/a quality": round(c.meta.get("bid_ask_quality", 0.0), 2),
+                    "b/a mode": c.meta.get("bid_ask_quality_mode") or "—",
+                    "breakeven": round(c.breakeven, 2),
+                    "gap": (round(c.score_gap_to_threshold, 3)
+                            if c.score_gap_to_threshold is not None else None),
+                    "edge": (round(c.score_edge, 4)
+                             if isinstance(c.score_edge, (int, float)) else None),
+                    "bucket": readiness["quote_quality_bucket"],
+                    "bucket_reason": readiness["quote_quality_reason"],
+                    "risk_type": readiness["risk_rejection_type"] or "—",
+                    "rejection": c.rejection_type or ("rejected" if c.rejected else None),
+                    "weak": "; ".join(c.weak_components),
+                    "rejection_reasons": "; ".join(c.rejection_reasons),
+                })
+            rows.append(row)
 
         _sel_inputs = []
         for c in candidates:
@@ -797,7 +950,7 @@ def render_candidates() -> None:
             gamma_regime=structure.exposures.gamma_regime,
         )
         for i, row in enumerate(rows):
-            row["selected"] = "✅" if _sel.per_row[i]["selected_trade"] else ""
+            row["Selected"] = "✅" if _sel.per_row[i]["selected_trade"] else ""
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
         if _sel.selected_trade:
@@ -835,118 +988,10 @@ def render_candidates() -> None:
                 + (f"  ({gap_str})" if not simple_mode and gap_str else "")
             )
             with st.expander(label, expanded=(c.rejection_type == "selected")):
-                etop = st.columns(4)
-                etop[0].metric("Score", f"{c.score:.4f}")
-                etop[1].metric(
-                    "Threshold",
-                    f"{c.score_threshold:.2f}" if c.score_threshold is not None else "—",
-                )
-                etop[2].metric(
-                    "Gap",
-                    f"{c.score_gap_to_threshold:+.4f}"
-                    if c.score_gap_to_threshold is not None else "—",
-                )
-                etop[3].metric("Rejection type", c.rejection_type or "—")
-
-                anchor_cols = st.columns(4)
-                anchor_cols[0].metric("Anchor", c.meta.get("anchor_source") or "—")
-                av = c.meta.get("anchor_volume")
-                anchor_cols[1].metric(
-                    "Anchor volume", f"{av:,.0f}" if isinstance(av, (int, float)) else "—",
-                )
-                anchor_cols[2].metric("Volume source", c.meta.get("anchor_volume_source") or "—")
-                anchor_cols[3].metric(
-                    "structure_strength_source", c.meta.get("structure_strength_source") or "—",
-                )
-
-                if c.weak_components:
-                    st.markdown(
-                        "**Weakest components:** " + ", ".join(f"`{w}`" for w in c.weak_components)
-                    )
-                if c.rejection_reasons:
-                    st.markdown(
-                        "**Filter reasons:** " + ", ".join(f"`{r}`" for r in c.rejection_reasons)
-                    )
-                short_meta = c.meta.get("short_leg") or {}
-                long_meta = c.meta.get("long_leg") or {}
-                if any(
-                    k in short_meta or k in long_meta
-                    for k in ("validation_passed", "validation_rejection_reason", "quote_time")
-                ):
-                    qcols = st.columns(2)
-                    for col, leg_label, leg in (
-                        (qcols[0], "Short leg", short_meta),
-                        (qcols[1], "Long leg", long_meta),
-                    ):
-                        passed = leg.get("validation_passed")
-                        reason = leg.get("validation_rejection_reason")
-                        qtime = leg.get("quote_time")
-                        badge = (
-                            "—" if passed is None else
-                            ("✓ pass" if passed else f"✗ {reason or 'fail'}")
-                        )
-                        col.metric(f"{leg_label} quote", badge, qtime or "")
-
-                rd = c.meta.get("_readiness") or {}
-                if rd:
-                    st.caption(
-                        "Phase 4.1: `score_edge` (score − threshold), "
-                        "`quote_quality_bucket` (good/acceptable/poor/wide/invalid), "
-                        "`risk_rejection_type` (planned/theoretical cap), "
-                        "`selector_blockers` (eligibility audit). "
-                        "Phase 4.2: `bid_ask_quality` is RELATIVE (pct-of-mid) and shares the "
-                        "SAME cutoffs as the bucket; quote VALIDATION (broker pass/fail per leg) "
-                        "is separate from the quote QUALITY score. `quote_clock_skew_*` flags a "
-                        "negative quote age clamped to 0. `strict_target_dte` (CLI scanner only)."
-                    )
-                    sc = st.columns(4)
-                    sc[0].metric(
-                        "Score edge",
-                        f"{c.score_edge:+.4f}" if isinstance(c.score_edge, (int, float)) else "—",
-                        "marginal" if c.marginal_score else (
-                            "passed" if c.score_edge_passed else "below"
-                        ),
-                    )
-                    sc[1].metric("Quote bucket", rd.get("quote_quality_bucket") or "—")
-                    sc[2].metric("Risk type", rd.get("risk_rejection_type") or "—")
-                    sc[3].metric(
-                        "Eligible (base)",
-                        "yes" if rd.get("selector_eligible_base") else "no",
-                        rd.get("selector_readiness_note") or "",
-                    )
-                    blockers = rd.get("selector_blockers") or []
-                    if blockers:
-                        st.markdown(
-                            "**Selector blockers:** " + ", ".join(f"`{b}`" for b in blockers)
-                        )
-                    p42 = st.columns(4)
-                    p42[0].metric(
-                        "b/a quality", f"{c.meta.get('bid_ask_quality', 0.0):.2f}",
-                        c.meta.get("bid_ask_quality_mode") or "—",
-                    )
-                    p42[1].metric("b/a reason", c.meta.get("bid_ask_quality_reason") or "—")
-                    skew_det = c.meta.get("quote_clock_skew_detected")
-                    p42[2].metric(
-                        "Clock skew",
-                        "yes" if skew_det else ("no" if skew_det is False else "—"),
-                    )
-                    skew_s = c.meta.get("quote_clock_skew_seconds")
-                    p42[3].metric(
-                        "Skew (s)", f"{skew_s:.2f}" if isinstance(skew_s, (int, float)) else "—",
-                    )
-                    q_reason = rd.get("quote_quality_reason")
-                    if q_reason:
-                        st.caption(f"Quote-quality reason: `{q_reason}`")
-                    strict_on = rd.get("strict_target_dte")
-                    strict_ok = rd.get("strict_target_dte_passed")
-                    st.caption(
-                        f"strict_target_dte: `{strict_on}`  ·  passed: `{strict_ok}`  "
-                        "_(CLI scanner gate; not enforced in this inline preview)_"
-                    )
                 if simple_mode:
-                    st.caption("Full score breakdown (raw) is shown in Advanced Mode.")
+                    _render_candidate_simple(c, _rd_c)
                 else:
-                    st.json(c.score_breakdown, expanded=False)
+                    _render_candidate_advanced(c, _rd_c)
 
     decision = strat.select(candidates, params)
     st.subheader("Decision")
@@ -1114,9 +1159,28 @@ def render_strategy_builder() -> None:
                 index=list(om.SELECTOR_STYLES).index(
                     om.selector_to_style(base.get("daily_selector") or "score_best_valid")))
             r4 = st.columns(2)
-            _ds_idx = list(om.DATA_SOURCES).index(om.providers_to_data_source(
-                base.get("structure_provider") or "stub", base.get("quote_provider") or "mock"))
-            s_ds = r4[0].radio("Data source", list(om.DATA_SOURCES), index=_ds_idx)
+            # Phase 10C — this radio sets the profile's OWN default source. The
+            # confusing part was it read "Data source: Sandbox" even when the app
+            # runs Live. Relabel it + show the CURRENT app run source + warn on
+            # mismatch (the app source wins for live previews + paper tests).
+            _profile_ds = om.providers_to_data_source(
+                base.get("structure_provider") or "stub", base.get("quote_provider") or "mock")
+            _ds_idx = list(om.DATA_SOURCES).index(_profile_ds)
+            s_ds = r4[0].radio(
+                "Profile default data source", list(om.DATA_SOURCES), index=_ds_idx,
+                help="The profile's OWN default. Live previews + paper tests use the APP "
+                     "data source (top controls) unless you run the profile on its own "
+                     "source in Advanced Mode.")
+            _app_ds_now = om.providers_to_data_source(chosen_structure, chosen_quote)
+            r4[0].caption(
+                f"Current run source: **{om.data_source_short(_app_ds_now)}** · "
+                f"Structure: {om.exposure_engine_label(chosen_structure)} · "
+                f"Quotes: {om.market_data_engine_label(chosen_quote)}")
+            if om.data_source_short(_app_ds_now) != om.data_source_short(_profile_ds):
+                r4[0].caption(
+                    f"⚠ This profile was created with {om.data_source_short(_profile_ds)} "
+                    f"defaults, but the current app source is {om.data_source_short(_app_ds_now)}. "
+                    "Live previews + paper tests use the app source.")
             s_risk = r4[1].selectbox(
                 "Risk profile", options=profile_names,
                 index=(profile_names.index(base.get("risk_profile"))
@@ -1141,7 +1205,12 @@ def render_strategy_builder() -> None:
             s_tp_custom = r5[1].number_input(
                 "Custom TP (fraction of credit)", value=float(_cur_tp) if _cur_tp else 0.50,
                 step=0.05, min_value=0.0, max_value=1.0, help="Used only when Take profit = Custom.")
-            s_validate = st.form_submit_button("Validate strategy")
+            # Phase 10C — "Validate strategy" was unclear. Rename to "Check Strategy
+            # Setup" + explain what it does (it never runs or trades).
+            st.caption("**Check Strategy Setup** validates profile fields, side rules, DTE, "
+                       "TP/SL, data-source compatibility, and required parameters. It does "
+                       "not run or trade — it only checks the profile before you save.")
+            s_validate = st.form_submit_button(om.BTN_VALIDATE)
         try:
             from src.paper.models import PaperLifecycleConfig
             _plc = PaperLifecycleConfig.from_env()
@@ -1164,7 +1233,10 @@ def render_strategy_builder() -> None:
             vals = {
                 "profile_id": _pid, "profile_name": s_name,
                 "symbol": om.normalize_symbol(s_symbol), "strategy_type": s_type,
-                "target_dte": int(s_dte), "risk_profile": s_risk, "enabled": True,
+                # Phase 10C — preserve the profile's own 'Show in main strategy list'
+                # flag instead of silently forcing it True on every Simple save.
+                "target_dte": int(s_dte), "risk_profile": s_risk,
+                "enabled": bool(base.get("enabled", False)),
                 "stop_loss_pct": _sl_pct, "stop_loss_mode": "fixed_credit_multiple",
                 "take_profit_pct": _tp_pct,
                 "take_profit_mode": "none" if _tp_pct is None else "credit_capture",
@@ -1252,6 +1324,18 @@ def render_forward_runner() -> None:
     # below (which reconciles app vs profile and warns on mismatch).
     _tc[2].metric("App data source",
                   om.data_source_short(om.providers_to_data_source(chosen_structure, chosen_quote)))
+    # Phase 10C — after-hours DTE preview note for the SELECTED profile. The
+    # profile's own target DTE is shown unchanged; only the live PREVIEW rolls.
+    _run_profile_dte = (_tester_prof.target_dte
+                        if (_tester_prof and _tester_prof.target_dte is not None) else 0)
+    if om.after_hours_preview_active(now_et(), _run_profile_dte):
+        st.info("🌙 " + om.after_hours_preview_banner(
+            (_tester_prof.symbol if _tester_prof else SYMBOL), _run_profile_dte))
+        _pc = st.columns(2)
+        _pc[0].metric("Profile DTE", om.dte_label(_run_profile_dte))
+        _pc[1].metric("Preview chain", f"{om.dte_label(om.resolve_preview_dte(now_et(), _run_profile_dte))} after-hours")
+        st.caption("This is preview-only. The paper test still runs your profile's own DTE "
+                   f"({om.dte_label(_run_profile_dte)}) unless you explicitly change it.")
 
     _hb = forward_review.load_latest_heartbeat() or {}
     view = control_ui.status_view(control_ui.get_status())
@@ -1262,19 +1346,21 @@ def render_forward_runner() -> None:
         strategy_id=(_tester_prof.strategy_id if _tester_prof else None),
         started_at=_hb.get("started_at") or _hb.get("latest_tick_time"))
     if simple_mode:
-        # Simple Mode hides PID + raw run_id; shows Running: Yes/No + friendly label.
+        # Phase 10C — Simple Mode says "Test Status" (never "Runner"/PID/run_id);
+        # shows a friendly state + Running Yes/No + the latest test run label.
         mcols = st.columns(3)
-        mcols[0].metric("Runner", view["status"])
-        mcols[1].metric("Running", om.running_display(view["active"]))
+        mcols[0].metric("Test Status", om.test_status_label(view["status"]))
+        mcols[1].metric("Active paper test", om.running_display(view["active"]))
         mcols[2].metric("Latest test run", _latest_run_label)
     else:
         mcols = st.columns(4)
-        mcols[0].metric("Runner", view["status"])
-        mcols[1].metric("Running", om.running_display(view["active"]))
+        mcols[0].metric("Test Status", om.test_status_label(view["status"]))
+        mcols[1].metric("Active paper test", om.running_display(view["active"]))
         mcols[2].metric("PID", str(view["pid"] or "—"))
         mcols[3].metric("Latest test run", _latest_run_label)
     if view["stale"]:
-        st.warning("Control state is STALE (PID not alive). Use **Clear stale runner** below.")
+        st.warning("Local paper test state is STALE (process not alive). Use "
+                   "**🧹 Clear stale test** below.")
     if view["active"] or view.get("status") in ("running", "starting", "stopping"):
         st.warning("⚠ " + om.runner_busy_message(
             view.get("profile_id") or chosen_profile_id, view.get("status")))
@@ -1417,11 +1503,14 @@ def render_forward_runner() -> None:
         (st.success if ok else st.warning)(msg)
         st.rerun()
     if not can:
-        st.caption(f"_Start / Preview disabled: {why}_")
-    st.checkbox(
-        "⚠ Force stop (terminate the stored PID) — use only if graceful stop fails",
-        value=False, key="runner_force",
-    )
+        st.caption(f"_Start / Preview disabled: {om.humanize_runner_message(why)}_")
+    # Phase 10C — force-stop terminates the stored OS process; it is an
+    # Advanced-only affordance. In Simple Mode it stays hidden (force=False).
+    if not simple_mode:
+        st.checkbox(
+            om.BTN_FORCE_STOP + " — use only if a graceful stop fails",
+            value=False, key="runner_force",
+        )
 
     # Phase 9I — terminal commands are an ADVANCED-only affordance (Simple Mode
     # is button-driven only; full run id + PID live here too).
@@ -1699,6 +1788,73 @@ def render_manual_desk() -> None:
     if paper_account.equity_curve:
         eq_rows = [{"ts": ts.isoformat(), "equity": eq} for ts, eq in paper_account.equity_curve]
         st.line_chart(eq_rows, x="ts", y="equity")
+
+
+def render_backtests() -> None:
+    """Phase 10C — discoverable LOCAL backtests. Configures the read-only CLI and
+    reads existing result files. Never launches live work, never hits a brokerage."""
+    st.subheader("📈 Backtests — local historical replay")
+    st.caption(om.BACKTEST_NOTE)
+    st.markdown(ui.pill("LOCAL SNAPSHOTS · NO LIVE API · NO BROKER", "green"),
+                unsafe_allow_html=True)
+
+    # ── 1. Configure a backtest → exact read-only CLI (NOT launched from the UI) ──
+    st.markdown("#### ▶ Run a Backtest")
+    _summaries = [s for s in pb.list_summaries() if s.get("ok")]
+    _bt_profiles = ["all-main", "all", *om.order_profiles_for_dropdown(
+        [s["profile_id"] for s in _summaries])]
+    bc = st.columns(4)
+    bt_symbol = bc[0].selectbox("Symbol", list(om.BACKTEST_SYMBOLS), index=0, key="bt_symbol")
+    bt_profile = bc[1].selectbox(
+        "Strategy profile", _bt_profiles, index=0, key="bt_profile",
+        help="'all-main' = the 4 primary dynamic presets; 'all' adds the controls.")
+    bt_days = int(bc[2].number_input("Latest N days", value=20, min_value=1, step=5, key="bt_days"))
+    bt_dte = int(bc[3].selectbox(
+        "DTE", [0, 1], index=0, key="bt_dte",
+        help="0DTE is the supported path today; SPX 1DTE snapshots exist (future)."))
+    bt_label = st.text_input("Run label", value="smoke", key="bt_label")
+    st.markdown("**Run this in a terminal** (read-only; writes to `outputs/backtests/`):")
+    st.code(om.backtest_command(bt_symbol, bt_profile, bt_days, bt_dte, bt_label), language="bash")
+    st.caption("Backtests are not launched from the cockpit (a run can take minutes and uses "
+               "local CPU). Run the command above, then click Refresh to load the results below.")
+    st.divider()
+
+    # ── 2. Latest results — read existing output files only (never live) ──
+    from src.backtesting import mappers as _bt_mappers
+    st.markdown("#### 📄 Latest Results")
+    _results = ch.read_backtest_results(_bt_mappers.latest_dir())
+    rc = st.columns([1, 4])
+    if rc[0].button("🔄 Refresh Latest Results", key="bt_refresh"):
+        st.rerun()
+    rc[1].caption(f"Reading: `{_results['results_dir']}`")
+    if not _results["available"]:
+        st.info(_results["reason"])
+        return
+    _rcfg = _results.get("run_config") or {}
+    _m = _results.get("metrics") or {}
+    _ctx = []
+    if _rcfg.get("symbol"):
+        _ctx.append(f"symbol {_rcfg.get('symbol')}")
+    if _rcfg.get("profiles"):
+        _ctx.append(f"profiles {_rcfg.get('profiles')}")
+    if _rcfg.get("stamp"):
+        _ctx.append(str(_rcfg.get("stamp")))
+    if _ctx:
+        st.caption(" · ".join(_ctx))
+    k = st.columns(5)
+    k[0].metric("Trades", _m.get("total_trades", 0))
+    _wr = _m.get("win_rate")
+    k[1].metric("Win Rate", f"{_wr * 100:.0f}%" if isinstance(_wr, (int, float)) else "—")
+    k[2].metric("Total P&L", ch.fmt_money(_m.get("total_pnl_dollars", 0.0)))
+    _dd = _m.get("max_drawdown_dollars")
+    k[3].metric("Max Drawdown", ch.fmt_money(_dd) if isinstance(_dd, (int, float)) else "—")
+    k[4].metric("TP / SL / EOD",
+                f"{_m.get('tp_count', 0)} / {_m.get('sl_count', 0)} / {_m.get('eod_count', 0)}")
+    _bp = _results.get("by_profile") or []
+    if _bp:
+        st.markdown("**By profile**")
+        st.dataframe(_bp, use_container_width=True, hide_index=True)
+    st.caption("Historical simulation only — no broker, no order preview, no execution.")
 
 
 def render_logs() -> None:
@@ -2035,7 +2191,8 @@ st.caption("▶ To run a strategy, open the **🧪 Run Strategy** tab (Choose �
            "Start Paper Test → Review). Paper test only — no broker execution.")
 
 # Phase 9E — branded tab labels (Zσ Strat Tester / Paper Portfolio; no "Forward Runner").
-tab_live, tab_builder, tab_tester, tab_portfolio, tab_logs, tab_settings = st.tabs(om.tab_labels())
+(tab_live, tab_builder, tab_tester, tab_portfolio, tab_backtests, tab_logs,
+ tab_settings) = st.tabs(om.tab_labels())
 
 with tab_live:
     render_symbol_health()
@@ -2057,6 +2214,8 @@ with tab_portfolio:
     else:
         st.caption("Manual paper entry is available in Advanced Mode "
                    "(Manual entries are local records only).")
+with tab_backtests:
+    render_backtests()
 with tab_logs:
     render_logs()
 with tab_settings:

@@ -2827,3 +2827,77 @@ banners, candidate labels/pills, 7-cell header, Run-Strategy tab/buttons, and so
 Best-Eligible gating + Run-a-Strategy panel + read-only header + Advanced-only raw JSON + no-exec).
 Updated test_phase9e (tab "Run Strategy") + test_phase9f (button labels). Full suite **778 passed**,
 ruff clean, manage_profiles 14/14, both diagnose CLIs read-only (no secrets, no orders).
+
+---
+
+## 2026-06-04 — Phase 10C: full trader UX audit + Simple-Mode cleanup + after-hours DTE + backtests
+
+Dan reviewed screenshots and flagged 9 issues: stale 0DTE confusion after close, legacy dev language
+("Phase 4.1", "score_edge", "quote_quality_bucket"), confusing fields (threshold/gap/skew/edge),
+unclear "Validate strategy", a dead "enabled" checkbox, Strategy Builder showing Sandbox while the
+app runs Live, "Runner" wording, undiscoverable backtesting. UI-ONLY pass — NO strategy/selector/risk/
+backtest logic changed, NO execution surface added.
+
+A. **Simple-Mode jargon purge (candidate cards).** The whole candidate detail block (Threshold / Gap /
+   Rejection type / score_edge / quote bucket / b/a quality / Clock skew / Skew(s) / Phase 4.1/4.2 /
+   selector_blockers / strict_target_dte / raw st.json) rendered in Simple Mode — only the final json
+   was gated. Split into two pure render fns: `_render_candidate_simple` (Setup / Short-Long / Score /
+   Credit / Quote Status / Risk Status / Blocker / Anchor / Anchor volume / distance) and
+   `_render_candidate_advanced` (all raw fields, Advanced-only). The ranked table now shows clean
+   trader columns in Simple Mode; raw columns (b/a quality, gap, edge, bucket, risk_type, …) move under
+   `if not simple_mode: row.update(...)`. New pure helpers in operator_mode: `anchor_label`
+   ("put_ceiling_2k"→"Put Ceiling 2K"), `candidate_quote_status_label`, `candidate_risk_status_label`,
+   `candidate_blocker_label`.
+
+B. **"Runner" → "Test Status".** Header cell + tester card now read "Test Status" (friendly state via
+   `test_status_label`); "Running" → "Active paper test"; "Clear stale runner" → "🧹 Clear stale test";
+   the force-stop checkbox is Advanced-only and renamed `BTN_FORCE_STOP` = "⏹ Force stop local test
+   process"; PID stays Advanced-only; control messages humanized via `humanize_runner_message`.
+
+D. **Corridor explainer.** Plain-English caption: "Corridor is active only when the **10K call floor**
+   is below spot AND the **10K put ceiling** is above spot — i.e. CW1 (10K call floor) < Spot < PW1 (10K
+   put ceiling)." Metric labels relabeled "10K call floor (CW1)" / "10K put ceiling (PW1)".
+
+E. **After-hours DTE preview (display-only; never mutates the profile).** New pure
+   `resolve_preview_dte(now_et, profile_dte, mode)`: a 0DTE profile previews 1DTE after 17:00 ET (pre-
+   midnight), back to 0DTE next session; 1DTE profiles and non-live-preview modes never roll. Module
+   globals `PREVIEW_DTE` / `AFTER_HOURS_PREVIEW`; banner via `after_hours_preview_banner`. Wired into
+   Live Cockpit (banner + "Profile DTE / Preview chain" caption) and Run Strategy (per selected
+   profile). The on-demand Tasty quote diagnostic now defaults its Target DTE to the rolled preview DTE
+   (so after close it probes the fresh 1DTE chain, not dead 0DTE) — a real, safe roll. The HEAVY main-
+   chain re-fetch (fetch a 1DTE chain for the whole cockpit) is DEFERRED: the ZS structure is 0DTE and
+   pairing it with a 1DTE chain would mismatch candidate construction. Profile / paper-test / backtest
+   DTE are never changed.
+
+F. **Strategy Builder.** (1) "Validate strategy" → **"Check Strategy Setup"** (`BTN_VALIDATE`) + an
+   explainer ("validates fields, side rules, DTE, TP/SL, data-source compatibility… does not run or
+   trade"). (2) **Enabled** was a dead checkbox (all 14 profiles `enabled: false`, filtering is by
+   preset_kind). Relabeled "Show in main strategy list"; `simple_mode_profile_ids` is now enabled-aware
+   with an all-disabled FALLBACK (curates to enabled Main profiles if any are checked, else shows all
+   Main — never empty); Simple-save stops force-setting `enabled: True`. (3) **Data source** radio
+   relabeled "Profile default data source" + a "Current run source: Live · Structure: Zσ API · Quotes:
+   Tasty" caption + a mismatch warning when the profile default differs from the live app source (app
+   source wins).
+
+G. **Discoverable backtests.** New **📈 Backtests** tab (7th) — `render_backtests()`: symbol/profile/
+   latest-N-days/DTE/run-label inputs build the exact read-only CLI (`om.backtest_command` →
+   `python -m scripts.backtest_run …`), shown in a code block (NOT launched from the UI — runs can take
+   minutes). "🔄 Refresh Latest Results" reads `outputs/backtests/latest` via new
+   `cockpit_helpers.read_backtest_results` (reuses the pure `reports.metrics`; handles missing dir/files
+   gracefully) → cards: Trades / Win Rate / Total P&L / Max Drawdown / TP-SL-EOD + a by-profile table.
+   Note: "Uses local saved snapshots only. No live API calls. No broker execution. No order preview."
+
+REAL-ENV check (cockpit parity CLI, after-hours): STATE=`chain_returned_validation_failed`, top
+blocker=**stale** — exactly the after-hours case Task E surfaces. Both diagnose CLIs read-only (no
+secrets, no orders); headless streamlit import (mock providers) OK — 7 tabs, PREVIEW_DTE + render_backtests
+present.
+
+Tests: NEW test_phase10c_ui.py (24 — preview-DTE roll, after-hours banner, anchor/quote/risk/blocker
+labels, test-status + humanize, Check-Setup + enabled-curation, backtest_command + read_backtest_results
+(missing/empty/populated tmp dirs), and source-wiring for Simple-no-jargon / Test-Status / corridor /
+after-hours / data-source-mismatch / Backtests-local-only / friendly-tabs / no-exec). Updated pinned
+tests for the relabels (tab len 7, Test Status, Check Strategy Setup, Clear stale test, corridor
+labels). Full suite **802 passed**, ruff clean, manage_profiles 14/14.
+
+Deferred (noted in the audit): heavy main-chain 1DTE re-fetch (E); launching backtests from the UI (G —
+command-only this pass); SPY/QQQ wing calibration; per-profile TP/SL lifecycle wiring (still PAPER_* env).

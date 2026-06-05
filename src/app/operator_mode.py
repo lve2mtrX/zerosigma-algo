@@ -33,6 +33,7 @@ PAPER_PORTFOLIO_TAB = "Paper Portfolio"
 LIVE_COCKPIT_TAB = "Live Cockpit"
 STRATEGY_BUILDER_TAB = "Zσ Strat Builder"   # Phase 9F rename
 STATS_TAB = "Stats / Review"                 # Phase 9F rename (was Logs / Review)
+BACKTESTS_TAB = "Backtests"                  # Phase 10C — discoverable local backtests
 SETTINGS_TAB = "Settings"
 
 # Phase 9F — branded header subtitle (no "forward runner" wording).
@@ -41,14 +42,15 @@ HEADER_SUBTITLE = "Scanner · Zσ Strat Builder · Zσ Strat Tester · Paper Por
 
 
 def tab_labels() -> list[str]:
-    """The six cockpit tab labels. Uses the branded 'Zσ Strat Builder' / 'Zσ Strat
-    Tester' / 'Stats / Review' — never 'Forward Runner' or 'Logs / Review' as a
-    visible tab name."""
+    """The seven cockpit tab labels. Uses the branded 'Zσ Strat Builder' / 'Run
+    Strategy' / 'Stats / Review' / 'Backtests' — never 'Forward Runner', 'Logs /
+    Review', or 'Runner' as a visible tab name."""
     return [
         f"🛰 {LIVE_COCKPIT_TAB}",
         f"🧱 {STRATEGY_BUILDER_TAB}",
         f"🧪 {RUN_STRATEGY_TAB}",
         f"💼 {PAPER_PORTFOLIO_TAB}",
+        f"📈 {BACKTESTS_TAB}",
         f"📊 {STATS_TAB}",
         f"⚙ {SETTINGS_TAB}",
     ]
@@ -241,7 +243,7 @@ BTN_PREVIEW = "👁 Preview Strategy"
 BTN_START_TEST = "▶ Start Paper Test"
 BTN_STOP_TEST = "■ Stop Test"
 BTN_REVIEW = "📄 Review Latest"
-BTN_CLEAR_STALE = "🧹 Clear stale runner"
+BTN_CLEAR_STALE = "🧹 Clear stale test"
 BTN_REFRESH = "🔄 Refresh status"
 BTN_RECORD_MANUAL = "Record manual paper trade"
 BTN_APPLY_SESSION = "Apply local session settings"
@@ -250,7 +252,8 @@ BTN_EDIT_PROFILE = "Edit selected profile"
 BTN_CLONE_PROFILE = "Clone selected profile"
 BTN_LOAD_PROFILE = "Load selected profile"
 BTN_SAVE_PROFILE = "💾 Save profile"
-BTN_VALIDATE = "Validate strategy"
+BTN_VALIDATE = "Check Strategy Setup"
+BTN_FORCE_STOP = "⏹ Force stop local test process"
 
 
 def button_labels() -> dict[str, str]:
@@ -484,11 +487,163 @@ def header_status_cells(*, strategy: Any, structure: Any, quotes: Any, runner: A
         ("Strategy", str(strategy) if strategy else "—"),
         ("Structure", str(structure) if structure else "—"),
         ("Quotes", str(quotes) if quotes else "—"),
-        ("Runner", str(runner) if runner else "Stopped"),
+        ("Test Status", str(runner) if runner else "Stopped"),
         ("Last Signal", str(last_signal) if last_signal else "—"),
         ("Paper P&L", str(paper_pnl) if paper_pnl else "$0.00"),
         ("Safety", safety),
     ]
+
+
+# ── Phase 10C — after-hours DTE preview + trader-facing candidate/test labels ─
+# Pure helpers (stdlib only) so Simple Mode never shows raw enums and the
+# after-hours quote-roll logic is unit-testable without Streamlit.
+
+PREVIEW_MODE_LIVE = "live_preview"
+_AFTER_HOURS_START_HOUR = 17   # 5:00 PM ET — 0DTE quotes are dead after the close
+
+
+def dte_label(dte: Any) -> str:
+    """0 → '0DTE', 1 → '1DTE', None/garbage → '—'."""
+    try:
+        return f"{int(dte)}DTE"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _et_hour(now_et: Any) -> int | None:
+    """Hour-of-day (0–23) from a datetime-like; None if unavailable."""
+    try:
+        return int(now_et.hour)
+    except (TypeError, AttributeError, ValueError):
+        return None
+
+
+def resolve_preview_dte(now_et: Any, profile_target_dte: Any,
+                        mode: str = PREVIEW_MODE_LIVE) -> int:
+    """The DTE to PREVIEW (display only) for the Live Cockpit / Run-Strategy preview.
+
+    During RTH (and any non-live-preview mode) this is the profile's own target
+    DTE. After 17:00 ET and before midnight ET, a 0DTE profile previews the 1DTE
+    chain because 0DTE quotes are stale/dead after the cash close. This NEVER
+    changes the profile, paper-test, or backtest DTE — preview-only, by design."""
+    try:
+        base = int(profile_target_dte)
+    except (TypeError, ValueError):
+        base = 0
+    if str(mode) != PREVIEW_MODE_LIVE or base != 0:
+        return base
+    hour = _et_hour(now_et)
+    if hour is None:
+        return base
+    return 1 if _AFTER_HOURS_START_HOUR <= hour <= 23 else base
+
+
+def after_hours_preview_active(now_et: Any, profile_target_dte: Any,
+                               mode: str = PREVIEW_MODE_LIVE) -> bool:
+    """True when the preview DTE has rolled away from the profile DTE (after-hours)."""
+    try:
+        base = int(profile_target_dte)
+    except (TypeError, ValueError):
+        base = 0
+    return resolve_preview_dte(now_et, base, mode) != base
+
+
+def after_hours_preview_banner(symbol: Any, profile_target_dte: Any = 0) -> str:
+    """Trader banner shown when the preview rolls 0DTE → 1DTE after the close."""
+    return (f"After-hours preview: 0DTE quotes for {symbol or '—'} are stale after the "
+            "5:00 PM ET close, so the live preview rolls to the 1DTE chain. Your "
+            f"profile's DTE is unchanged ({dte_label(profile_target_dte)}) — the next "
+            "RTH session re-checks live eligibility on its own DTE.")
+
+
+# ── candidate card labels (Simple Mode: friendly only; raw fields → Advanced) ──
+
+def anchor_label(anchor_source: Any) -> str:
+    """'put_ceiling_2k' → 'Put Ceiling 2K'; 'call_floor_5k' → 'Call Floor 5K'."""
+    s = str(anchor_source or "").strip().lower()
+    if not s:
+        return "—"
+    words = []
+    for p in s.split("_"):
+        words.append(p.upper() if re.fullmatch(r"\d+k", p) else p.capitalize())
+    return " ".join(words)
+
+
+def candidate_quote_status_label(short_leg: Any = None, long_leg: Any = None, *,
+                                 quote_state: Any = None, top_blocker: Any = None) -> str:
+    """Per-candidate quote status for Simple Mode: 'Available' / 'Stale' /
+    'Validation Blocked' / '—'. Prefers per-leg validation, falling back to the
+    cockpit quote state."""
+    sp = short_leg.get("validation_passed") if isinstance(short_leg, dict) else None
+    lp = long_leg.get("validation_passed") if isinstance(long_leg, dict) else None
+    if sp is True and lp is True:
+        return "Available"
+    if sp is False or lp is False:
+        return "Stale" if str(top_blocker or "").lower() == "stale" else "Validation Blocked"
+    if quote_state:
+        return quote_state_label(quote_state, top_blocker)
+    return "—"
+
+
+def candidate_risk_status_label(risk_rejection_type: Any = None) -> str:
+    """'OK' when no risk cap tripped, else 'Blocked: risk cap'."""
+    return "Blocked: risk cap" if risk_rejection_type else "OK"
+
+
+def candidate_blocker_label(*, rejected: Any = False, risk_rejection_type: Any = None,
+                            quote_state: Any = None, top_blocker: Any = None,
+                            eligible_base: Any = None, preset_kind: Any = None) -> str:
+    """Just the BLOCKER reason for a candidate ('stale quotes' / 'risk cap' /
+    'quote validation' / 'filters' / 'not eligible' / '—'). '—' when eligible or
+    observe-only. Mirrors candidate_status_label but strips the 'Blocked:' verb."""
+    status = candidate_status_label(
+        rejected=rejected, risk_rejection_type=risk_rejection_type,
+        quote_state=quote_state, top_blocker=top_blocker,
+        eligible_base=eligible_base, preset_kind=preset_kind)
+    return status[len("Blocked: "):] if status.startswith("Blocked: ") else "—"
+
+
+# ── Test-status wording (Task B: 'Runner' is never user-facing in Simple Mode) ─
+
+def test_status_label(status: Any) -> str:
+    """Friendly paper-test status (alias of runner_state_label) for the 'Test
+    Status' card — 'stopped' → 'Stopped', etc."""
+    return runner_state_label(status)
+
+
+def humanize_runner_message(message: Any) -> str:
+    """Replace developer 'runner' wording in a control message with 'paper test'."""
+    s = str(message or "")
+    for a, b in (("a runner", "a paper test"), ("Runner", "Paper test"),
+                 ("runner", "paper test")):
+        s = s.replace(a, b)
+    return s
+
+
+# ── Backtest discoverability (Task G — local snapshots only, never live/broker) ─
+
+BACKTEST_SYMBOLS = ("SPX", "SPY", "QQQ")
+BACKTEST_NOTE = ("Uses local saved snapshots only. No live API calls. No broker "
+                 "execution. No order preview.")
+
+
+def backtest_command(symbol: Any = "SPX", profile: Any = "all-main",
+                     latest_days: Any = 20, dte: Any = 0,
+                     run_label: Any = "smoke") -> str:
+    """The exact read-only CLI to run a local backtest (NOT executed from the UI)."""
+    sym = normalize_symbol(symbol)
+    prof = str(profile or "all-main").strip() or "all-main"
+    try:
+        days = int(latest_days)
+    except (TypeError, ValueError):
+        days = 20
+    try:
+        d = int(dte)
+    except (TypeError, ValueError):
+        d = 0
+    label = str(run_label or "smoke").strip() or "smoke"
+    return (f"python -m scripts.backtest_run --symbol {sym} --profile {prof} "
+            f"--latest-days {days} --dte {d} --run-label {label}")
 
 
 # ── Phase 9H/9I — profile grouping by purpose + run/selection mismatch ───────
@@ -565,11 +720,19 @@ def simple_mode_profile_ids(summaries: list[dict[str, Any]], *,
                             show_all: bool = False) -> list[str]:
     """Simple-Mode dropdown ids: ONLY Main Strategies by default (hides legacy +
     comparison + research); the full ordered list when ``show_all`` (the operator
-    ticked 'Show comparison and legacy profiles')."""
+    ticked 'Show comparison and legacy profiles').
+
+    Phase 10C — the per-profile ``enabled`` flag ('Show in main strategy list')
+    now CURATES the default Main list: if any Main profile is enabled, only those
+    show. If NONE are enabled (the current all-disabled default), the full Main
+    list shows — so the list is never empty and the flag stays opt-in/safe."""
     if show_all:
         all_ids = [s.get("profile_id") for s in summaries if s.get("profile_id")]
         return order_profiles_for_dropdown(all_ids)
-    return profiles_in_category(summaries, MAIN_CATEGORY)
+    main = profiles_in_category(summaries, MAIN_CATEGORY)
+    enabled_ids = {s.get("profile_id") for s in summaries if s.get("enabled")}
+    curated = [pid for pid in main if pid in enabled_ids]
+    return curated or main
 
 
 # ── Phase 9I — app-vs-profile data-source resolution (never silently mismatch) ─
