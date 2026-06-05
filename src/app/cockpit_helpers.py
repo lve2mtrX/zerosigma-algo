@@ -1457,3 +1457,42 @@ def wing_dominance(exposures: Any, spot: Any = None) -> dict[str, Any]:
     else:
         out["wds_reason"] = "No qualifying 10K wing in the current structure payload."
     return out
+
+
+# ── Phase 10C follow-up — local backtest DATA availability (Task D) ───────────
+# Pure local file read (no network) so the Backtests UI can show how far back data
+# exists per symbol×DTE and drive the "All Data" date range.
+
+def backtest_data_range(symbol: Any, dte: Any) -> dict[str, Any]:
+    """{symbol, dte, available, file_count, min_date, max_date} for one symbol×DTE
+    bucket ('0DTE' / '1DTE'). Reuses src.backtesting.raw_snapshot_loader (read-only,
+    HOME/env paths). Degrades to available=False on any error / empty folder."""
+    out: dict[str, Any] = {
+        "symbol": str(symbol or "").strip().upper(), "dte": str(dte or "0DTE"),
+        "available": False, "file_count": 0, "min_date": None, "max_date": None,
+    }
+    try:
+        from src.backtesting import raw_snapshot_loader as _L
+        dates = _L.available_dates(out["symbol"], out["dte"])
+    except Exception:                                  # never break the cockpit
+        dates = []
+    if dates:
+        out.update(available=True, file_count=len(dates),
+                   min_date=dates[0], max_date=dates[-1])
+    return out
+
+
+def backtest_data_availability(symbol: Any) -> dict[str, dict[str, Any]]:
+    """Both DTE buckets for a symbol: {'0DTE': {...}, '1DTE': {...}}."""
+    return {d: backtest_data_range(symbol, d) for d in ("0DTE", "1DTE")}
+
+
+def backtest_range_caption(rng: dict[str, Any]) -> str:
+    """One-line availability caption: 'SPX 0DTE: 146 files · 2025-10-31 → 2026-06-04'
+    or 'SPX 1DTE: no local data'."""
+    sym = rng.get("symbol", "?")
+    dte = rng.get("dte", "?")
+    if not rng.get("available"):
+        return f"{sym} {dte}: no local data"
+    return (f"{sym} {dte}: {rng.get('file_count', 0)} files · "
+            f"{rng.get('min_date')} → {rng.get('max_date')}")

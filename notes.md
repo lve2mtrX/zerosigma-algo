@@ -2901,3 +2901,71 @@ labels). Full suite **802 passed**, ruff clean, manage_profiles 14/14.
 
 Deferred (noted in the audit): heavy main-chain 1DTE re-fetch (E); launching backtests from the UI (G —
 command-only this pass); SPY/QQQ wing calibration; per-profile TP/SL lifecycle wiring (still PAPER_* env).
+
+---
+
+## 2026-06-04 — Phase 10C follow-up: after-hours 1DTE labeling · stale=preview-only · backtest runner · custom profiles
+
+A read-only discovery WORKFLOW (5 parallel Explore agents → structured JSON) mapped every change site
+first (after-hours, stale-decision, backtest UI/API, profile visibility, jargon); implementation then
+done in the main loop. UI-only — NO strategy/selector/risk math changed, stale validation NOT loosened,
+no execution surface added.
+
+A. **Explicit 1DTE after-hours quote labeling.** `after_hours_preview_banner` rewritten to lead with
+   "Quote chain: 1DTE after-hours preview" + "Profile DTE: 0DTE" + "Strategy DTE unchanged". New pure
+   `after_hours_quote_detail(active, dte)` → "1DTE quote chain · after-hours preview", shown as the
+   Quotes-card sub-label (st.metric delta, color off). Symbol-health + Run-Strategy captions now say
+   "Quote chain: 1DTE after-hours preview · Strategy DTE unchanged · Structure: still Zσ context".
+   Never mutates profile / paper-test / backtest DTE (preview/diagnostic only).
+
+B. **Stale quotes are PREVIEW-ONLY (never a fake live decision).** New module flags `QUOTE_STALE`
+   (chain returned but validation-blocked by staleness) and `LIVE_QUOTES_STALE` (= stale AND not
+   sandbox). New pure `decision_headline(available, quote_state, top_blocker)` → {live, title, note}:
+   usable → "Decision" + "Why: cleared selector/quote/risk gates"; stale → "No Live Decision — Quotes
+   Stale" + "Why not: quote validation failed because quotes are stale… preview-only until fresh RTH
+   quotes"; non-stale block → "…Quotes Blocked: <reason>"; no chain → "…Quotes Unavailable". Wired into
+   render_candidates (Decision subheader + the daily-selector success line, which now shows "Preview
+   Candidate" instead of a green selection when not usable). **Start Paper Test** is disabled when
+   `LIVE_QUOTES_STALE` (`_can_start = can and not LIVE_QUOTES_STALE`) with reason
+   `START_TEST_STALE_REASON` = "Cannot start live paper test: quotes are stale. Try again during RTH
+   or use Sandbox." Preview Strategy stays enabled but its launch message is marked preview-only.
+
+C/D. **Backtests is now a real UI runner, not a command-copy page.** `render_backtests` rebuilt:
+   Symbol · Strategy-profile (incl. custom, with "Show all saved profiles") · DTE (1DTE shown only when
+   local data exists, else 0DTE-only) · Date mode radio (Latest N days / Date range / All data) with
+   `st.date_input` calendars validated against `available_dates` · a per-symbol×DTE availability line
+   ("SPX 0DTE: 146 files · 2025-10-31 → 2026-06-04") · auto-filled Run label · **▶ Run Backtest**
+   (in-process `run_backtest` under `st.spinner`, writes reports, reruns → result cards) · **Refresh
+   Latest Results** · result cards (Trades/Win/PnL/Drawdown/TP-SL-EOD) + by-profile table. The CLI
+   moved to a secondary **"Advanced — CLI command"** expander (no longer the page focus; "Run this in a
+   terminal" removed). New pure readers in cockpit_helpers: `backtest_data_range` / `backtest_data_
+   availability` / `backtest_range_caption` (reuse `raw_snapshot_loader.available_dates`, read-only,
+   graceful on empty). `om.backtest_default_label`. Verified in-process on real data: SPX all-main
+   latest-3 → 2 trades, +$87.5, TP/SL/EOD 2/0/0; reads back via the same `read_backtest_results` path.
+
+E. **Saved/custom profiles are visible + usable.** `profile_category(None)` now returns **"Custom"**
+   (was "Legacy / Archived"); `PROFILE_CATEGORIES` ends with "Custom". The Builder/Run-Strategy/Backtests
+   "Show comparison and legacy profiles" checkbox renamed **"Show all saved profiles"** (Simple Mode
+   defaults to Main; ticking it surfaces comparison · research · custom). Backtests defaults to show-all
+   so custom profiles appear immediately. INVALID profiles are no longer silent: Run-Strategy +
+   Backtests show "⚠ N saved profile(s) have validation errors and are hidden … fix in Zσ Strat Builder".
+
+F. **Simple-Mode audit:** the discovery agent confirmed all score_edge / quote_quality_bucket / clock-
+   skew / Phase-4.x jargon stays Advanced-gated; the two leaks it found — "Run this in a terminal" and a
+   live "Decision" in stale state — are both fixed by C and B. `status_strip_cells`' "Runner" is an
+   unused helper (never rendered).
+
+REAL-ENV (RTH at run time): cockpit STATE=`chain_returned_usable`, Strategy eligible=yes → the cockpit
+correctly shows a LIVE Decision and Start enabled. The stale path (preview-only + Start disabled)
+activates after 17:00 ET. Both diagnose CLIs read-only (no secrets, no orders); headless import OK.
+
+Tests: NEW test_phase10c_followup_ui.py (18 — after-hours detail/banner, decision_headline live/stale/
+blocked/unavailable, START_TEST_STALE_REASON, stale-gating source wiring, backtest data range/caption/
+availability + default-label + UI-runner wiring (date modes / All data / Run button / spinner /
+in-process run_backtest / CLI-in-Advanced), Custom category + show-all + invalid surfacing, no-jargon,
+no-exec). Updated pins: profile_category(None)→Custom, cats→…Custom, "Show all saved profiles",
+"Quote chain", backtests CLI-secondary. Full suite **820 passed**, ruff clean, manage_profiles 14/14.
+
+Deferred: heavy main-cockpit 1DTE chain re-fetch (label/diagnostic roll only); in-process backtest has
+no hard timeout (spinner + soft "All data" size note — large all-data runs block the tab while running);
+results charts (cards + by-profile table only); SPY/QQQ wing calibration; per-profile TP/SL lifecycle.

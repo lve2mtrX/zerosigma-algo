@@ -47,7 +47,7 @@ def test_advanced_structure_and_ddoi_gated():
 
 def test_profile_dropdown_main_only():
     assert "simple_mode_profile_ids(" in _SRC
-    assert "Show comparison and legacy profiles" in _SRC
+    assert "Show all saved profiles" in _SRC   # Phase 10C — clearer label, incl. custom
     # the old always-on category radio is gone
     assert 'st.radio(\n            "Profile group"' not in _SRC
 

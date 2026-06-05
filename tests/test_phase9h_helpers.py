@@ -151,7 +151,9 @@ def test_profile_category_mapping():
     assert om.profile_category("control") == "Comparison Tests"
     assert om.profile_category("regime") == "Research / Disabled"
     assert om.profile_category("observe") == "Research / Disabled"
-    assert om.profile_category(None) == "Legacy / Archived"
+    # Phase 10C follow-up — a profile with no preset_kind is "Custom" (reachable
+    # via "Show all saved profiles"), no longer hidden under "Legacy / Archived".
+    assert om.profile_category(None) == "Custom"
 
 
 def test_group_profiles_primary_first():
@@ -165,6 +167,6 @@ def test_group_profiles_primary_first():
     assert grouped[0][0] == "Main Strategies"
     assert grouped[0][1] == ["morning_5k_dynamic_tp75"]
     cats = [c for c, _ in grouped]
-    assert cats == ["Main Strategies", "Comparison Tests", "Research / Disabled", "Legacy / Archived"]
+    assert cats == ["Main Strategies", "Comparison Tests", "Research / Disabled", "Custom"]
     assert om.profiles_in_category(sums, "Comparison Tests") == ["eod_5k_call_tp50_control"]
     assert om.DEFAULT_SIMPLE_CATEGORY == "Main Strategies"

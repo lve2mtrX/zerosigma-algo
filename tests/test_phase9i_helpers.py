@@ -59,7 +59,7 @@ def test_category_relabel():
     assert om.profile_category("dynamic") == "Main Strategies"
     assert om.profile_category("control") == "Comparison Tests"
     assert om.profile_category("regime") == "Research / Disabled"
-    assert om.profile_category(None) == "Legacy / Archived"
+    assert om.profile_category(None) == "Custom"   # Phase 10C — no preset_kind → Custom
     assert om.PROFILE_CATEGORIES[0] == "Main Strategies"
     assert om.DEFAULT_SIMPLE_CATEGORY == "Main Strategies"
 

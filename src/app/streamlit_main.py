@@ -297,6 +297,16 @@ _PROFILE_DTE = structure.dte if (structure and structure.dte is not None) else 0
 PREVIEW_DTE = om.resolve_preview_dte(now_et(), _PROFILE_DTE)
 AFTER_HOURS_PREVIEW = om.after_hours_preview_active(now_et(), _PROFILE_DTE)
 
+# Phase 10C follow-up — stale-quote gating. QUOTE_STALE = the cockpit's quote chain
+# returned but failed validation because quotes are STALE (the after-hours case).
+# LIVE_QUOTES_STALE additionally requires a LIVE (non-sandbox) source — it disables
+# Start Paper Test and downgrades the live "Decision" to a preview. Never loosens
+# the underlying validation; it only changes what the UI claims.
+QUOTE_STALE = (QUOTE_STATUS["state"] == "chain_returned_validation_failed"
+               and str(QUOTE_STATUS["details"].get("top_blocker") or "").lower() == "stale")
+LIVE_QUOTES_STALE = QUOTE_STALE and not om.is_sandbox(
+    resolved_structure_name, resolved_quote_name)
+
 session: SessionConfig = st.session_state["session_config"]
 baseline: SessionConfig = st.session_state["session_baseline"]
 paper_account: PaperAccount = st.session_state["paper_account"]
@@ -342,7 +352,11 @@ def render_symbol_health() -> None:
     cols = st.columns(5)
     cols[0].metric("Symbol", view["symbol"])
     # Phase 10B — short, readable quote-state label (no clipped long copy).
-    cols[1].metric("Quotes", view["market_data"] if sandbox else _q_short)
+    # Phase 10C follow-up — when the preview rolls to 1DTE after-hours, show the
+    # quote-chain DTE as a card sub-label ("1DTE quote chain · after-hours preview").
+    _quote_detail = om.after_hours_quote_detail(AFTER_HOURS_PREVIEW and not sandbox, PREVIEW_DTE)
+    cols[1].metric("Quotes", view["market_data"] if sandbox else _q_short,
+                   _quote_detail, delta_color="off")
     cols[2].metric("Exposures", view["exposures"])
     _elig = ("blocked" if (not sandbox
              and QUOTE_STATUS["state"] == "chain_returned_validation_failed")
@@ -364,9 +378,10 @@ def render_symbol_health() -> None:
     # Phase 10C — after-hours DTE preview roll (0DTE → 1DTE after the close).
     if AFTER_HOURS_PREVIEW and not sandbox:
         st.info("🌙 " + om.after_hours_preview_banner(SYMBOL, _PROFILE_DTE))
-        st.caption(f"Profile DTE: **{om.dte_label(_PROFILE_DTE)}**  ·  Preview chain: "
-                   f"**{om.dte_label(PREVIEW_DTE)} after-hours** (preview only — your "
-                   "profile DTE is unchanged).")
+        st.caption(f"Profile DTE: **{om.dte_label(_PROFILE_DTE)}**  ·  Quote chain: "
+                   f"**{om.dte_label(PREVIEW_DTE)} after-hours preview**  ·  "
+                   "**Strategy DTE unchanged**  ·  Structure: still Zσ structure context. "
+                   "Preview-only while quotes are stale.")
 
 
 def render_provider_status() -> None:
@@ -953,18 +968,22 @@ def render_candidates() -> None:
             row["Selected"] = "✅" if _sel.per_row[i]["selected_trade"] else ""
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
+        # Phase 10C follow-up — when quotes are not usable (stale/blocked), the
+        # selector result is PREVIEW-ONLY: never render it as a live green selection.
+        _live_ok = QUOTE_STATUS["available"]
         if _sel.selected_trade:
             i = _sel.selected_indices[0]
             sc = candidates[i]
-            st.success(
-                f"Daily selector (`{_sel.daily_selector_mode}`): selected "
-                f"{om.candidate_label(sc.side, sc.short_strike, sc.long_strike)} "
-                f"(score {sc.score:.2f}, credit {ch.fmt_money(sc.credit)}) — "
-                f"{_sel.per_row[i]['selector_reason']}"
-            )
+            _sel_txt = (f"{om.candidate_label(sc.side, sc.short_strike, sc.long_strike)} "
+                        f"(score {sc.score:.2f}, credit {ch.fmt_money(sc.credit)}) — "
+                        f"{_sel.per_row[i]['selector_reason']}")
+            if _live_ok:
+                st.success(f"Daily selector ({_sel.daily_selector_mode}): selected " + _sel_txt)
+            else:
+                st.warning("Preview Candidate (no live selection — quotes not usable): " + _sel_txt)
         else:
             st.info(
-                f"Daily selector (`{_sel.daily_selector_mode}`): NO_TRADE — "
+                f"Daily selector ({_sel.daily_selector_mode}): NO_TRADE — "
                 f"{_sel.selector_no_trade_reason or _sel.selector_rejection_reason or 'no eligible candidate'}"
             )
         st.caption("Selection only — the daily selector never executes or submits orders.")
@@ -994,10 +1013,22 @@ def render_candidates() -> None:
                     _render_candidate_advanced(c, _rd_c)
 
     decision = strat.select(candidates, params)
-    st.subheader("Decision")
-    badge = {"TRADE_CALL_CREDIT": "success", "TRADE_PUT_CREDIT": "success", "NO_TRADE": "warning"}
-    getattr(st, badge.get(decision.decision, "info"))(om.decision_label(decision.decision))
-    st.write(decision.explanation)
+    # Phase 10C follow-up — never render a LIVE "Decision" when quotes are stale or
+    # validation-blocked. A stale/blocked state shows a Preview Candidate + a plain
+    # "Why not" line (it must NOT claim the side cleared selector/quote/risk gates).
+    _dh = om.decision_headline(
+        available=QUOTE_STATUS["available"], quote_state=QUOTE_STATUS["state"],
+        top_blocker=QUOTE_STATUS["details"].get("top_blocker"))
+    st.subheader(_dh["title"])
+    if _dh["live"]:
+        badge = {"TRADE_CALL_CREDIT": "success", "TRADE_PUT_CREDIT": "success",
+                 "NO_TRADE": "warning"}
+        getattr(st, badge.get(decision.decision, "info"))(om.decision_label(decision.decision))
+        st.write(decision.explanation)
+        st.caption(_dh["note"])
+    else:
+        st.warning(f"Preview Candidate — {om.decision_label(decision.decision)} (preview only)")
+        st.caption(_dh["note"])
 
 
 def _render_profile_info_card(info: dict) -> None:
@@ -1044,8 +1075,9 @@ def render_strategy_builder() -> None:
     st.markdown("**Preset strategy profiles**")
     if simple_mode and valid_ids:
         _b_show_all = st.checkbox(
-            "Show comparison and legacy profiles", value=False, key="builder_show_all",
-            help="Off = only your Main Strategies. On = comparison, research, and legacy too.")
+            "Show all saved profiles", value=False, key="builder_show_all",
+            help="Off = only your Main Strategies. On = every saved profile "
+                 "(comparison · research · custom).")
         _builder_options = om.simple_mode_profile_ids(_ok_summaries, show_all=_b_show_all) or valid_ids
     else:
         _builder_options = om.order_profiles_for_dropdown(valid_ids)
@@ -1333,9 +1365,10 @@ def render_forward_runner() -> None:
             (_tester_prof.symbol if _tester_prof else SYMBOL), _run_profile_dte))
         _pc = st.columns(2)
         _pc[0].metric("Profile DTE", om.dte_label(_run_profile_dte))
-        _pc[1].metric("Preview chain", f"{om.dte_label(om.resolve_preview_dte(now_et(), _run_profile_dte))} after-hours")
-        st.caption("This is preview-only. The paper test still runs your profile's own DTE "
-                   f"({om.dte_label(_run_profile_dte)}) unless you explicitly change it.")
+        _pc[1].metric("Quote chain", f"{om.dte_label(om.resolve_preview_dte(now_et(), _run_profile_dte))} after-hours preview")
+        st.caption(f"Strategy DTE unchanged. Preview-only: the paper test still runs your "
+                   f"profile's own DTE ({om.dte_label(_run_profile_dte)}) unless you "
+                   "explicitly change it in the profile.")
 
     _hb = forward_review.load_latest_heartbeat() or {}
     view = control_ui.status_view(control_ui.get_status())
@@ -1377,21 +1410,29 @@ def render_forward_runner() -> None:
         f"**{ch.fmt_money(_rs_ps.get('total_pnl', 0.0))}**"
     )
 
-    _runner_summaries = {s["profile_id"]: s for s in pb.list_summaries() if s.get("ok")}
+    _all_summaries = pb.list_summaries()
+    _runner_summaries = {s["profile_id"]: s for s in _all_summaries if s.get("ok")}
     _summaries_list = list(_runner_summaries.values())
     _all_runner_profiles = om.order_profiles_for_dropdown(list(_runner_summaries))
+    # Phase 10C follow-up — invalid profiles are not runnable, but never let them
+    # silently disappear: surface their ids + a "fix in Builder" pointer.
+    _invalid_ids = [s.get("profile_id") for s in _all_summaries if not s.get("ok")]
+    if _invalid_ids:
+        st.caption(f"⚠ {len(_invalid_ids)} saved profile(s) have validation errors and are "
+                   f"hidden here: {', '.join(str(i) for i in _invalid_ids)}. Fix them in the "
+                   "🧱 Zσ Strat Builder (the 'All profiles' table shows the reasons).")
 
     def _runner_label(pid: str) -> str:
         s = _runner_summaries.get(pid, {})
         return om.profile_dropdown_label(pid, s.get("profile_name"), s.get("preset_kind"))
 
-    # ── Phase 9I — Simple Mode shows ONLY Main Strategies (the 9G dynamic-first
-    # presets); a checkbox reveals comparison + research + legacy. Advanced = all. ──
+    # ── Phase 9I/10C — Simple Mode shows ONLY Main Strategies by default; a checkbox
+    # reveals every saved profile incl. CUSTOM ones Dan builds. Advanced = all. ──
     if simple_mode:
         _show_all = st.checkbox(
-            "Show comparison and legacy profiles", value=False, key="runner_show_all",
-            help="Off = only your Main Strategies. On = comparison tests, research, "
-                 "and legacy/archived profiles too.")
+            "Show all saved profiles", value=False, key="runner_show_all",
+            help="Off = only your Main Strategies. On = every saved profile you've made "
+                 "(comparison · research · custom).")
         runner_profiles = (om.simple_mode_profile_ids(_summaries_list, show_all=_show_all)
                            or _all_runner_profiles)
     else:
@@ -1470,6 +1511,10 @@ def render_forward_runner() -> None:
         st.warning("⚠ " + _mismatch["message"])
 
     can, why = control_ui.can_start(control_ui.get_status())
+    # Phase 10C follow-up — Start Paper Test is additionally blocked when LIVE quotes
+    # are stale (starting a live test that cannot price is pointless). Preview Strategy
+    # stays enabled but is marked preview-only. Sandbox is never stale → unaffected.
+    _can_start = can and not LIVE_QUOTES_STALE
     bcols = st.columns(6)
     if bcols[0].button(om.BTN_REFRESH, key="runner_refresh"):
         st.rerun()
@@ -1479,12 +1524,13 @@ def render_forward_runner() -> None:
         ok, msg, pid = control_ui.start_runner(
             sel_profile, once=True, market_hours_only=bool(market_hours_only),
             structure_provider=_ovr_struct, quote_provider=_ovr_quote)
-        (st.success if ok else st.error)(("Preview launched. " if ok else "") + str(msg)
-                                         + (f" (pid {pid})" if pid else ""))
+        _pv = "Preview launched (preview-only — quotes are stale). " if (ok and LIVE_QUOTES_STALE) \
+            else ("Preview launched. " if ok else "")
+        (st.success if ok else st.error)(_pv + str(msg) + (f" (pid {pid})" if pid else ""))
         if ok:
             st.rerun()
     if bcols[2].button(om.BTN_START_TEST, type="primary",
-                       disabled=not runner_profiles or not can, key="runner_start"):
+                       disabled=not runner_profiles or not _can_start, key="runner_start"):
         ok, msg, pid = control_ui.start_runner(
             sel_profile, interval_seconds=float(interval), once=bool(once),
             max_ticks=(int(max_ticks) or None), market_hours_only=bool(market_hours_only),
@@ -1504,6 +1550,9 @@ def render_forward_runner() -> None:
         st.rerun()
     if not can:
         st.caption(f"_Start / Preview disabled: {om.humanize_runner_message(why)}_")
+    elif LIVE_QUOTES_STALE:
+        st.warning(om.START_TEST_STALE_REASON
+                   + " Preview Strategy still works (preview-only).")
     # Phase 10C — force-stop terminates the stored OS process; it is an
     # Advanced-only affordance. In Simple Mode it stays hidden (force=False).
     if not simple_mode:
@@ -1791,70 +1840,187 @@ def render_manual_desk() -> None:
 
 
 def render_backtests() -> None:
-    """Phase 10C — discoverable LOCAL backtests. Configures the read-only CLI and
-    reads existing result files. Never launches live work, never hits a brokerage."""
+    """Phase 10C follow-up — usable LOCAL backtests: pick symbol / saved profile (incl.
+    custom) / DTE / date mode (Latest N · Date range · All data), see how far back local
+    data goes, RUN in-process (read-only replay with a spinner), and read results. The
+    CLI is a secondary fallback in an Advanced expander. Never live, never a brokerage."""
     st.subheader("📈 Backtests — local historical replay")
     st.caption(om.BACKTEST_NOTE)
     st.markdown(ui.pill("LOCAL SNAPSHOTS · NO LIVE API · NO BROKER", "green"),
                 unsafe_allow_html=True)
-
-    # ── 1. Configure a backtest → exact read-only CLI (NOT launched from the UI) ──
     st.markdown("#### ▶ Run a Backtest")
-    _summaries = [s for s in pb.list_summaries() if s.get("ok")]
-    _bt_profiles = ["all-main", "all", *om.order_profiles_for_dropdown(
-        [s["profile_id"] for s in _summaries])]
-    bc = st.columns(4)
-    bt_symbol = bc[0].selectbox("Symbol", list(om.BACKTEST_SYMBOLS), index=0, key="bt_symbol")
-    bt_profile = bc[1].selectbox(
-        "Strategy profile", _bt_profiles, index=0, key="bt_profile",
-        help="'all-main' = the 4 primary dynamic presets; 'all' adds the controls.")
-    bt_days = int(bc[2].number_input("Latest N days", value=20, min_value=1, step=5, key="bt_days"))
-    bt_dte = int(bc[3].selectbox(
-        "DTE", [0, 1], index=0, key="bt_dte",
-        help="0DTE is the supported path today; SPX 1DTE snapshots exist (future)."))
-    bt_label = st.text_input("Run label", value="smoke", key="bt_label")
-    st.markdown("**Run this in a terminal** (read-only; writes to `outputs/backtests/`):")
-    st.code(om.backtest_command(bt_symbol, bt_profile, bt_days, bt_dte, bt_label), language="bash")
-    st.caption("Backtests are not launched from the cockpit (a run can take minutes and uses "
-               "local CPU). Run the command above, then click Refresh to load the results below.")
+
+    # ── Saved profiles (incl. CUSTOM ones Dan builds); invalid surfaced, not hidden ──
+    _all_bt = pb.list_summaries()
+    _bt_ok = [s for s in _all_bt if s.get("ok")]
+    _bt_summ = {s["profile_id"]: s for s in _bt_ok}
+    _bt_show_all = st.checkbox(
+        "Show all saved profiles", value=True, key="bt_show_all",
+        help="On = every saved profile incl. custom ones you build. Off = Main Strategies only.")
+    _bt_saved = (om.order_profiles_for_dropdown(list(_bt_summ)) if _bt_show_all
+                 else (om.simple_mode_profile_ids(_bt_ok) or list(_bt_summ)))
+    _bt_profiles = ["all-main", "all", *_bt_saved]
+
+    def _bt_label_fn(pid: str) -> str:
+        if pid in ("all-main", "all"):
+            return pid
+        s = _bt_summ.get(pid, {})
+        return om.profile_dropdown_label(pid, s.get("profile_name"), s.get("preset_kind"))
+
+    _bt_invalid = [s.get("profile_id") for s in _all_bt if not s.get("ok")]
+    if _bt_invalid:
+        st.caption(f"⚠ {len(_bt_invalid)} invalid profile(s) hidden: "
+                   f"{', '.join(str(i) for i in _bt_invalid)} — fix in 🧱 Zσ Strat Builder.")
+
+    # ── Symbol / profile / DTE (1DTE shown only when local data exists) ──
+    c1 = st.columns([1, 2, 1])
+    bt_symbol = c1[0].selectbox("Symbol", list(om.BACKTEST_SYMBOLS), index=0, key="bt_symbol")
+    bt_profile = c1[1].selectbox(
+        "Strategy profile", _bt_profiles, index=0, format_func=_bt_label_fn, key="bt_profile",
+        help="'all-main' = 4 primary presets · 'all' adds controls · or pick a saved "
+             "profile (incl. your custom ones).")
+    _avail = ch.backtest_data_availability(bt_symbol)
+    _dte_opts = [0] + ([1] if _avail["1DTE"]["available"] else [])
+    bt_dte = int(c1[2].selectbox(
+        "DTE", _dte_opts, index=0, key="bt_dte",
+        help=("0DTE supported; 1DTE shown because local 1DTE data exists for this symbol."
+              if _avail["1DTE"]["available"]
+              else "0DTE only — no local 1DTE data for this symbol.")))
+    _dte_bucket = om.dte_label(bt_dte)
+    _rng = _avail.get(_dte_bucket) or ch.backtest_data_range(bt_symbol, _dte_bucket)
+
+    # ── How far back local data goes (drives "All data") ──
+    st.caption("Local data — " + ch.backtest_range_caption(_avail["0DTE"])
+               + "  ·  " + ch.backtest_range_caption(_avail["1DTE"]))
+
+    # ── Date mode: Latest N days / Date range / All data ──
+    bt_mode = st.radio("Date mode", ["Latest N days", "Date range", "All data"],
+                       horizontal=True, key="bt_mode")
+    _start = _end = None
+    _latest_days = 0
+    _range_ok = True
+    if bt_mode == "Latest N days":
+        _latest_days = int(st.number_input("Latest N days", value=20, min_value=1, step=1,
+                                           key="bt_days"))
+    elif bt_mode == "Date range":
+        if _rng["available"]:
+            import datetime as _dt
+            _mn = _dt.date.fromisoformat(_rng["min_date"])
+            _mx = _dt.date.fromisoformat(_rng["max_date"])
+            _dc = st.columns(2)
+            _s = _dc[0].date_input("Start date", value=_mn, min_value=_mn, max_value=_mx,
+                                   key="bt_start")
+            _e = _dc[1].date_input("End date", value=_mx, min_value=_mn, max_value=_mx,
+                                   key="bt_end")
+            _start, _end = str(_s), str(_e)
+            try:
+                from src.backtesting import raw_snapshot_loader as _L
+                _in = [d for d in _L.available_dates(bt_symbol, _dte_bucket)
+                       if _start <= d <= _end]
+            except Exception:
+                _in = []
+            if _start > _end:
+                st.warning("Start date is after end date.")
+                _range_ok = False
+            elif not _in:
+                st.warning(f"No {bt_symbol} {_dte_bucket} data files between {_start} and {_end}.")
+                _range_ok = False
+            else:
+                st.caption(f"{len(_in)} data file(s) in range {_start} → {_end}.")
+        else:
+            st.warning(f"No local {bt_symbol} {_dte_bucket} data to pick a range from.")
+            _range_ok = False
+    else:  # All data
+        if _rng["available"]:
+            _start, _end = _rng["min_date"], _rng["max_date"]
+            st.caption(f"Available data for {bt_symbol} {_dte_bucket}: {_rng['min_date']} → "
+                       f"{_rng['max_date']}, {_rng['file_count']} files.")
+        else:
+            st.warning(f"No local {bt_symbol} {_dte_bucket} data available.")
+            _range_ok = False
+
+    bt_label = st.text_input(
+        "Run label", value=om.backtest_default_label(bt_symbol, bt_profile, bt_mode),
+        key="bt_label")
+
+    # ── Run (in-process, spinner) / Refresh ──
+    _runnable = bool(_rng["available"]) and _range_ok
+    rcol = st.columns([1, 1, 2])
+    _run = rcol[0].button("▶ Run Backtest", type="primary", key="bt_run", disabled=not _runnable)
+    if rcol[1].button("🔄 Refresh Latest Results", key="bt_refresh"):
+        st.rerun()
+    if not _runnable:
+        rcol[2].caption("_Run disabled — no local data for the current symbol / DTE / range._")
+    if _run:
+        from datetime import datetime as _datetime
+
+        from src.backtesting import mappers as _M
+        from src.backtesting import reports as _R
+        from src.backtesting.replay_runner import resolve_profiles, run_backtest
+        _profs = resolve_profiles(bt_profile)
+        with st.spinner(f"Running backtest — {bt_symbol} {_dte_bucket} · {bt_mode} · "
+                        f"{len(_profs)} profile(s)… local CPU, read-only, no live calls."):
+            try:
+                _res = run_backtest(symbol=bt_symbol, profile_ids=_profs, start=_start,
+                                    end=_end, dte=bt_dte, latest_days=_latest_days,
+                                    run_label=bt_label)
+                _stamp = _datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                _R.write_reports(_res, [_M.latest_dir(),
+                                        _M.run_dir(_stamp, f"{bt_symbol}_{bt_label}")],
+                                 stamp=_stamp)
+                _c = _res.counters
+                st.success(f"Backtest complete — {_c.get('selected_trades', 0)} trades from "
+                           f"{_c.get('dates_evaluated', 0)} dates "
+                           f"({_c.get('candidates', 0)} candidates). Results below ↓")
+            except Exception as _exc:                # never crash the cockpit
+                st.error(f"Backtest failed: {type(_exc).__name__}: {_exc}")
+        st.rerun()
     st.divider()
 
-    # ── 2. Latest results — read existing output files only (never live) ──
+    # ── Latest results — reads outputs/backtests/latest only (never live) ──
     from src.backtesting import mappers as _bt_mappers
     st.markdown("#### 📄 Latest Results")
     _results = ch.read_backtest_results(_bt_mappers.latest_dir())
-    rc = st.columns([1, 4])
-    if rc[0].button("🔄 Refresh Latest Results", key="bt_refresh"):
-        st.rerun()
-    rc[1].caption(f"Reading: `{_results['results_dir']}`")
+    st.caption(f"Reading: `{_results['results_dir']}`")
     if not _results["available"]:
         st.info(_results["reason"])
-        return
-    _rcfg = _results.get("run_config") or {}
-    _m = _results.get("metrics") or {}
-    _ctx = []
-    if _rcfg.get("symbol"):
-        _ctx.append(f"symbol {_rcfg.get('symbol')}")
-    if _rcfg.get("profiles"):
-        _ctx.append(f"profiles {_rcfg.get('profiles')}")
-    if _rcfg.get("stamp"):
-        _ctx.append(str(_rcfg.get("stamp")))
-    if _ctx:
-        st.caption(" · ".join(_ctx))
-    k = st.columns(5)
-    k[0].metric("Trades", _m.get("total_trades", 0))
-    _wr = _m.get("win_rate")
-    k[1].metric("Win Rate", f"{_wr * 100:.0f}%" if isinstance(_wr, (int, float)) else "—")
-    k[2].metric("Total P&L", ch.fmt_money(_m.get("total_pnl_dollars", 0.0)))
-    _dd = _m.get("max_drawdown_dollars")
-    k[3].metric("Max Drawdown", ch.fmt_money(_dd) if isinstance(_dd, (int, float)) else "—")
-    k[4].metric("TP / SL / EOD",
-                f"{_m.get('tp_count', 0)} / {_m.get('sl_count', 0)} / {_m.get('eod_count', 0)}")
-    _bp = _results.get("by_profile") or []
-    if _bp:
-        st.markdown("**By profile**")
-        st.dataframe(_bp, use_container_width=True, hide_index=True)
+    else:
+        _rcfg = _results.get("run_config") or {}
+        _m = _results.get("metrics") or {}
+        _ctx = []
+        if _rcfg.get("symbol"):
+            _ctx.append(f"symbol {_rcfg.get('symbol')}")
+        if _rcfg.get("profiles"):
+            _ctx.append(f"profiles {_rcfg.get('profiles')}")
+        if _rcfg.get("stamp"):
+            _ctx.append(str(_rcfg.get("stamp")))
+        if _ctx:
+            st.caption(" · ".join(_ctx))
+        k = st.columns(5)
+        k[0].metric("Trades", _m.get("total_trades", 0))
+        _wr = _m.get("win_rate")
+        k[1].metric("Win Rate", f"{_wr * 100:.0f}%" if isinstance(_wr, (int, float)) else "—")
+        k[2].metric("Total P&L", ch.fmt_money(_m.get("total_pnl_dollars", 0.0)))
+        _dd = _m.get("max_drawdown_dollars")
+        k[3].metric("Max Drawdown", ch.fmt_money(_dd) if isinstance(_dd, (int, float)) else "—")
+        k[4].metric("TP / SL / EOD",
+                    f"{_m.get('tp_count', 0)} / {_m.get('sl_count', 0)} / {_m.get('eod_count', 0)}")
+        _bp = _results.get("by_profile") or []
+        if _bp:
+            st.markdown("**By profile**")
+            st.dataframe(_bp, use_container_width=True, hide_index=True)
     st.caption("Historical simulation only — no broker, no order preview, no execution.")
+
+    # ── Advanced — CLI equivalent (secondary fallback; not the main workflow) ──
+    with st.expander("Advanced — CLI command (optional, runs the same thing)", expanded=False):
+        _cli_days = _latest_days if bt_mode == "Latest N days" else 0
+        st.code(om.backtest_command(bt_symbol, bt_profile, _cli_days, bt_dte, bt_label),
+                language="bash")
+        if bt_mode != "Latest N days" and _start and _end:
+            st.code(f"python -m scripts.backtest_run --symbol {bt_symbol} --profile {bt_profile} "
+                    f"--start {_start} --end {_end} --dte {bt_dte} --run-label {bt_label}",
+                    language="bash")
+        st.caption("The buttons above run this in-process; the CLI is here only as a fallback.")
 
 
 def render_logs() -> None:

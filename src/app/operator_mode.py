@@ -549,11 +549,20 @@ def after_hours_preview_active(now_et: Any, profile_target_dte: Any,
 
 
 def after_hours_preview_banner(symbol: Any, profile_target_dte: Any = 0) -> str:
-    """Trader banner shown when the preview rolls 0DTE → 1DTE after the close."""
-    return (f"After-hours preview: 0DTE quotes for {symbol or '—'} are stale after the "
-            "5:00 PM ET close, so the live preview rolls to the 1DTE chain. Your "
-            f"profile's DTE is unchanged ({dte_label(profile_target_dte)}) — the next "
-            "RTH session re-checks live eligibility on its own DTE.")
+    """Trader banner shown when the preview rolls 0DTE → 1DTE after the close. States
+    explicitly that ONLY the preview quote chain rolls — the strategy profile DTE is
+    unchanged (no silent mutation of profile / paper-test / backtest DTE)."""
+    return (f"Quote chain: 1DTE after-hours preview — 0DTE quotes for {symbol or '—'} are "
+            "stale after the 5:00 PM ET close, so the live preview uses the 1DTE chain. "
+            f"Profile DTE: {dte_label(profile_target_dte)}. Strategy DTE unchanged.")
+
+
+def after_hours_quote_detail(active: Any, preview_dte: Any = 1) -> str | None:
+    """Quotes-card sub-label: '1DTE quote chain · after-hours preview' when the
+    after-hours roll is active; None during RTH (no extra label)."""
+    if not active:
+        return None
+    return f"{dte_label(preview_dte)} quote chain · after-hours preview"
 
 
 # ── candidate card labels (Simple Mode: friendly only; raw fields → Advanced) ──
@@ -603,6 +612,37 @@ def candidate_blocker_label(*, rejected: Any = False, risk_rejection_type: Any =
     return status[len("Blocked: "):] if status.startswith("Blocked: ") else "—"
 
 
+# ── Phase 10C follow-up — stale-quote decision gating (never fake a live read) ─
+
+# Reason shown when Start Paper Test is disabled because LIVE quotes are stale.
+START_TEST_STALE_REASON = ("Cannot start live paper test: quotes are stale. Try again "
+                           "during RTH or use Sandbox.")
+
+
+def decision_headline(*, available: Any, quote_state: Any = None,
+                      top_blocker: Any = None) -> dict[str, Any]:
+    """Whether the cockpit may show a LIVE 'Decision' or only a PREVIEW candidate.
+
+    Returns {live, title, note}. When quotes are usable → a live Decision with a
+    'cleared the gates' note. When quotes are stale / validation-blocked /
+    unavailable → a preview-only headline + a plain 'Why not' line that never
+    claims the candidate cleared selector/quote/risk eligibility."""
+    if available:
+        return {"live": True, "title": "Decision",
+                "note": "Why: this side cleared selector, quote, and risk gates."}
+    s = str(quote_state or "")
+    tb = str(top_blocker or "").lower()
+    if s == "chain_returned_validation_failed" and tb == "stale":
+        return {"live": False, "title": "No Live Decision — Quotes Stale",
+                "note": ("Why not: quote validation failed because quotes are stale. This "
+                         "candidate is preview-only until fresh RTH quotes arrive.")}
+    if s == "chain_returned_validation_failed":
+        return {"live": False, "title": "No Live Decision — Quotes Blocked",
+                "note": f"Why not: quote validation failed: {top_blocker or 'validation'}."}
+    return {"live": False, "title": "No Live Decision — Quotes Unavailable",
+            "note": "Why not: no usable quote chain right now — structure preview only."}
+
+
 # ── Test-status wording (Task B: 'Runner' is never user-facing in Simple Mode) ─
 
 def test_status_label(status: Any) -> str:
@@ -646,20 +686,33 @@ def backtest_command(symbol: Any = "SPX", profile: Any = "all-main",
             f"--latest-days {days} --dte {d} --run-label {label}")
 
 
+def backtest_default_label(symbol: Any = "SPX", profile: Any = "all-main",
+                           mode: Any = "latest") -> str:
+    """A filesystem-safe default run label from symbol/profile/date-mode, e.g.
+    'spx_all_main_latest'. Used to pre-fill the Backtests 'Run label' field."""
+    sym = normalize_symbol(symbol).lower()
+    prof = "".join(ch_ if ch_.isalnum() else "_" for ch_ in str(profile or "run").lower())
+    m = {"Latest N days": "latest", "Date range": "range", "All data": "all"}.get(
+        str(mode), str(mode or "run").lower())
+    return f"{sym}_{prof}_{m}".strip("_")
+
+
 # ── Phase 9H/9I — profile grouping by purpose + run/selection mismatch ───────
 
 # Phase 9I — trader-friendly category labels (was: Primary live paper tests /
 # Controls / Research-Observe / Legacy). Main first (Simple Mode default).
 MAIN_CATEGORY = "Main Strategies"
 PROFILE_CATEGORIES: tuple[str, ...] = (
-    "Main Strategies", "Comparison Tests", "Research / Disabled", "Legacy / Archived",
+    "Main Strategies", "Comparison Tests", "Research / Disabled", "Custom",
 )
 DEFAULT_SIMPLE_CATEGORY = MAIN_CATEGORY
 
 
 def profile_category(preset_kind: Any) -> str:
-    """Map a preset_kind to its operator category. Legacy profiles (no
-    preset_kind) fall into 'Legacy / Archived'."""
+    """Map a preset_kind to its operator category. Phase 10C follow-up — a saved
+    profile with NO preset_kind (e.g. one Dan just built in Zσ Strat Builder) is
+    classified as 'Custom' (reachable via 'Show all saved profiles'), never hidden
+    forever under a 'Legacy' label."""
     k = str(preset_kind or "").strip().lower()
     if k == "dynamic":
         return "Main Strategies"
@@ -667,7 +720,7 @@ def profile_category(preset_kind: Any) -> str:
         return "Comparison Tests"
     if k in ("regime", "observe"):
         return "Research / Disabled"
-    return "Legacy / Archived"
+    return "Custom"
 
 
 def group_profiles_by_category(

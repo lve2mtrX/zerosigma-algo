@@ -58,10 +58,10 @@ def test_latest_run_mismatch_wired():
 
 
 def test_profile_grouping_wired():
-    # Phase 9I — the category radio was replaced by a Main-only dropdown + a
-    # "Show comparison and legacy profiles" checkbox (Tester + Builder).
+    # Phase 9I/10C — the category radio was replaced by a Main-only dropdown + a
+    # "Show all saved profiles" checkbox (Tester + Builder; incl. custom profiles).
     assert "simple_mode_profile_ids(" in _SRC
-    assert "Show comparison and legacy profiles" in _SRC
+    assert "Show all saved profiles" in _SRC
 
 
 # ── no execution surface anywhere in the new/changed modules ─────────────────
