@@ -3020,3 +3020,18 @@ to trader-facing copy. Validation passed with `.venv`: `pytest -q` (827), `ruff 
   loosened.
 - Deferred: risk-based backtest sizing, selector weighting changes, broker
   execution, order preview, and any live order path.
+
+---
+
+## 2026-06-05 — Phase 10D-D: global strategy synopsis
+
+- Added deterministic Strategy Synopsis helpers in `operator_mode.py`; no AI/API
+  calls, no strategy/selector/risk changes.
+- Synopsis now appears in Live Cockpit, Zσ Strat Builder, Run Strategy,
+  Backtests, Paper Portfolio, Stats / Review, Settings, and selected-profile
+  detail surfaces.
+- Added a separate deterministic Backtest Run Summary narrative for loaded
+  backtest results, including P&L, return, drawdown, trades, exits, and top
+  blocker.
+- Added tests for dynamic/control/put-only/observe/custom profiles, raw-enum
+  hiding, page placement, run narrative, and no execution surface.

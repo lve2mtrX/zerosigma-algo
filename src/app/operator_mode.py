@@ -1206,6 +1206,282 @@ def profile_info_fields(fields: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ── Global Strategy Synopsis (deterministic, no AI/API calls) ────────────────
+
+_PROFILE_KEYS = (
+    "profile_id", "profile_name", "strategy_id", "strategy_type", "symbol",
+    "target_dte", "daily_selector", "allow_call_credit", "allow_put_credit",
+    "preset_kind", "side_policy", "threshold_label", "target_time",
+    "entry_window_start", "entry_window_end", "stop_loss_pct", "stop_loss_mode",
+    "take_profit_pct", "take_profit_mode", "dynamic_exit_enabled",
+    "dynamic_exit_policy", "structure_provider", "quote_provider", "enabled",
+)
+
+
+def _profile_dict(profile: Any) -> dict[str, Any]:
+    if profile is None:
+        return {}
+    if isinstance(profile, dict):
+        return dict(profile)
+    to_dict = getattr(profile, "to_dict", None)
+    if callable(to_dict):
+        try:
+            return dict(to_dict(include_path=False))
+        except TypeError:
+            return dict(to_dict())
+    return {k: getattr(profile, k, None) for k in _PROFILE_KEYS if hasattr(profile, k)}
+
+
+def _display_name(fields: dict[str, Any]) -> str:
+    return str(fields.get("profile_name") or fields.get("profile_id") or "Selected strategy")
+
+
+def _strategy_type_label(fields: dict[str, Any]) -> str:
+    return friendly_enum_label(fields.get("strategy_type") or fields.get("strategy_id") or "strategy")
+
+
+def _profile_kind_phrase(fields: dict[str, Any]) -> str:
+    kind = str(fields.get("preset_kind") or "").strip().lower()
+    selector = str(fields.get("daily_selector") or "")
+    if selector == "no_trade" or kind == "observe":
+        return "observe-only profile"
+    if kind == "control":
+        return "comparison/control profile"
+    if kind == "regime":
+        return "research profile"
+    if kind == "dynamic":
+        return "primary dynamic paper-test profile"
+    if kind:
+        return f"{friendly_enum_label(kind).lower()} profile"
+    return "custom saved profile"
+
+
+def _article(phrase: str) -> str:
+    return "an" if phrase[:1].lower() in ("a", "e", "i", "o", "u") else "a"
+
+
+def _entry_phrase(fields: dict[str, Any]) -> str:
+    target = str(fields.get("target_time") or "").strip()
+    if target:
+        return f"around {target} ET"
+    win = entry_window_display(fields)
+    return f"in the {win} entry window" if win != "—" else "at an entry time not specified"
+
+
+def _threshold_phrase(fields: dict[str, Any]) -> str:
+    threshold = threshold_display(fields)
+    return f"{threshold} wing structure" if threshold != "—" else "wing structure"
+
+
+def _dte_phrase(fields: dict[str, Any]) -> str:
+    dte = fields.get("target_dte")
+    try:
+        return f"{int(dte)}DTE"
+    except (TypeError, ValueError):
+        return "DTE not specified"
+
+
+def _side_synopsis(fields: dict[str, Any]) -> str:
+    selector = str(fields.get("daily_selector") or "")
+    if selector == "no_trade":
+        return "It scores and logs candidates but should not select trades."
+    call = bool(fields.get("allow_call_credit", True))
+    put = bool(fields.get("allow_put_credit", True))
+    mapping = "Put Ceiling maps to Call Credit, and Call Floor maps to Put Credit."
+    if call and not put:
+        return f"It only evaluates call-credit spreads from the Put Ceiling structure. {mapping}"
+    if put and not call:
+        return f"It only evaluates put-credit spreads from the Call Floor structure. {mapping}"
+    return f"It evaluates both call-credit and put-credit spreads. {mapping}"
+
+
+def _selector_phrase(fields: dict[str, Any]) -> str:
+    selector = str(fields.get("daily_selector") or "score_best_valid")
+    if selector == "balanced_structure_premium_valid":
+        return ("It chooses using balanced structure, premium, distance from spot, "
+                "quote quality, and risk.")
+    if selector == "best_credit_valid":
+        return "It chooses the valid candidate with the best credit."
+    if selector == "score_best_valid":
+        return "It chooses the valid candidate with the best overall score."
+    if selector == "lowest_breach_risk_valid":
+        return "It favors valid candidates with lower breach risk."
+    if selector == "call_credit_only":
+        return "It keeps the selector on call-credit setups only."
+    if selector == "put_credit_only":
+        return "It keeps the selector on put-credit setups only."
+    if selector == "no_trade":
+        return "It is configured for observe/no-trade mode."
+    return f"It uses the {friendly_enum_label(selector)} selector."
+
+
+def _exit_phrase(fields: dict[str, Any]) -> str:
+    tp_pct = fields.get("take_profit_pct")
+    sl_pct = fields.get("stop_loss_pct")
+    try:
+        tp = f"{round(float(tp_pct) * 100)}% credit capture"
+    except (TypeError, ValueError):
+        tp = "no fixed take-profit"
+    try:
+        sl = f"{round(float(sl_pct) * 100)}% credit stop"
+    except (TypeError, ValueError):
+        sl = "no fixed stop specified"
+    dyn = dynamic_exit_status(fields)
+    if tp == "None" and sl == "—":
+        exit_text = "It has no fixed take-profit or stop specified"
+    elif tp == "no fixed take-profit":
+        exit_text = f"It uses no fixed take-profit with a {sl}"
+    elif sl == "no fixed stop specified":
+        exit_text = f"It targets {tp} with no fixed stop specified"
+    else:
+        exit_text = f"It targets {tp} with a {sl}"
+    return f"{exit_text}; dynamic exits: {friendly_text(dyn)}."
+
+
+def _safety_phrase(context: str | None) -> str:
+    c = str(context or "").lower()
+    if c == "backtest":
+        return "Backtests are local historical replay only; broker execution and order preview remain deferred."
+    if c in ("portfolio", "stats"):
+        return "This is local paper accounting only; broker execution and order preview remain deferred."
+    return "Broker execution and order preview remain deferred."
+
+
+def strategy_synopsis(profile: Any, context: str | None = None) -> str:
+    """Deterministic 3–5 sentence strategy narrative from profile fields.
+
+    Accepts a StrategyProfile, editable profile dict, or partial summary. Never
+    calls AI/API services and never changes strategy/selector/risk behavior.
+    """
+    f = _profile_dict(profile)
+    if not f:
+        return "No active strategy selected. Open Run Strategy to choose one."
+    name = friendly_text(_display_name(f))
+    symbol = normalize_symbol(f.get("symbol") or DEFAULT_SYMBOL)
+    first = (f"{name} scans the {_threshold_phrase(f)} for {symbol} {_entry_phrase(f)}, "
+             f"targeting {_dte_phrase(f)} {_strategy_type_label(f)} setups.")
+    kind = _profile_kind_phrase(f)
+    last = f"This is {_article(kind)} {kind}. {_safety_phrase(context)}"
+    return " ".join((
+        first,
+        _side_synopsis(f),
+        _selector_phrase(f),
+        _exit_phrase(f),
+        last,
+    ))
+
+
+def strategy_mechanics_bullets(profile: Any) -> list[str]:
+    """Short deterministic bullets for compact profile panels."""
+    f = _profile_dict(profile)
+    if not f:
+        return ["No active strategy selected."]
+    return [
+        f"Looks at: {normalize_symbol(f.get('symbol') or DEFAULT_SYMBOL)} "
+        f"{_dte_phrase(f)} {_threshold_phrase(f)}.",
+        f"When: {_entry_phrase(f)}.",
+        f"Sides: {friendly_enum_label(side_policy_display(f))}.",
+        f"Selector: {friendly_enum_label(selector_to_style(str(f.get('daily_selector') or 'score_best_valid')))}.",
+        f"Exits: {_exit_phrase(f).removeprefix('It ').rstrip('.')}.",
+        "Safety: local paper/backtest only; no broker execution.",
+    ]
+
+
+def strategy_one_line(profile: Any) -> str:
+    """One-line strategy context for profile lists."""
+    f = _profile_dict(profile)
+    if not f:
+        return "No strategy context available."
+    return (
+        f"{friendly_text(_display_name(f))}: {threshold_display(f)} · "
+        f"{_entry_phrase(f)} · {friendly_enum_label(side_policy_display(f))} · "
+        f"{friendly_enum_label(selector_to_style(str(f.get('daily_selector') or 'score_best_valid')))}"
+    )
+
+
+def multi_strategy_synopsis(profiles: list[Any], *, context: str | None = None,
+                            limit: int = 6) -> str:
+    """Concise deterministic narrative when a run includes multiple profiles."""
+    rows = [_profile_dict(p) for p in profiles if _profile_dict(p)]
+    if not rows:
+        return "No strategy profiles selected."
+    count = len(rows)
+    names = "; ".join(strategy_one_line(r) for r in rows[:limit])
+    tail = f" plus {count - limit} more" if count > limit else ""
+    safety = _safety_phrase(context)
+    return f"{count} profiles included: {names}{tail}. {safety}"
+
+
+def _fmt_money_run(v: Any) -> str:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    return f"-${abs(x):,.2f}" if x < 0 else f"${x:,.2f}"
+
+
+def _fmt_pct_run(v: Any) -> str:
+    try:
+        return f"{float(v):.2f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def backtest_run_narrative(
+    *,
+    run_config: dict[str, Any] | None = None,
+    metrics: dict[str, Any] | None = None,
+    explainability: dict[str, Any] | None = None,
+) -> str:
+    """Deterministic plain-English summary for a loaded backtest result."""
+    rc = run_config or {}
+    m = metrics or {}
+    ex = explainability or {}
+    counters = rc.get("counters") if isinstance(rc.get("counters"), dict) else {}
+    symbol = normalize_symbol(rc.get("symbol") or DEFAULT_SYMBOL)
+    profiles = rc.get("profiles") or []
+    profile_text = ", ".join(friendly_enum_label(p) for p in profiles) or "selected profiles"
+    dte = rc.get("dte")
+    dte_text = str(dte) if isinstance(dte, str) and dte else _dte_phrase({"target_dte": dte})
+    days = counters.get("dates_evaluated") or rc.get("latest_days") or "the selected"
+    contracts = m.get("contracts") or rc.get("contracts") or 1
+    start_balance = m.get("starting_balance") or rc.get("starting_balance")
+    candidates = counters.get("candidates") or len(rc.get("candidates") or [])
+    trades = m.get("total_trades", counters.get("selected_trades", 0))
+    pnl = m.get("total_pnl_dollars")
+    ending = m.get("ending_balance")
+    top = ""
+    top_reasons = ex.get("top_reasons") if isinstance(ex.get("top_reasons"), list) else []
+    if top_reasons:
+        top = str(top_reasons[0].get("reason") or "")
+    elif ex.get("summary"):
+        top = str(ex.get("summary"))
+    first = (
+        f"This {symbol} backtest ran {profile_text} over {days} {dte_text} sessions "
+        f"with {contracts} contract{'s' if int(float(contracts or 1)) != 1 else ''} "
+        f"and a {_fmt_money_run(start_balance)} starting balance."
+    )
+    if int(float(trades or 0)) <= 0:
+        second = f"No trades were selected from {candidates} candidates."
+        if top:
+            second += f" The most common blocker was {friendly_enum_label(top)}."
+    else:
+        second = (
+            f"It generated {candidates} candidates and selected {trades} trades, "
+            f"ending at {_fmt_money_run(ending)} with total P&L {_fmt_money_run(pnl)} "
+            f"and return {_fmt_pct_run(m.get('return_pct'))}."
+        )
+    third = (
+        f"Max drawdown was {_fmt_pct_run(m.get('max_drawdown_pct'))}, win rate was "
+        f"{_fmt_pct_run((float(m.get('win_rate')) * 100.0) if isinstance(m.get('win_rate'), (int, float)) else None)}, "
+        f"and TP/SL/EOD exits were {m.get('tp_count', 0)}/{m.get('sl_count', 0)}/{m.get('eod_count', 0)}."
+    )
+    fourth = f"Trade count may be low because of {friendly_enum_label(top)}." if top else (
+        "Trade count may be low when entry snapshots, pricing, risk approval, or selector eligibility are unavailable."
+    )
+    return " ".join((first, second, third, fourth))
+
+
 # ── Phase 9F — sandbox-aware symbol-health view ──────────────────────────────
 
 def is_sandbox(structure_provider: str | None, quote_provider: str | None) -> bool:

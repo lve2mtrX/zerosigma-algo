@@ -404,6 +404,7 @@ def render_symbol_health() -> None:
             st.caption("🌙 After-hours / stale quote mode — " + om.stale_quote_mode_banner(SYMBOL))
     elif view["reason"]:
         st.warning(view["reason"])
+    _render_strategy_synopsis(_active_profile, context="live")
     # Phase 10C — after-hours DTE preview roll (0DTE → 1DTE after the close).
     if AFTER_HOURS_PREVIEW and not sandbox:
         st.info("🌙 " + om.after_hours_preview_banner(SYMBOL, _PROFILE_DTE))
@@ -1125,6 +1126,32 @@ def _render_profile_info_card(info: dict, *, simple: bool = False) -> None:
             "the PAPER_* env values (per-profile wiring deferred).")
 
 
+def _load_profile_context(profile_id: object) -> dict | None:
+    pid = str(profile_id or "").strip()
+    if not pid or pid in ("(none)", "(no profiles)", "all-main", "all", "—"):
+        return None
+    d, errs = pb.load_dict_for_edit(pid)
+    return d if d and not errs else None
+
+
+def _profile_contexts(profile_ids: list[str]) -> list[dict]:
+    rows: list[dict] = []
+    for pid in profile_ids:
+        d = _load_profile_context(pid)
+        if d:
+            rows.append(d)
+    return rows
+
+
+def _render_strategy_synopsis(profile: object, *, context: str) -> None:
+    st.markdown("**Strategy Synopsis**")
+    st.info(om.strategy_synopsis(profile, context=context))
+    if not simple_mode and profile:
+        with st.expander("Strategy mechanics", expanded=False):
+            for bullet in om.strategy_mechanics_bullets(profile):
+                st.markdown(f"- {bullet}")
+
+
 def render_strategy_builder() -> None:
     st.subheader("🧱 Zσ Strat Builder")
     st.info(
@@ -1161,6 +1188,7 @@ def render_strategy_builder() -> None:
     if valid_ids and sel_id in valid_ids:
         sel_dict, _serrs = pb.load_dict_for_edit(sel_id)
     if sel_dict:
+        _render_strategy_synopsis(sel_dict, context="builder")
         _render_profile_info_card(om.profile_info_fields(sel_dict), simple=simple_mode)
     with st.expander("All profiles (table)", expanded=False):
         if summaries:
@@ -1200,8 +1228,10 @@ def render_strategy_builder() -> None:
 
     base = st.session_state.get("builder_dict")
     if not base:
+        st.info("Create a strategy recipe by choosing its entry window, side policy, selector, TP, and SL.")
         st.info("Choose **Create new profile**, or pick a preset above and **Edit** / **Clone** it.")
         return
+    _render_strategy_synopsis(base, context="builder")
 
     def _show_result_and_save() -> None:
         built = st.session_state.get("builder_built")
@@ -1536,6 +1566,7 @@ def render_forward_runner() -> None:
         st.markdown(f"**Selected profile:** {_runner_label(sel_profile)}")
         _sel_runner_dict, _ = pb.load_dict_for_edit(sel_profile)
         if _sel_runner_dict:
+            _render_strategy_synopsis(_sel_runner_dict, context="run")
             with st.expander("Selected profile details", expanded=simple_mode):
                 _render_profile_info_card(
                     om.profile_info_fields(_sel_runner_dict), simple=simple_mode)
@@ -1757,13 +1788,22 @@ def render_portfolio() -> None:
                     "entry_credit", "current_mark", "unrealized_pnl", "realized_pnl",
                     "exit_reason", "ticks_held")
         _open_rows = portfolio_ledger.load_open_trades("latest")
+        _closed_rows = portfolio_ledger.load_closed_trades("latest")
+        _pf_profile_ids = set(_pf_man.get("profiles") or [])
+        _pf_profile_ids.update(str(r.get("profile_id")) for r in (_open_rows + _closed_rows)
+                               if r.get("profile_id"))
+        _pf_profile_rows = _profile_contexts(om.order_profiles_for_dropdown(list(_pf_profile_ids)))
+        if _pf_profile_rows:
+            with st.expander("Strategy context", expanded=False):
+                st.info(om.multi_strategy_synopsis(_pf_profile_rows, context="portfolio"))
+                for _p in _pf_profile_rows:
+                    st.caption(om.strategy_one_line(_p))
         st.markdown("**Open paper trades & unrealized P&L**")
         if _open_rows:
             st.dataframe([{k: r.get(k) for k in _pf_cols} for r in _open_rows],
                          use_container_width=True, hide_index=True)
         else:
             st.caption("No open paper trades. Start a portfolio forward run or wait for a selected signal.")
-        _closed_rows = portfolio_ledger.load_closed_trades("latest")
         if _closed_rows:
             st.markdown("**Closed paper trades**")
             st.dataframe([{k: r.get(k) for k in _pf_cols} for r in _closed_rows],
@@ -1953,6 +1993,18 @@ def render_backtests() -> None:
         "Strategy profile", _bt_profiles, index=0, format_func=_bt_label_fn, key="bt_profile",
         help="'all-main' = 4 primary presets · 'all' adds controls · or pick a saved "
              "profile (incl. your custom ones).")
+    if bt_profile in ("all-main", "all"):
+        from src.backtesting.replay_runner import resolve_profiles as _resolve_bt_profiles
+        _bt_profile_rows = _profile_contexts(_resolve_bt_profiles(bt_profile))
+        st.markdown("**Strategy Synopsis**")
+        st.info(om.multi_strategy_synopsis(_bt_profile_rows, context="backtest"))
+        with st.expander("Profiles included", expanded=False):
+            for _p in _bt_profile_rows:
+                st.caption(om.strategy_one_line(_p))
+    else:
+        _bt_profile_row = _load_profile_context(bt_profile)
+        if _bt_profile_row:
+            _render_strategy_synopsis(_bt_profile_row, context="backtest")
     _avail = ch.backtest_data_availability(bt_symbol)
     _dte_opts = [0] + ([1] if _avail["1DTE"]["available"] else [])
     bt_dte = int(c1[2].selectbox(
@@ -2131,6 +2183,9 @@ def render_backtests() -> None:
                      f"{_m.get('tp_count', 0)} / {_m.get('sl_count', 0)} / {_m.get('eod_count', 0)}")
 
         _explain = _results.get("explainability") or {}
+        st.markdown("**Run Summary**")
+        st.info(om.backtest_run_narrative(
+            run_config=_rcfg, metrics=_m, explainability=_explain))
         if _explain.get("summary"):
             st.info(_explain["summary"])
 
@@ -2282,6 +2337,10 @@ def render_logs() -> None:
     lb[3].metric("Total P&L", ch.fmt_money(latest["total_pnl"]))
     if not latest["has_data"]:
         st.caption("No runs yet — start a strategy test in **Zσ Strat Tester**.")
+    else:
+        _latest_profile_ctx = _load_profile_context(_lman.get("profile_id") or latest["profile"])
+        if _latest_profile_ctx:
+            _render_strategy_synopsis(_latest_profile_ctx, context="stats")
 
     # ── B. Historical strategy statistics (flat files, no database) ──
     st.markdown("**Historical strategy statistics**")
@@ -2356,6 +2415,11 @@ def render_logs() -> None:
         if _byprof:
             st.caption("P&L by profile")
             st.dataframe(_byprof, use_container_width=True, hide_index=True)
+            _hist_profiles = _profile_contexts([
+                str(r.get("profile_id")) for r in _byprof if r.get("profile_id")
+            ])
+            if _hist_profiles:
+                st.caption(om.multi_strategy_synopsis(_hist_profiles, context="stats"))
         _exits = ch.exit_reason_counts(_all_closed)
         if _exits:
             st.caption("Exit reasons")
@@ -2451,6 +2515,14 @@ def render_settings() -> None:
         "These settings affect the current local Streamlit session and paper-lifecycle "
         "defaults. Saved strategy profiles are only changed from **Zσ Strat Builder**."
     )
+    if _active_profile is not None:
+        _settings_profile_name = om.friendly_text(
+            getattr(_active_profile, "profile_name", None)
+            or getattr(_active_profile, "profile_id", "—"))
+        st.caption(
+            "These settings affect local paper lifecycle and sizing; the selected strategy "
+            f"remains: {_settings_profile_name}."
+        )
     with st.form("session_controls"):
         c1, c2, c3 = st.columns(3)
         starting_balance = c1.number_input(
