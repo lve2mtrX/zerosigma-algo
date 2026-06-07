@@ -3053,3 +3053,23 @@ to trader-facing copy. Validation passed with `.venv`: `pytest -q` (827), `ruff 
   corridor/WDS tables, and expandable trade logs by profile.
 - Deferred: SPY/QQQ threshold calibration, risk-based sizing, selector-weight
   changes, broker execution, order preview, and order placement.
+
+---
+
+## 2026-06-07 — Phase 10F: dynamic selector attribution + control edge audit
+
+- Added research-only dynamic selected-side attribution. Each selected dynamic
+  trade records its best opposite candidate, both selector component sets,
+  choice reason, and a mechanically simulated opposite outcome using the same
+  historical TP/SL lifecycle. The selected trade itself is unchanged.
+- Added selected-side split, selected-vs-opposite opportunity cost, call-control
+  edge dimensions, deterministic dynamic failure taxonomy, attribution narrative,
+  and research-only recommendation outputs.
+- Added Backtests → Compare Strategies → “Why did dynamic underperform?” with
+  side metrics, dynamic-vs-control P&L, opposite availability, failure buckets,
+  call-control edge audit, and recommendation notes.
+- Updated research labels: positive controls are benchmark/comparison only;
+  underperforming dynamics remain watchlist/needs-tuning. Positive control
+  results are not production approval.
+- No strategy logic, selector math, risk math, quote validation, broker path,
+  order preview, or execution behavior changed.

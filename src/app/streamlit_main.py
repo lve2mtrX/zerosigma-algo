@@ -2191,6 +2191,63 @@ def render_backtest_comparison() -> None:
                     st.dataframe(rows, width="stretch", hide_index=True)
                 else:
                     st.caption("More data will appear after comparison runs.")
+        st.markdown("### Why did dynamic underperform?")
+        if latest.get("attribution_narrative"):
+            st.info(latest["attribution_narrative"])
+        else:
+            st.info("Insufficient attribution data. Need opposite-side simulation.")
+        if latest.get("control_benchmark_note"):
+            st.caption(latest["control_benchmark_note"])
+        side_rows = latest.get("selected_side_summary") or []
+        side_lookup = {str(row.get("selected_side")): row for row in side_rows}
+        call_row = side_lookup.get("CALL_CREDIT", {})
+        put_row = side_lookup.get("PUT_CREDIT", {})
+        groups = {
+            str(row.get("profile_group")): row
+            for row in latest.get("dynamic_vs_control") or []
+        }
+        attribution_cards = st.columns(4)
+        attribution_cards[0].metric(
+            "Dynamic Call Credit",
+            f"{int(_number(call_row, 'trades'))} trades",
+            ch.fmt_money(call_row.get("total_pnl_dollars")),
+        )
+        attribution_cards[1].metric(
+            "Dynamic Put Credit",
+            f"{int(_number(put_row, 'trades'))} trades",
+            ch.fmt_money(put_row.get("total_pnl_dollars")),
+        )
+        attribution_cards[2].metric(
+            "Dynamic vs Controls P&L",
+            ch.fmt_money(groups.get("dynamic", {}).get("total_pnl_dollars")),
+            "Controls " + ch.fmt_money(groups.get("control", {}).get("total_pnl_dollars")),
+        )
+        total_selected = sum(_number(row, "trades") for row in side_rows)
+        opposite_available = sum(_number(row, "opposite_available") for row in side_rows)
+        attribution_cards[3].metric(
+            "Best Opposite Available",
+            (
+                f"{opposite_available / total_selected * 100:.0f}%"
+                if total_selected else "—"
+            ),
+            f"{int(opposite_available)} of {int(total_selected)} selections",
+        )
+        attribution_tabs = st.tabs([
+            "Selected Side Split", "Top Failure Buckets",
+            "Call-Control Edge", "Research Recommendations",
+        ])
+        attribution_tables = [
+            side_rows,
+            latest.get("dynamic_failure_summary") or [],
+            latest.get("call_control_edge_summary") or [],
+            latest.get("research_recommendations") or [],
+        ]
+        for tab, rows in zip(attribution_tabs, attribution_tables, strict=False):
+            with tab:
+                if rows:
+                    st.dataframe(rows, width="stretch", hide_index=True)
+                else:
+                    st.caption("More data will appear after attribution runs.")
         st.markdown("**Trade Logs by Profile**")
         by_profile: dict[str, list[dict]] = {}
         for row in latest["trade_rows"]:

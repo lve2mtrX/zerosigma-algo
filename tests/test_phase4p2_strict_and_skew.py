@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib
 import sys
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from src.app.session_state import SessionConfig
 from src.providers.quotes.types import OptionChainSnapshot
@@ -28,15 +29,35 @@ from src.strategies.base import Candidate
 
 rs = importlib.import_module("scripts.run_scanner")
 
+_ET = ZoneInfo("America/New_York")
+_EXACT_MATCH_NOW = datetime(2026, 6, 2, 11, 0, tzinfo=_ET)  # Tuesday
+_WEEKEND_NOW = datetime(2026, 6, 6, 11, 0, tzinfo=_ET)  # Saturday
+
 
 # ── strict target-DTE through the scanner ────────────────────────────────
 
-def _run(monkeypatch, tmp_path, argv: list[str], capsys=None) -> tuple[int, str]:
+def _run(
+    monkeypatch,
+    tmp_path,
+    argv: list[str],
+    capsys=None,
+    *,
+    now: datetime = _EXACT_MATCH_NOW,
+) -> tuple[int, str]:
+    from src.providers.quotes import mock_provider
+    from src.providers.structure import stub
+    from src.utils import time as time_utils
+
     monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
     # Make the strict knobs deterministic: clear any ambient env so the CLI
     # flag (or its absence) is the only signal.
     monkeypatch.delenv("STRICT_TARGET_DTE", raising=False)
     monkeypatch.delenv("TARGET_DTE", raising=False)
+    # The scanner, stub structure provider, and mock quote provider each import
+    # now_et directly. Freeze all three so exact/fallback behavior never depends
+    # on the machine's current weekday.
+    for module in (time_utils, stub, mock_provider):
+        monkeypatch.setattr(module, "now_et", lambda: now)
     monkeypatch.setattr(sys, "argv", argv)
     importlib.reload(rs)
     rc = rs.main()
@@ -93,8 +114,8 @@ def test_strict_on_blocks_fallback_cleanly(monkeypatch, tmp_path, capsys):
 
 
 def test_strict_on_exact_match_today_passes(monkeypatch, tmp_path, capsys):
-    """--target-dte 0 (today) IS in the stub chain → source='today', NOT a
-    fallback → strict mode is a no-op and a trade can still be selected."""
+    """On a fixed trading day, target DTE 0 exactly matches the stub expiry,
+    so strict mode is a no-op and a trade can still be selected."""
     rc, out = _run(monkeypatch, tmp_path, [
         "scripts.run_scanner",
         "--strategy", "vertical_wing_v1",
@@ -111,6 +132,28 @@ def test_strict_on_exact_match_today_passes(monkeypatch, tmp_path, capsys):
     assert "strict_target_dte_passed=True" in out
     # Exact-match strict does not force NO_TRADE; the mock smoke chain trades.
     assert "decision=TRADE_CALL_CREDIT" in out
+
+
+def test_strict_on_weekend_blocks_fallback_when_exact_expiry_missing(
+    monkeypatch, tmp_path, capsys
+):
+    """On a fixed weekend, target DTE 0 resolves to the next trading day.
+    The weekend-dated stub expiry is not an exact match, so strict mode blocks."""
+    rc, out = _run(monkeypatch, tmp_path, [
+        "scripts.run_scanner",
+        "--strategy", "vertical_wing_v1",
+        "--quote-provider", "mock",
+        "--structure-provider", "stub",
+        "--target-dte", "0",
+        "--strict-target-dte",
+        "--print-candidates",
+    ], capsys, now=_WEEKEND_NOW)
+    assert rc == 0
+    assert "Traceback" not in out
+    assert "strict_target_dte_unavailable" in out
+    assert "strict_target_dte=True" in out
+    assert "strict_target_dte_passed=False" in out
+    assert "decision=NO_TRADE" in out
 
 
 def test_help_lists_strict_target_dte_flag(monkeypatch):

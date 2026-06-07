@@ -1522,6 +1522,13 @@ def read_backtest_comparison(results_dir: Any) -> dict[str, Any]:
         "dynamic_vs_control": [],
         "by_corridor": [],
         "by_wds_tier": [],
+        "selected_side_summary": [],
+        "dynamic_vs_best_opposite": [],
+        "dynamic_failure_summary": [],
+        "call_control_edge_summary": [],
+        "research_recommendations": [],
+        "attribution_narrative": "",
+        "control_benchmark_note": "",
         "trades": [],
         "trade_rows": [],
         "narrative": "",
@@ -1545,6 +1552,19 @@ def read_backtest_comparison(results_dir: Any) -> dict[str, Any]:
     out["dynamic_vs_control"] = _read_csv_rows(directory / "dynamic_vs_control.csv")
     out["by_corridor"] = _read_csv_rows(directory / "by_corridor.csv")
     out["by_wds_tier"] = _read_csv_rows(directory / "by_wds_tier.csv")
+    out["selected_side_summary"] = _read_csv_rows(directory / "selected_side_summary.csv")
+    out["dynamic_vs_best_opposite"] = _read_csv_rows(
+        directory / "dynamic_vs_best_opposite.csv"
+    )
+    out["dynamic_failure_summary"] = _read_csv_rows(
+        directory / "dynamic_failure_summary.csv"
+    )
+    out["call_control_edge_summary"] = _read_csv_rows(
+        directory / "call_control_edge_summary.csv"
+    )
+    out["research_recommendations"] = _read_csv_rows(
+        directory / "research_recommendations.csv"
+    )
     out["trades"] = _read_csv_rows(directory / "trades.csv")
     out["trade_rows"] = backtest_trade_display_rows(out["trades"])
     narrative_path = directory / "narrative_summary.md"
@@ -1555,6 +1575,14 @@ def read_backtest_comparison(results_dir: Any) -> dict[str, Any]:
             ).strip()
         except OSError:
             out["narrative"] = ""
+    attribution_path = directory / "attribution_summary.json"
+    if attribution_path.is_file():
+        try:
+            attribution = _json.loads(attribution_path.read_text(encoding="utf-8"))
+            out["attribution_narrative"] = attribution.get("narrative") or ""
+            out["control_benchmark_note"] = attribution.get("control_benchmark_note") or ""
+        except (OSError, ValueError):
+            pass
     out["available"] = True
     return out
 

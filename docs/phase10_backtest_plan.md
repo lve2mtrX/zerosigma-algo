@@ -481,3 +481,35 @@ formula in `run_config.json`. Promotion labels are deterministic:
 
 These are research labels only. No strategy, selector, risk, quote-validation, order
 preview, broker, or execution behavior changes.
+
+## 18. Phase 10F — dynamic selector attribution + control edge audit
+
+Phase 10F explains Phase 10E's finding that dynamic profiles underperformed their
+call-only controls. It remains analysis-only: the selected trade is unchanged, and no
+recommendation feeds back into profile configuration or selector math.
+
+For every selected dynamic trade, the replay runner records the selected side and best
+available opposite-side candidate. The opposite candidate is mechanically simulated with
+the same profile TP/SL settings and historical lifecycle simulator, but remains explicitly
+hypothetical. Outputs:
+
+- `dynamic_side_attribution.csv`, `selected_side_summary.csv`
+- `dynamic_vs_best_opposite.csv`
+- `call_control_edge_summary.csv`, `call_control_winners_losers.csv`
+- `dynamic_failure_taxonomy.csv`, `dynamic_failure_summary.csv`
+- `research_recommendations.csv`, `attribution_summary.{json,md}`
+
+The call-control edge audit summarizes threshold, entry window, credit and distance
+buckets, WDS tier, corridor, gamma context, exit reason, day of week, and entry-time
+bucket. Failure taxonomy is deterministic and intended to focus the next experiment, not
+declare causality.
+
+Promotion wording is deliberately conservative: positive controls are
+`Control Positive / Comparison Only`; underperforming dynamics are
+`Watchlist / Needs Tuning`. A positive control is the current benchmark, not production
+approval.
+
+Backtests → Compare Strategies adds **Why did dynamic underperform?** with selected-side
+split, side P&L/win rate/average P&L, dynamic-vs-control P&L, opposite availability,
+failure buckets, call-control edge table, deterministic narrative, and research-only
+recommendations.

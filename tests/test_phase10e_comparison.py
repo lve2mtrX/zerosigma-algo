@@ -121,10 +121,12 @@ def test_ranking_score_and_promotion_labels_are_deterministic():
     assert comp.promotion_label({**row, "total_trades": 3}, profile_kind="dynamic")[0] == (
         "Needs More Data"
     )
-    assert comp.promotion_label(row, profile_kind="control")[0] == "Avoid / Control Only"
+    assert comp.promotion_label(row, profile_kind="control")[0] == (
+        "Control Positive / Comparison Only"
+    )
     assert comp.promotion_label(
         {**row, "expectancy_dollars": -1}, profile_kind="dynamic"
-    )[0] == "Avoid / Control Only"
+    )[0] == "Watchlist / Needs Tuning"
 
 
 def test_comparison_reports_include_rankings_breakdowns_and_narrative():

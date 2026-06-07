@@ -12,6 +12,7 @@ reports (``replay_runner`` / ``lifecycle_sim`` / ``reports`` / ``replay_provider
 """
 
 from src.backtesting import (
+    attribution,
     comparison,
     lifecycle_sim,
     mappers,
@@ -24,6 +25,7 @@ from src.backtesting import (
 )
 
 __all__ = [
+    "attribution",
     "comparison",
     "lifecycle_sim",
     "mappers",

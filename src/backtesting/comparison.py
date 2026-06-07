@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from src.backtesting import attribution as attribution_reports
 from src.backtesting import mappers as M
 from src.backtesting import reports
 from src.backtesting.replay_runner import CONTROL_PROFILES, PRIMARY_PROFILES
@@ -158,11 +159,24 @@ def promotion_label(metric_row: dict[str, Any], *, profile_kind: str = "") -> tu
     expectancy = _f(metric_row.get("expectancy_dollars"))
     pf = _f(metric_row.get("profit_factor"))
     dd_pct = _f(metric_row.get("max_drawdown_pct"))
-    if kind in {"control", "observe"}:
-        return "Avoid / Control Only", f"{kind.title()} profile retained for comparison only."
+    if kind == "control":
+        if trades >= MIN_PROMOTION_TRADES and expectancy > 0 and pf > 1.0:
+            return (
+                "Control Positive / Comparison Only",
+                "Positive control result does not mean production approval; it means the "
+                "control is the current benchmark.",
+            )
+        return "Control / Comparison Only", "Control profile retained for comparison only."
+    if kind == "observe":
+        return "Control / Comparison Only", "Observe-only profile retained for research."
     if trades < MIN_PROMOTION_TRADES:
         return "Needs More Data", f"{trades} trades is below the {MIN_PROMOTION_TRADES}-trade floor."
     if expectancy <= 0 or pf <= 1.0 or dd_pct > AVOID_MAX_DRAWDOWN_PCT:
+        if kind == "dynamic":
+            return (
+                "Watchlist / Needs Tuning",
+                "Dynamic profile needs attribution-led tuning before another promotion review.",
+            )
         return (
             "Avoid / Control Only",
             "Negative expectancy, profit factor at or below 1, or excessive drawdown.",
@@ -329,6 +343,7 @@ def build_comparison_reports(result: Any) -> dict[str, Any]:
     summary = profile_summary(result)
     rankings = profile_rankings(result)
     narrative = comparison_narrative(result, rankings)
+    attribution = attribution_reports.build_attribution_reports(result)
     return {
         "comparison_summary": summary,
         "profile_rankings": rankings,
@@ -342,6 +357,7 @@ def build_comparison_reports(result: Any) -> dict[str, Any]:
         "trades": result.trades,
         "candidates": result.candidates,
         "narrative": narrative,
+        **attribution,
     }
 
 
@@ -393,6 +409,15 @@ def write_comparison_reports(
             "avoid_max_drawdown_pct": AVOID_MAX_DRAWDOWN_PCT,
         },
         "promotion_counts": dict(promotions),
+        "attribution": {
+            "dynamic_selected_trades": len(tables["dynamic_side_attribution"]),
+            "opposite_outcomes_simulated": sum(
+                bool(row.get("opposite_outcome_simulated"))
+                for row in tables["dynamic_side_attribution"]
+            ),
+            "failure_rows": len(tables["dynamic_failure_taxonomy"]),
+            "research_only": True,
+        },
         "counters": result.counters,
         "no_broker": True,
         "no_execution": True,
@@ -401,7 +426,10 @@ def write_comparison_reports(
     names = (
         "comparison_summary", "profile_rankings", "dynamic_vs_control", "by_profile",
         "by_side", "by_exit_reason", "by_corridor", "by_wds_tier", "by_entry_window",
-        "trades", "candidates",
+        "trades", "candidates", "dynamic_side_attribution", "selected_side_summary",
+        "dynamic_vs_best_opposite", "call_control_edge_summary",
+        "call_control_winners_losers", "dynamic_failure_taxonomy",
+        "dynamic_failure_summary", "research_recommendations",
     )
     written: list[Path] = []
     for directory in out_dirs:
@@ -413,6 +441,22 @@ def write_comparison_reports(
         )
         (directory / "narrative_summary.md").write_text(
             "# Backtest Comparison Summary\n\n" + tables["narrative"] + "\n",
+            encoding="utf-8",
+        )
+        (directory / "attribution_summary.json").write_text(
+            json.dumps({
+                "narrative": tables["attribution_narrative"],
+                "control_benchmark_note": tables["control_benchmark_note"],
+                "research_recommendations": tables["research_recommendations"],
+            }, indent=2, default=str),
+            encoding="utf-8",
+        )
+        (directory / "attribution_summary.md").write_text(
+            "# Why did dynamic underperform?\n\n"
+            + tables["attribution_narrative"]
+            + "\n\n"
+            + tables["control_benchmark_note"]
+            + "\n",
             encoding="utf-8",
         )
         written.append(directory)

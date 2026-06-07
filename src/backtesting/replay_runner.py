@@ -81,6 +81,7 @@ class BacktestResult:
     run_config: dict[str, Any]
     candidates: list[dict[str, Any]] = field(default_factory=list)
     trades: list[dict[str, Any]] = field(default_factory=list)
+    dynamic_side_attribution: list[dict[str, Any]] = field(default_factory=list)
     no_trade_reasons: list[dict[str, Any]] = field(default_factory=list)
     dates_evaluated: list[str] = field(default_factory=list)
     counters: dict[str, int] = field(default_factory=dict)
@@ -184,6 +185,21 @@ def _top_blocker(rows: list[dict[str, Any]]) -> str:
     return Counter(vals).most_common(1)[0][0] if vals else ""
 
 
+def _gamma_relationship(spot: Any, primary: Any, secondary: Any) -> str:
+    try:
+        spot_f = float(spot)
+        values = sorted(float(v) for v in (primary, secondary) if v not in (None, ""))
+    except (TypeError, ValueError):
+        return "unavailable"
+    if not values:
+        return "unavailable"
+    if spot_f < values[0]:
+        return "spot_below_gamma"
+    if spot_f > values[-1]:
+        return "spot_above_gamma"
+    return "spot_between_gamma"
+
+
 def _no_trade_record(
     *,
     date: str,
@@ -268,7 +284,8 @@ def _evaluate(
     timestamps = L.available_timestamps(rows)
     sel = M.select_snapshot(timestamps, settings.entry_target)
     if not sel["ok"]:
-        return {"candidates": [], "trades": [], "status": "skipped",
+        return {"candidates": [], "trades": [], "dynamic_side_attribution": [],
+                "status": "skipped",
                 "skip_reason": sel["reason"],
                 "no_trade": _no_trade_record(
                     date=date, symbol=symbol, dte_label=dte_label,
@@ -328,17 +345,55 @@ def _evaluate(
         "dominant_wing_side": (wd.get("dominant_wing_side") if wd.get("wds_active")
                                else wd.get("raw_dominant_side")),
         "primary_gamma": gamma.get("primary"), "secondary_gamma": gamma.get("secondary"),
+        "gamma_regime": structure.exposures.gamma_regime,
+        "gamma_relationship": _gamma_relationship(
+            structure.spot, gamma.get("primary"), gamma.get("secondary")
+        ),
     }
 
     cand_records: list[dict[str, Any]] = []
-    trade_records: list[dict[str, Any]] = []
     for i, c in enumerate(candidates):
         meta = sel_result.per_row[i]
         selected = bool(meta["selected_trade"])
         rec = _candidate_record(base, c, settings, meta, readinesses[i], selected)
         cand_records.append(rec)
-        if selected:
-            trade_records.append(_trade_record(rec, c, settings, day_index, ts, contracts))
+
+    trade_records: list[dict[str, Any]] = []
+    attribution_records: list[dict[str, Any]] = []
+    for i in sel_result.selected_indices:
+        selected_trade = _trade_record(
+            cand_records[i], candidates[i], settings, day_index, ts, contracts
+        )
+        trade_records.append(selected_trade)
+        if settings.preset_kind == "dynamic":
+            opposite_indices = [
+                j for j, candidate in enumerate(candidates)
+                if j != i and candidate.side != candidates[i].side
+            ]
+            opposite_index = max(
+                opposite_indices,
+                key=lambda j: (
+                    float(sel_result.per_row[j].get("selector_score") or -1e9),
+                    float(candidates[j].score or 0.0),
+                    float(candidates[j].credit or 0.0),
+                    abs(float(candidates[j].distance_from_spot or 0.0)),
+                ),
+                default=None,
+            )
+            opposite_trade = None
+            if opposite_index is not None:
+                opposite_trade = _trade_record(
+                    cand_records[opposite_index], candidates[opposite_index],
+                    settings, day_index, ts, contracts,
+                )
+            attribution_records.append(_dynamic_attribution_record(
+                selected_trade=selected_trade,
+                opposite_candidate=(
+                    cand_records[opposite_index] if opposite_index is not None else None
+                ),
+                opposite_trade=opposite_trade,
+                selector_explanation=sel_result.selector_explanation,
+            ))
 
     no_trade = None
     if not sel_result.selected_indices:
@@ -349,6 +404,7 @@ def _evaluate(
             base=base, candidates=cand_records,
         )
     return {"candidates": cand_records, "trades": trade_records,
+            "dynamic_side_attribution": attribution_records,
             "no_trade": no_trade, "status": "ok", "skip_reason": ""}
 
 
@@ -441,6 +497,92 @@ def _trade_record(rec, c, settings, day_index, entry_ts, contracts) -> dict[str,
         "settlement_method": exit_res.settlement_method,
     })
     return trade
+
+
+def _outcome(pnl: Any) -> str:
+    try:
+        value = float(pnl)
+    except (TypeError, ValueError):
+        return "skipped"
+    if value > 0:
+        return "win"
+    if value < 0:
+        return "loss"
+    return "breakeven"
+
+
+def _dynamic_attribution_record(
+    *,
+    selected_trade: dict[str, Any],
+    opposite_candidate: dict[str, Any] | None,
+    opposite_trade: dict[str, Any] | None,
+    selector_explanation: str | None,
+) -> dict[str, Any]:
+    """Research-only selected-vs-opposite record; never affects selection."""
+    selected_pnl = selected_trade.get("pnl_dollars")
+    opposite_pnl = opposite_trade.get("pnl_dollars") if opposite_trade else None
+    try:
+        pnl_delta = round(float(selected_pnl) - float(opposite_pnl), 2)
+        opposite_better = float(opposite_pnl) > float(selected_pnl)
+    except (TypeError, ValueError):
+        pnl_delta = None
+        opposite_better = None
+    opposite_blockers = str((opposite_candidate or {}).get("selector_blockers") or "")
+    opposite_eligible = bool(
+        opposite_candidate
+        and _as_bool(opposite_candidate.get("selector_eligible_base"))
+        and not opposite_blockers
+    )
+    return {
+        "date": selected_trade.get("date"),
+        "symbol": selected_trade.get("symbol"),
+        "dte": selected_trade.get("dte"),
+        "profile_id": selected_trade.get("profile_id"),
+        "entry_target": selected_trade.get("entry_target"),
+        "entry_timestamp": selected_trade.get("entry_timestamp"),
+        "threshold": selected_trade.get("threshold"),
+        "gamma_regime": selected_trade.get("gamma_regime"),
+        "gamma_relationship": selected_trade.get("gamma_relationship"),
+        "selected_side": selected_trade.get("side"),
+        "opposite_side": (opposite_candidate or {}).get("side"),
+        "selected_score": selected_trade.get("score"),
+        "opposite_score": (opposite_candidate or {}).get("score"),
+        "selected_selector_score": selected_trade.get("selector_score"),
+        "opposite_selector_score": (opposite_candidate or {}).get("selector_score"),
+        "selected_credit_points": selected_trade.get("entry_credit_points"),
+        "opposite_credit_points": (opposite_candidate or {}).get("entry_credit_points"),
+        "selected_distance_to_short": selected_trade.get("distance_from_spot_to_short"),
+        "opposite_distance_to_short": (
+            opposite_candidate or {}
+        ).get("distance_from_spot_to_short"),
+        "selected_active_wds": selected_trade.get("active_wds"),
+        "opposite_active_wds": (opposite_candidate or {}).get("active_wds"),
+        "selected_raw_wds": selected_trade.get("raw_wds"),
+        "opposite_raw_wds": (opposite_candidate or {}).get("raw_wds"),
+        "selected_wds_tier": selected_trade.get("wds_tier"),
+        "opposite_wds_tier": (opposite_candidate or {}).get("wds_tier"),
+        "selected_corridor_valid": selected_trade.get("corridor_valid"),
+        "opposite_corridor_valid": (opposite_candidate or {}).get("corridor_valid"),
+        "selected_anchor_source": selected_trade.get("anchor_source"),
+        "opposite_anchor_source": (opposite_candidate or {}).get("anchor_source"),
+        "selected_selector_score_components": selected_trade.get("selector_score_components"),
+        "opposite_selector_score_components": (
+            opposite_candidate or {}
+        ).get("selector_score_components"),
+        "selection_reason": selector_explanation or selected_trade.get("selector_reason"),
+        "opposite_available": opposite_candidate is not None,
+        "opposite_selector_eligible": opposite_eligible,
+        "opposite_selector_blockers": opposite_blockers,
+        "selected_exit_reason": selected_trade.get("exit_reason"),
+        "selected_pnl_dollars": selected_pnl,
+        "selected_outcome": _outcome(selected_pnl),
+        "opposite_exit_reason": (opposite_trade or {}).get("exit_reason"),
+        "opposite_pnl_dollars": opposite_pnl,
+        "opposite_outcome": _outcome(opposite_pnl),
+        "opposite_outcome_simulated": opposite_trade is not None,
+        "selected_minus_opposite_pnl_dollars": pnl_delta,
+        "opposite_would_have_done_better": opposite_better,
+    }
 
 
 # ── public entry point ───────────────────────────────────────────────────────
@@ -547,6 +689,7 @@ def run_backtest(
             )
             result.candidates.extend(out["candidates"])
             result.trades.extend(out["trades"])
+            result.dynamic_side_attribution.extend(out["dynamic_side_attribution"])
             if out["status"] == "ok" and out["candidates"]:
                 valid_entries += 1
             if out["no_trade"] is not None:
@@ -559,6 +702,7 @@ def run_backtest(
         "valid_entry_snapshots": valid_entries,
         "candidates": len(result.candidates),
         "selected_trades": len(result.trades),
+        "dynamic_attribution_rows": len(result.dynamic_side_attribution),
         "skipped_candidates": sum(1 for c in result.candidates if not c["selected_trade"]),
         "no_trade_rows": len(result.no_trade_reasons),
     }
