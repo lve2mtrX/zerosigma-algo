@@ -1587,6 +1587,55 @@ def read_backtest_comparison(results_dir: Any) -> dict[str, Any]:
     return out
 
 
+def read_backtest_optimization(results_dir: Any) -> dict[str, Any]:
+    """Read Phase 10G optimization outputs for the Backtests Optimization Lab."""
+    import json as _json
+
+    out: dict[str, Any] = {
+        "available": False,
+        "reason": "",
+        "results_dir": str(results_dir),
+        "run_config": {},
+        "rankings": [],
+        "promotion_candidates": [],
+        "overfit_warnings": [],
+        "train_results": [],
+        "validation_results": [],
+        "holdout_results": [],
+        "narrative": "",
+    }
+    try:
+        directory = Path(results_dir)
+    except (TypeError, ValueError):
+        out["reason"] = "No optimization results directory configured."
+        return out
+    rankings_path = directory / "rankings.csv"
+    if not rankings_path.is_file():
+        out["reason"] = "No optimization results yet. Run an optimization above."
+        return out
+    config_path = directory / "run_config.json"
+    if config_path.is_file():
+        try:
+            out["run_config"] = _json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            out["run_config"] = {}
+    for key in (
+        "rankings", "promotion_candidates", "overfit_warnings",
+        "train_results", "validation_results", "holdout_results",
+    ):
+        out[key] = _read_csv_rows(directory / f"{key}.csv")
+    narrative_path = directory / "narrative_summary.md"
+    if narrative_path.is_file():
+        try:
+            out["narrative"] = narrative_path.read_text(encoding="utf-8").replace(
+                "# Optimization Research Summary", ""
+            ).strip()
+        except OSError:
+            out["narrative"] = ""
+    out["available"] = True
+    return out
+
+
 def compute_wds(w1_strike: Any, w1_volume: Any, w2_strike: Any, w2_volume: Any) -> dict[str, Any]:
     """True WDS for ONE wing from its W1 (10K wing) + adjacent W2 strike.
     WSR = W2_volume / W1_volume; WDS = 1 - WSR. ``source`` is 'unavailable' (never

@@ -513,3 +513,43 @@ Backtests → Compare Strategies adds **Why did dynamic underperform?** with sel
 split, side P&L/win rate/average P&L, dynamic-vs-control P&L, opposite availability,
 failure buckets, call-control edge table, deterministic narrative, and research-only
 recommendations.
+
+## 19. Phase 10G — repeatable optimization harness + walk-forward research
+
+Phase 10G adds a deterministic research harness around the existing replay runner. It
+generates temporary in-memory research profiles from saved base profiles, stamps complete
+provenance/hashes, and never writes generated YAML into `profiles/`.
+
+Every run uses a mandatory chronological train/validation/holdout split. Ranking uses
+train and validation only; holdout is displayed separately and may affect research
+promotion/overfit labels, but never ranking order. The default is 60/20/20, with custom
+percentages or explicit train/validation boundary dates supported by the engine/CLI.
+
+Built-in grids:
+
+- `core_morning`
+- `core_eod`
+- `dynamic_selector_experiments`
+- `controls_baseline`
+- `custom_selected_profiles`
+
+The grids support existing selector modes, side policy, 2K/5K threshold, TP/SL,
+minimum credit, distance rules, and replay-only active-corridor / WDS Tier 1-2 gates.
+Those gates apply only to generated profiles stamped `research_only=true`; existing
+saved profiles retain existing behavior. Named call-biased/gated-put selector modes and
+broad rolling walk-forward sweeps remain deferred.
+
+CLI:
+
+```
+python -m scripts.backtest_optimize --symbol SPX --dte 0 --all-data \
+    --grid core_morning --starting-balance 10000 --contracts 1 \
+    --run-label opt_core_morning
+```
+
+Outputs land under `outputs/backtests/optimizations/latest/` and timestamped
+`outputs/backtests/optimizations/runs/` directories. Each run records the full parameter
+grid, generated profile definitions, parameter hashes, split dates, split metrics,
+rankings, promotion/rejection rows, robustness summary, overfit warnings, and narrative.
+Optimization remains research-only: no live profile mutation, order preview, broker, or
+execution path.

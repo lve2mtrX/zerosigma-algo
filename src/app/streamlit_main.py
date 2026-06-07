@@ -2277,6 +2277,234 @@ def render_backtest_comparison() -> None:
         )
 
 
+def render_optimization_lab() -> None:
+    """Phase 10G research-only optimization controls and latest results."""
+    from src.backtesting import optimization as _O
+
+    st.divider()
+    st.markdown("#### Optimization Lab")
+    st.caption(
+        "Optimization is research only. It does not change live strategy behavior. "
+        "Ranking uses train and validation only; holdout is shown separately."
+    )
+    top = st.columns([1, 1, 2, 1])
+    symbol = top[0].selectbox(
+        "Optimization symbol", list(om.BACKTEST_SYMBOLS), key="opt_symbol"
+    )
+    availability = ch.backtest_data_availability(symbol)
+    dte_options = [0] + ([1] if availability["1DTE"]["available"] else [])
+    dte = int(top[1].selectbox("Optimization DTE", dte_options, key="opt_dte"))
+    grid = top[2].selectbox(
+        "Grid selection",
+        [
+            "core_morning", "core_eod", "dynamic_selector_experiments",
+            "controls_baseline", "custom_selected_profiles",
+        ],
+        key="opt_grid",
+    )
+    max_combinations = int(top[3].number_input(
+        "Max combinations", min_value=1, max_value=200, value=12, step=1,
+        key="opt_max_combinations",
+    ))
+    custom_profiles: list[str] = []
+    if grid == "custom_selected_profiles":
+        custom_profiles = st.multiselect(
+            "Custom selected profiles",
+            om.order_profiles_for_dropdown([
+                row["profile_id"] for row in pb.list_summaries() if row.get("ok")
+            ]),
+            key="opt_custom_profiles",
+        )
+
+    dte_bucket = om.dte_label(dte)
+    data_range = availability.get(dte_bucket) or ch.backtest_data_range(symbol, dte_bucket)
+    st.caption("Local data — " + ch.backtest_range_caption(data_range))
+    date_mode = st.radio(
+        "Optimization date mode",
+        ["Latest N days", "Date range", "All data"],
+        horizontal=True,
+        key="opt_date_mode",
+    )
+    start = end = None
+    latest_days = 0
+    range_ok = bool(data_range.get("available"))
+    if date_mode == "Latest N days":
+        latest_days = int(st.number_input(
+            "Optimization latest N days", min_value=3, value=60, step=1,
+            key="opt_latest_days",
+        ))
+    elif date_mode == "Date range" and data_range.get("available"):
+        import datetime as _dt
+
+        minimum = _dt.date.fromisoformat(data_range["min_date"])
+        maximum = _dt.date.fromisoformat(data_range["max_date"])
+        dates = st.columns(2)
+        start = str(dates[0].date_input(
+            "Optimization start", value=minimum, min_value=minimum, max_value=maximum,
+            key="opt_start",
+        ))
+        end = str(dates[1].date_input(
+            "Optimization end", value=maximum, min_value=minimum, max_value=maximum,
+            key="opt_end",
+        ))
+        range_ok = start <= end
+    elif date_mode == "All data" and data_range.get("available"):
+        st.caption(
+            f"Using all {data_range['file_count']} available files from "
+            f"{data_range['min_date']} to {data_range['max_date']}."
+        )
+
+    split_mode = st.selectbox(
+        "Split mode",
+        ["Chronological 60/20/20", "Custom chronological percentages"],
+        key="opt_split_mode",
+    )
+    train_pct, validation_pct, holdout_pct = 60, 20, 20
+    if split_mode == "Custom chronological percentages":
+        split_cols = st.columns(3)
+        train_pct = int(split_cols[0].number_input(
+            "Train %", min_value=1, max_value=98, value=60, step=1, key="opt_train_pct"
+        ))
+        validation_pct = int(split_cols[1].number_input(
+            "Validation %", min_value=1, max_value=98, value=20, step=1,
+            key="opt_validation_pct",
+        ))
+        holdout_pct = int(split_cols[2].number_input(
+            "Holdout %", min_value=1, max_value=98, value=20, step=1,
+            key="opt_holdout_pct",
+        ))
+        if train_pct + validation_pct + holdout_pct != 100:
+            st.warning("Train, validation, and holdout percentages must total 100.")
+            range_ok = False
+
+    sizing = st.columns([1, 1, 2])
+    balance = float(sizing[0].number_input(
+        "Optimization starting balance", min_value=1.0, value=10000.0, step=500.0,
+        key="opt_balance",
+    ))
+    contracts = int(sizing[1].number_input(
+        "Optimization contracts", min_value=1, value=1, step=1, key="opt_contracts"
+    ))
+    run_label = sizing[2].text_input(
+        "Optimization run label", value=f"opt_{grid}", key="opt_run_label"
+    )
+    custom_ok = grid != "custom_selected_profiles" or bool(custom_profiles)
+    actions = st.columns([1, 1, 2])
+    run_clicked = actions[0].button(
+        "▶ Run Optimization",
+        type="primary",
+        disabled=not (range_ok and custom_ok),
+        key="opt_run",
+    )
+    if actions[1].button("🔄 Refresh Latest Optimization", key="opt_refresh"):
+        st.rerun()
+    actions[2].caption("No live API, broker, order preview, profile mutation, or execution.")
+
+    if run_clicked:
+        config = _O.OptimizationConfig(
+            symbol=symbol,
+            dte=dte,
+            start=start,
+            end=end,
+            latest_days=latest_days,
+            all_data=date_mode == "All data",
+            starting_balance=balance,
+            contracts=contracts,
+            grid=grid,
+            run_label=run_label,
+            max_combinations=max_combinations,
+            profile_ids=tuple(custom_profiles),
+            train_pct=train_pct,
+            validation_pct=validation_pct,
+            holdout_pct=holdout_pct,
+        )
+        with st.spinner(
+            f"Optimizing {max_combinations} deterministic variants over local {symbol} data..."
+        ):
+            try:
+                result = _O.run_optimization(config)
+                run_id = str(result.run_config["optimizer_run_id"])
+                _O.write_optimization_reports(
+                    result,
+                    [_O.optimization_latest_dir(), _O.optimization_run_dir(run_id)],
+                )
+                st.success(
+                    f"Optimization complete — {len(result.rankings)} variants, "
+                    f"{len(result.promotion_candidates)} forward-paper candidate(s)."
+                )
+            except Exception as exc:
+                st.error(f"Optimization failed: {type(exc).__name__}: {exc}")
+        st.rerun()
+
+    latest = ch.read_backtest_optimization(_O.optimization_latest_dir())
+    st.markdown("**Latest Optimization**")
+    st.caption(f"Reading: `{latest['results_dir']}`")
+    if not latest["available"]:
+        st.info(latest["reason"])
+        return
+    rankings = latest["rankings"]
+
+    def _number(row, key, default=0.0):
+        try:
+            return float(row.get(key))
+        except (TypeError, ValueError):
+            return default
+
+    if latest.get("narrative"):
+        st.info(latest["narrative"])
+    split_dates = latest.get("run_config", {}).get("split_dates") or {}
+    split_cards = st.columns(3)
+    for card, label, key in zip(
+        split_cards, ["Train", "Validation", "Holdout"], ["train", "validation", "holdout"],
+        strict=True,
+    ):
+        values = split_dates.get(key) or []
+        card.metric(label, f"{len(values)} sessions", f"{values[0]} → {values[-1]}" if values else "—")
+    if rankings:
+        best = (latest["promotion_candidates"] or rankings)[0]
+        benchmarks = [
+            row for row in rankings if row.get("promotion_status") == "Benchmark Control"
+        ]
+        best_benchmark = benchmarks[0] if benchmarks else {}
+        cards = st.columns(5)
+        cards[0].metric("Best Robust Candidate", best.get("profile_id"), best.get("promotion_status"))
+        cards[1].metric(
+            "Validation Expectancy", ch.fmt_money(best.get("validation_expectancy_dollars"))
+        )
+        cards[2].metric("Holdout Expectancy", ch.fmt_money(best.get("holdout_expectancy_dollars")))
+        cards[3].metric("Overfit Warnings", str(len(latest["overfit_warnings"])))
+        cards[4].metric(
+            "Benchmark Comparison",
+            best_benchmark.get("profile_id") or "No control in grid",
+            (
+                ch.fmt_money(best_benchmark.get("validation_expectancy_dollars"))
+                if best_benchmark else "Run controls_baseline"
+            ),
+        )
+    st.markdown("**Ranked Candidates**")
+    st.dataframe(rankings, width="stretch", hide_index=True)
+    tabs = st.tabs(["Promotion Labels", "Overfit Warnings", "Split Results"])
+    with tabs[0]:
+        if latest["promotion_candidates"]:
+            st.dataframe(latest["promotion_candidates"], width="stretch", hide_index=True)
+        else:
+            st.caption("No profile cleared forward-paper promotion rules.")
+    with tabs[1]:
+        if latest["overfit_warnings"]:
+            st.dataframe(latest["overfit_warnings"], width="stretch", hide_index=True)
+        else:
+            st.caption("No overfit warnings were generated.")
+    with tabs[2]:
+        split_tabs = st.tabs(["Train", "Validation", "Holdout"])
+        for tab, rows in zip(
+            split_tabs,
+            [latest["train_results"], latest["validation_results"], latest["holdout_results"]],
+            strict=True,
+        ):
+            with tab:
+                st.dataframe(rows, width="stretch", hide_index=True)
+
+
 def render_backtests() -> None:
     """Phase 10C follow-up — usable LOCAL backtests: pick symbol / saved profile (incl.
     custom) / DTE / date mode (Latest N · Date range · All data), see how far back local
@@ -2617,6 +2845,7 @@ def render_backtests() -> None:
     st.caption("Historical simulation only — no broker, no order preview, no execution.")
 
     render_backtest_comparison()
+    render_optimization_lab()
 
     # ── Advanced — CLI equivalent (secondary fallback; not the main workflow) ──
     with st.expander("Advanced — CLI command (optional, runs the same thing)", expanded=False):

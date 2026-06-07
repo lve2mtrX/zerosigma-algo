@@ -34,7 +34,7 @@ from src.backtesting.profile_runtime import (
     selector_config_from_profile,
     threshold_scheme,
 )
-from src.config.strategy_profiles import load_profile_file
+from src.config.strategy_profiles import StrategyProfile, load_profile_file
 from src.risk.filters import apply_filters
 from src.risk.limits import load_profile
 from src.selector.daily_selector import components_to_str, select_daily_trade
@@ -313,6 +313,20 @@ def _evaluate(
         strat.score(c, structure, chain, params)
     strat.select(candidates, params)   # stamps score_threshold/edge/rejection_type
 
+    wd = M.corridor_wds(structure)
+    research_gate_reasons: list[str] = []
+    if bool(getattr(profile, "research_only", False)):
+        if (
+            getattr(profile, "research_corridor_gate", None) == "active_required"
+            and wd.get("corridor_valid") is not True
+        ):
+            research_gate_reasons.append("research_corridor_active_required")
+        if (
+            getattr(profile, "research_wds_gate", None) == "tier_1_2"
+            and wd.get("dominant_wing_tier") not in (1, 2)
+        ):
+            research_gate_reasons.append("research_wds_tier_1_2_required")
+
     rows_for_selector: list[dict[str, Any]] = []
     readinesses: list[dict[str, Any]] = []
     for c in candidates:
@@ -321,14 +335,17 @@ def _evaluate(
             min_score_edge=_MIN_SCORE_EDGE, target_dte=settings.target_dte, today_et=ts.date(),
         )
         readinesses.append(rd)
-        rows_for_selector.append(_selector_row(c, rd))
+        selector_row = _selector_row(c, rd)
+        if research_gate_reasons:
+            selector_row["selector_eligible_base"] = False
+            selector_row["candidate_passes_trade_filters"] = False
+        rows_for_selector.append(selector_row)
 
     sel_result = select_daily_trade(
         rows_for_selector, selector_cfg,
         gamma_regime=structure.exposures.gamma_regime,
     )
 
-    wd = M.corridor_wds(structure)
     gamma = ch.primary_secondary_gamma(structure.exposures, structure.spot)
     base = {
         "symbol": symbol, "date": date, "dte": dte_label, "profile_id": profile.profile_id,
@@ -349,6 +366,17 @@ def _evaluate(
         "gamma_relationship": _gamma_relationship(
             structure.spot, gamma.get("primary"), gamma.get("secondary")
         ),
+        "research_only": bool(getattr(profile, "research_only", False)),
+        "generated_profile_id": getattr(profile, "generated_profile_id", None),
+        "base_profile_id": getattr(profile, "base_profile_id", None),
+        "parameter_set_id": getattr(profile, "parameter_set_id", None),
+        "optimizer_run_id": getattr(profile, "optimizer_run_id", None),
+        "parameter_hash": getattr(profile, "parameter_hash", None),
+        "research_grid_name": getattr(profile, "research_grid_name", None),
+        "research_corridor_gate": getattr(profile, "research_corridor_gate", None),
+        "research_wds_gate": getattr(profile, "research_wds_gate", None),
+        "research_gate_passed": not research_gate_reasons,
+        "research_gate_reason": "; ".join(research_gate_reasons),
     }
 
     cand_records: list[dict[str, Any]] = []
@@ -590,7 +618,8 @@ def _dynamic_attribution_record(
 def run_backtest(
     *,
     symbol: str,
-    profile_ids: list[str],
+    profile_ids: list[str] | None = None,
+    profile_objects: list[StrategyProfile] | None = None,
     start: str | None = None,
     end: str | None = None,
     dte: int = 0,
@@ -621,13 +650,18 @@ def run_backtest(
     cfg, strat = _load_cfg_and_strategy()
     scheme, warning = threshold_scheme(symbol)
 
-    # Load + validate profiles up front.
-    profiles = []
-    for pid in profile_ids:
-        res = load_profile_file(pid)
-        if not res.ok or res.profile is None:
-            raise ValueError(f"profile {pid!r} not loadable: {res.errors}")
-        profiles.append(res.profile)
+    # Load + validate profiles up front. Phase 10G may supply generated,
+    # research-only StrategyProfile objects in memory; saved-profile callers
+    # keep the existing profile-id path unchanged.
+    profiles = list(profile_objects or [])
+    if not profiles:
+        for pid in profile_ids or []:
+            res = load_profile_file(pid)
+            if not res.ok or res.profile is None:
+                raise ValueError(f"profile {pid!r} not loadable: {res.errors}")
+            profiles.append(res.profile)
+    if not profiles:
+        raise ValueError("at least one profile is required")
 
     # Resolve dates.
     dates = L.available_dates(symbol, dte_label, root=root)

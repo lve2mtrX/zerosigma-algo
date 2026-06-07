@@ -115,6 +115,20 @@ class StrategyProfile:
     dynamic_exit_enabled: bool = False        # default OFF → preserves fixed behavior
     dynamic_exit_policy: str | None = None    # named policy (configured, not yet active)
 
+    # ── Phase 10G: generated research-profile provenance + replay-only gates ──
+    # Existing saved profiles default to research_only=False, so these fields do
+    # not change live/scanner behavior. Generated optimizer profiles are created
+    # in memory and may use the replay-only corridor/WDS gates.
+    research_only: bool = False
+    generated_profile_id: str | None = None
+    base_profile_id: str | None = None
+    parameter_set_id: str | None = None
+    optimizer_run_id: str | None = None
+    parameter_hash: str | None = None
+    research_grid_name: str | None = None
+    research_corridor_gate: str | None = None  # "off" | "active_required"
+    research_wds_gate: str | None = None       # "off" | "tier_1_2"
+
     # ── runtime provenance (NOT persisted in the YAML body) ──
     profile_path: str | None = field(default=None)
 
@@ -173,6 +187,7 @@ _BOOL_FIELDS = (
     "enabled", "strict_target_dte", "allow_call_credit", "allow_put_credit",
     "require_selector_eligible_base", "require_quote_validation", "require_score_edge",
     "dynamic_exit_enabled",   # Phase 9G
+    "research_only",          # Phase 10G
 )
 _INT_FIELDS = ("version", "target_dte", "max_trades_per_day")
 _OPT_FLOAT_FIELDS = (
@@ -191,6 +206,9 @@ _OPT_STR_FIELDS = (
     "entry_window_start", "entry_window_end",
     "preset_kind", "side_policy", "threshold_label", "target_time",
     "stop_loss_mode", "take_profit_mode", "dynamic_exit_policy",
+    "generated_profile_id", "base_profile_id", "parameter_set_id",
+    "optimizer_run_id", "parameter_hash", "research_grid_name",
+    "research_corridor_gate", "research_wds_gate",
 )
 
 
@@ -367,6 +385,17 @@ def template_profile_dict(profile_id: str) -> dict[str, Any]:
         "take_profit_mode": None,
         "dynamic_exit_enabled": False,
         "dynamic_exit_policy": None,
+        # Phase 10G research provenance/gates. Saved profiles stay non-research
+        # unless an explicit future workflow opts them in.
+        "research_only": False,
+        "generated_profile_id": None,
+        "base_profile_id": None,
+        "parameter_set_id": None,
+        "optimizer_run_id": None,
+        "parameter_hash": None,
+        "research_grid_name": None,
+        "research_corridor_gate": None,
+        "research_wds_gate": None,
     }
 
 

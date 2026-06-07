@@ -3073,3 +3073,28 @@ to trader-facing copy. Validation passed with `.venv`: `pytest -q` (827), `ruff 
   results are not production approval.
 - No strategy logic, selector math, risk math, quote validation, broker path,
   order preview, or execution behavior changed.
+
+---
+
+## 2026-06-07 — Phase 10G implementation plan: optimization harness + walk-forward research
+
+Branch: `codex/phase-10g-optimization-harness`.
+
+Research guardrails:
+
+1. Generate reproducible research-only profiles in memory; never add a large
+   generated grid under `profiles/` or mutate existing saved profiles.
+2. Reuse the existing replay strategy/risk/selector/lifecycle path. Research
+   corridor/WDS gates apply only when a generated profile is explicitly stamped
+   `research_only=true`; existing profiles keep their current behavior.
+3. Use chronological train/validation/holdout splits with no overlap. Ranking
+   uses train + validation only; holdout is reported separately and may affect
+   promotion/overfit labels, never ranking order.
+4. Persist the full run config, parameter grid, generated-profile definitions,
+   hashes, split dates, metrics, warnings, rankings, and deterministic narrative.
+5. Add a research-only `backtest_optimize` CLI and Backtests Optimization Lab.
+6. Implement the chronological 60/20/20 harness now. Expose a walk-forward
+   interface/output shape, but defer broad rolling-window sweeps if runtime is
+   too large for this phase.
+7. Keep controls as benchmarks/comparison-only. No result automatically changes
+   live behavior or approves production use.
