@@ -1636,6 +1636,63 @@ def read_backtest_optimization(results_dir: Any) -> dict[str, Any]:
     return out
 
 
+def read_backtest_robustness_review(results_dir: Any) -> dict[str, Any]:
+    """Read Phase 10H robustness-review outputs for the Optimization Lab."""
+    import json as _json
+
+    out: dict[str, Any] = {
+        "available": False,
+        "reason": "",
+        "results_dir": str(results_dir),
+        "run_config": {},
+        "expanded_run_summary": [],
+        "split_sensitivity_summary": [],
+        "candidate_consistency": [],
+        "candidate_vs_control_benchmark": [],
+        "freeze_criteria": [],
+        "freeze_recommendation": {},
+        "narrative": "",
+    }
+    try:
+        directory = Path(results_dir)
+    except (TypeError, ValueError):
+        out["reason"] = "No robustness-review directory configured."
+        return out
+    summary_path = directory / "split_sensitivity_summary.csv"
+    if not summary_path.is_file():
+        out["reason"] = "No robustness review yet. Run the Phase 10H review CLI."
+        return out
+    config_path = directory / "run_config.json"
+    recommendation_path = directory / "freeze_recommendation.json"
+    try:
+        if config_path.is_file():
+            out["run_config"] = _json.loads(config_path.read_text(encoding="utf-8"))
+        if recommendation_path.is_file():
+            out["freeze_recommendation"] = _json.loads(
+                recommendation_path.read_text(encoding="utf-8")
+            )
+    except (OSError, ValueError):
+        pass
+    for key in (
+        "expanded_run_summary",
+        "split_sensitivity_summary",
+        "candidate_consistency",
+        "candidate_vs_control_benchmark",
+        "freeze_criteria",
+    ):
+        out[key] = _read_csv_rows(directory / f"{key}.csv")
+    narrative_path = directory / "narrative_summary.md"
+    if narrative_path.is_file():
+        try:
+            out["narrative"] = narrative_path.read_text(encoding="utf-8").replace(
+                "# Optimization Robustness Review", ""
+            ).strip()
+        except OSError:
+            out["narrative"] = ""
+    out["available"] = True
+    return out
+
+
 def compute_wds(w1_strike: Any, w1_volume: Any, w2_strike: Any, w2_volume: Any) -> dict[str, Any]:
     """True WDS for ONE wing from its W1 (10K wing) + adjacent W2 strike.
     WSR = W2_volume / W1_volume; WDS = 1 - WSR. ``source`` is 'unavailable' (never

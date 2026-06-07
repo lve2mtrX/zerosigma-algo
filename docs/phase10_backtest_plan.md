@@ -553,3 +553,31 @@ grid, generated profile definitions, parameter hashes, split dates, split metric
 rankings, promotion/rejection rows, robustness summary, overfit warnings, and narrative.
 Optimization remains research-only: no live profile mutation, order preview, broker, or
 execution path.
+
+## 20. Phase 10H — optimization robustness review + candidate freezing
+
+Phase 10H reviews completed Phase 10G runs instead of trusting one favorable split. The
+review loads expanded deterministic grids, compares the same candidate hashes and major
+parameter families across chronological 60/20/20, 50/25/25, and 70/15/15 splits, and
+benchmarks the conservative lead candidate against named call controls and original
+dynamic profiles over identical dates and sizing.
+
+Review artifacts land under `outputs/backtests/optimizations/robustness/`:
+
+- `expanded_run_summary.csv`
+- `split_sensitivity_summary.csv`
+- `candidate_consistency.csv`
+- `candidate_vs_control_benchmark.csv`
+- `freeze_criteria.csv`
+- `freeze_recommendation.json`
+- `run_config.json`, `narrative_summary.md`
+
+Candidate freezing is deliberately stricter than a single-run promotion label. A profile
+must remain positive across every reviewed split, retain adequate validation/holdout
+trade counts, keep drawdown controlled, avoid severe overfit warnings, and not be
+materially worse than the current controls. A frozen profile, if one qualifies, must be
+disabled, `preset_kind: research`, `research_only: true`, and preserve optimizer
+provenance. The review CLI never writes a profile automatically.
+
+No strategy, selector, risk, quote-validation, broker, order-preview, or execution math
+changes in Phase 10H.

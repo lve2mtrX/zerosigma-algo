@@ -3098,3 +3098,46 @@ Research guardrails:
    too large for this phase.
 7. Keep controls as benchmarks/comparison-only. No result automatically changes
    live behavior or approves production use.
+
+---
+
+## 2026-06-07 — Phase 10H implementation plan: optimization robustness review
+
+Branch: `codex/phase-10h-optimization-robustness`.
+
+1. Re-run the core-morning, dynamic-selector, and control grids with broader
+   deterministic coverage before trusting the Phase 10G smoke candidate.
+2. Compare the leading parameter family under chronological 60/20/20,
+   50/25/25, and 70/15/15 splits. Report exact-hash and family consistency;
+   do not use holdout to choose the winner.
+3. Benchmark the lead candidate against Morning 5K Call TP75 Control, Morning
+   2K Call No TP Control, original Morning 5K Dynamic TP75, and original
+   Morning 2K Dynamic No TP on the same dates and sizing.
+4. Add repeatable robustness-review artifacts and Optimization Lab reporting:
+   split sensitivity, candidate-vs-control metrics, overfit warnings, freeze
+   recommendation, and deterministic narrative.
+5. Freeze a named profile only if validation/holdout, trade-count, drawdown,
+   overfit, split-consistency, and control-benchmark criteria pass. Any frozen
+   profile must be disabled, `preset_kind: research`, `research_only: true`,
+   optimization-derived, and contain no execution intent.
+6. Do not change existing strategy, selector, risk, quote-validation, broker,
+   order-preview, or execution behavior.
+
+Phase 10H study results:
+
+- Expanded core morning: 48 variants, 4 single-split promotion candidates,
+  77 warnings.
+- Expanded dynamic selector: 48 variants, 2 single-split promotion candidates,
+  96 warnings; the top validation rows had materially negative holdout
+  expectancy.
+- Controls baseline: Morning 2K Call No TP led validation but was negative in
+  holdout; Morning 5K Call TP75 remained positive in validation and holdout.
+- The same top validation hash (`74315d69b893984f`) led 60/20/20, 50/25/25,
+  and 70/15/15, but remained below the trade-count floor and its holdout
+  expectancy turned negative in 70/15/15.
+- Conservative review candidate: `1a30a6cdf1b150c0`, a 5K call-only,
+  score-best, no-TP, SL200 family member. It produced positive validation and
+  holdout expectancy in all three splits and beat the named controls on
+  all-data expectancy, but one split had only 9 validation trades.
+- Freeze result: 7/8 criteria passed; validation trade floor failed. No profile
+  was frozen. Recommendation: keep researching before forward paper.

@@ -2504,6 +2504,70 @@ def render_optimization_lab() -> None:
             with tab:
                 st.dataframe(rows, width="stretch", hide_index=True)
 
+    from src.backtesting import robustness_review as _R
+
+    st.markdown("**Robustness Review**")
+    review = ch.read_backtest_robustness_review(_R.robustness_latest_dir())
+    st.caption(f"Reading: `{review['results_dir']}`")
+    if not review["available"]:
+        st.caption(review["reason"])
+        return
+    if review.get("narrative"):
+        st.info(review["narrative"])
+    recommendation = review.get("freeze_recommendation") or {}
+    review_cards = st.columns(4)
+    review_cards[0].metric(
+        "Frozen Profile Recommendation",
+        recommendation.get("recommendation") or "No recommendation",
+    )
+    review_cards[1].metric(
+        "Freeze Criteria",
+        (
+            f"{recommendation.get('passed_criteria', 0)}/"
+            f"{recommendation.get('total_criteria', 0)}"
+        ),
+    )
+    review_cards[2].metric(
+        "Candidate Hash",
+        recommendation.get("parameter_hash") or "—",
+    )
+    review_cards[3].metric(
+        "Profile Frozen",
+        "No — research continues",
+        "No automatic profile writes",
+    )
+    review_tabs = st.tabs([
+        "Split Sensitivity",
+        "Candidate vs Controls",
+        "Freeze Criteria",
+        "Expanded Runs",
+    ])
+    with review_tabs[0]:
+        st.dataframe(
+            review["split_sensitivity_summary"], width="stretch", hide_index=True
+        )
+        with st.expander("Candidate consistency across splits", expanded=False):
+            st.dataframe(
+                review["candidate_consistency"], width="stretch", hide_index=True
+            )
+    with review_tabs[1]:
+        st.dataframe(
+            review["candidate_vs_control_benchmark"], width="stretch", hide_index=True
+        )
+    with review_tabs[2]:
+        st.dataframe(review["freeze_criteria"], width="stretch", hide_index=True)
+        if recommendation.get("freeze_eligible"):
+            st.success(
+                "Candidate is robust enough to freeze as a disabled research profile. "
+                "This is not production approval."
+            )
+        else:
+            st.warning(
+                "No profile was frozen. Continue research before forward paper."
+            )
+    with review_tabs[3]:
+        st.dataframe(review["expanded_run_summary"], width="stretch", hide_index=True)
+
 
 def render_backtests() -> None:
     """Phase 10C follow-up — usable LOCAL backtests: pick symbol / saved profile (incl.
