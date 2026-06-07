@@ -436,3 +436,48 @@ SPY/QQQ threshold calibration + cross-check vs `wingonomics_daily_stats.csv`; co
 sizing + comparison dashboards; promote corridor/WDS into selector weighting; full 1DTE
 support (SPX 1DTE data exists; QQQ_1DTE empty; SPY_1DTE absent). Still NO broker execution,
 NO order preview.
+
+## 17. Phase 10E — comparison dashboard + research promotion labels
+
+Phase 10E wraps the existing multi-profile replay result in a pure comparison layer. It
+does not add a replay fork and does not feed any ranking or promotion label back into the
+live selector.
+
+### CLI
+
+```
+python -m scripts.backtest_compare --symbol SPX --profiles all-main --dte 0 \
+    --latest-days 20 --starting-balance 10000 --contracts 1 --run-label compare_smoke
+```
+
+Comparison cohorts:
+
+- `dynamic-only`: four primary dynamic profiles.
+- `controls-only`: four paired call-only controls.
+- `all-main`: primary dynamic profiles plus their paired controls.
+- `all`: main profiles plus research/observe profiles.
+- `custom`: valid saved profiles with no built-in preset kind.
+- Explicit profile IDs may be space- or comma-separated.
+
+### Outputs
+
+Outputs land under `outputs/backtests/comparisons/latest/` and a timestamped
+`outputs/backtests/comparisons/runs/` directory:
+
+- `comparison_summary.csv`, `profile_rankings.csv`, `dynamic_vs_control.csv`
+- `by_profile.csv`, `by_side.csv`, `by_exit_reason.csv`, `by_corridor.csv`
+- `by_wds_tier.csv`, `by_entry_window.csv`
+- `trades.csv`, `candidates.csv`, `run_config.json`, `narrative_summary.md`
+
+The research ranking exposes all score components in the ranking CSV and documents the
+formula in `run_config.json`. Promotion labels are deterministic:
+
+- `Promote to Live Paper Candidate`: at least 10 trades, positive expectancy, profit
+  factor above 1, and max drawdown at or below 10%.
+- `Watchlist`: positive profile with sufficient trades but drawdown above 10%.
+- `Needs More Data`: fewer than 10 trades.
+- `Avoid / Control Only`: controls/observe profiles, negative expectancy, profit factor
+  at or below 1, or max drawdown above 15%.
+
+These are research labels only. No strategy, selector, risk, quote-validation, order
+preview, broker, or execution behavior changes.

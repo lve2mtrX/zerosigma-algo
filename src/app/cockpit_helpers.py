@@ -1509,6 +1509,56 @@ def read_backtest_results(results_dir: Any) -> dict[str, Any]:
     return out
 
 
+def read_backtest_comparison(results_dir: Any) -> dict[str, Any]:
+    """Read Phase 10E comparison outputs for the Backtests tab."""
+    import json as _json
+
+    out: dict[str, Any] = {
+        "available": False,
+        "reason": "",
+        "results_dir": str(results_dir),
+        "run_config": {},
+        "rankings": [],
+        "dynamic_vs_control": [],
+        "by_corridor": [],
+        "by_wds_tier": [],
+        "trades": [],
+        "trade_rows": [],
+        "narrative": "",
+    }
+    try:
+        directory = Path(results_dir)
+    except (TypeError, ValueError):
+        out["reason"] = "No comparison results directory configured."
+        return out
+    rankings_path = directory / "profile_rankings.csv"
+    if not rankings_path.is_file():
+        out["reason"] = "No comparison results yet. Run a comparison above."
+        return out
+    config_path = directory / "run_config.json"
+    if config_path.is_file():
+        try:
+            out["run_config"] = _json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            out["run_config"] = {}
+    out["rankings"] = _read_csv_rows(rankings_path)
+    out["dynamic_vs_control"] = _read_csv_rows(directory / "dynamic_vs_control.csv")
+    out["by_corridor"] = _read_csv_rows(directory / "by_corridor.csv")
+    out["by_wds_tier"] = _read_csv_rows(directory / "by_wds_tier.csv")
+    out["trades"] = _read_csv_rows(directory / "trades.csv")
+    out["trade_rows"] = backtest_trade_display_rows(out["trades"])
+    narrative_path = directory / "narrative_summary.md"
+    if narrative_path.is_file():
+        try:
+            out["narrative"] = narrative_path.read_text(encoding="utf-8").replace(
+                "# Backtest Comparison Summary", ""
+            ).strip()
+        except OSError:
+            out["narrative"] = ""
+    out["available"] = True
+    return out
+
+
 def compute_wds(w1_strike: Any, w1_volume: Any, w2_strike: Any, w2_volume: Any) -> dict[str, Any]:
     """True WDS for ONE wing from its W1 (10K wing) + adjacent W2 strike.
     WSR = W2_volume / W1_volume; WDS = 1 - WSR. ``source`` is 'unavailable' (never

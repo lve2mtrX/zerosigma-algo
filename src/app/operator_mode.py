@@ -807,6 +807,33 @@ def backtest_default_label(symbol: Any = "SPX", profile: Any = "all-main",
     return f"{sym}_{prof}_{m}".strip("_")
 
 
+def backtest_compare_command(
+    symbol: Any = "SPX",
+    profiles: Any = "all-main",
+    latest_days: Any = 20,
+    dte: Any = 0,
+    run_label: Any = "compare",
+    starting_balance: Any = 10000,
+    contracts: Any = 1,
+) -> str:
+    """Exact local, research-only comparison CLI for the Backtests UI."""
+    sym = normalize_symbol(symbol)
+    if isinstance(profiles, (list, tuple)):
+        prof = " ".join(str(value).strip() for value in profiles if str(value).strip())
+    else:
+        prof = str(profiles or "all-main").strip()
+    days = max(0, int(latest_days or 0))
+    qty = max(1, int(contracts or 1))
+    balance = float(starting_balance or 10000)
+    label = str(run_label or "compare").strip() or "compare"
+    cmd = (
+        f"python -m scripts.backtest_compare --symbol {sym} --profiles {prof} "
+        f"--dte {int(dte or 0)} --run-label {label} "
+        f"--starting-balance {balance:g} --contracts {qty}"
+    )
+    return cmd + (f" --latest-days {days}" if days else " --all-data")
+
+
 # ── Phase 9H/9I — profile grouping by purpose + run/selection mismatch ───────
 
 # Phase 9I — trader-friendly category labels (was: Primary live paper tests /

@@ -3035,3 +3035,21 @@ to trader-facing copy. Validation passed with `.venv`: `pytest -q` (827), `ruff 
   blocker.
 - Added tests for dynamic/control/put-only/observe/custom profiles, raw-enum
   hiding, page placement, run narrative, and no execution surface.
+
+---
+
+## 2026-06-05 — Phase 10E: backtest comparison dashboard
+
+- Added a dedicated local `backtest_compare` workflow that reuses the existing
+  Phase 10D multi-profile replay over one shared symbol/date/DTE/sizing set.
+- Added comparison outputs under `outputs/backtests/comparisons/`: profile
+  rankings, dynamic-vs-control, profile/side/exit/corridor/WDS/entry-window
+  breakdowns, full trade logs, deterministic narrative, and run configuration.
+- Added a transparent research ranking score with visible components and
+  deterministic promotion labels. Rankings and labels never feed live selection
+  or profile execution.
+- Added a Compare Strategies section in Backtests with group/profile/date/sizing
+  controls, ranked table, best-metric cards, narrative, dynamic/control and
+  corridor/WDS tables, and expandable trade logs by profile.
+- Deferred: SPY/QQQ threshold calibration, risk-based sizing, selector-weight
+  changes, broker execution, order preview, and order placement.

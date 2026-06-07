@@ -1953,6 +1953,273 @@ def render_manual_desk() -> None:
         st.line_chart(eq_rows, x="ts", y="equity")
 
 
+def render_backtest_comparison() -> None:
+    """Phase 10E research-only strategy comparison dashboard."""
+    from src.backtesting import comparison as _C
+
+    st.divider()
+    st.markdown("#### Compare Strategies")
+    st.caption(
+        "Compare profiles over the same local dates, symbol, DTE, and fixed sizing. "
+        "Rankings and promotion labels are research-only and never change execution."
+    )
+
+    saved = [row for row in pb.list_summaries() if row.get("ok")]
+    saved_by_id = {row["profile_id"]: row for row in saved}
+    saved_ids = om.order_profiles_for_dropdown(list(saved_by_id))
+
+    def _profile_label(profile_id: str) -> str:
+        row = saved_by_id.get(profile_id, {})
+        return om.profile_dropdown_label(
+            profile_id, row.get("profile_name"), row.get("preset_kind")
+        )
+
+    top = st.columns([1, 1, 2])
+    cmp_symbol = top[0].selectbox(
+        "Comparison symbol", list(om.BACKTEST_SYMBOLS), key="cmp_symbol"
+    )
+    availability = ch.backtest_data_availability(cmp_symbol)
+    dte_options = [0] + ([1] if availability["1DTE"]["available"] else [])
+    cmp_dte = int(top[1].selectbox("Comparison DTE", dte_options, key="cmp_dte"))
+    cmp_group = top[2].selectbox(
+        "Profile group",
+        ["Main Dynamic", "Controls", "All Main", "Custom", "Selected profiles"],
+        index=2,
+        key="cmp_group",
+    )
+    group_alias = {
+        "Main Dynamic": "dynamic-only",
+        "Controls": "controls-only",
+        "All Main": "all-main",
+        "Custom": "custom",
+    }
+    if cmp_group == "Selected profiles":
+        cmp_profile_request: str | list[str] = st.multiselect(
+            "Profiles to compare",
+            saved_ids,
+            default=list(_C.PRIMARY_PROFILES),
+            format_func=_profile_label,
+            key="cmp_selected_profiles",
+        )
+    else:
+        cmp_profile_request = group_alias[cmp_group]
+    cmp_profiles = _C.resolve_comparison_profiles(cmp_profile_request)
+    if cmp_profiles:
+        st.caption(
+            f"{len(cmp_profiles)} profile(s): "
+            + ", ".join(_profile_label(profile_id) for profile_id in cmp_profiles)
+        )
+    else:
+        st.warning("No valid profiles are available for this comparison group.")
+
+    dte_bucket = om.dte_label(cmp_dte)
+    data_range = availability.get(dte_bucket) or ch.backtest_data_range(cmp_symbol, dte_bucket)
+    st.caption("Local data — " + ch.backtest_range_caption(data_range))
+    cmp_mode = st.radio(
+        "Comparison date mode",
+        ["Latest N days", "Date range", "All data"],
+        horizontal=True,
+        key="cmp_date_mode",
+    )
+    cmp_start = cmp_end = None
+    cmp_latest_days = 0
+    cmp_range_ok = bool(data_range.get("available"))
+    if cmp_mode == "Latest N days":
+        cmp_latest_days = int(st.number_input(
+            "Comparison latest N days", min_value=1, value=20, step=1, key="cmp_latest_days"
+        ))
+    elif cmp_mode == "Date range" and data_range.get("available"):
+        import datetime as _dt
+
+        min_date = _dt.date.fromisoformat(data_range["min_date"])
+        max_date = _dt.date.fromisoformat(data_range["max_date"])
+        date_cols = st.columns(2)
+        cmp_start = str(date_cols[0].date_input(
+            "Comparison start", value=min_date, min_value=min_date, max_value=max_date,
+            key="cmp_start",
+        ))
+        cmp_end = str(date_cols[1].date_input(
+            "Comparison end", value=max_date, min_value=min_date, max_value=max_date,
+            key="cmp_end",
+        ))
+        cmp_range_ok = cmp_start <= cmp_end
+        if not cmp_range_ok:
+            st.warning("Comparison start date is after the end date.")
+    elif cmp_mode == "All data" and data_range.get("available"):
+        st.caption(
+            f"Using all {data_range['file_count']} available files from "
+            f"{data_range['min_date']} to {data_range['max_date']}."
+        )
+
+    sizing_cols = st.columns([2, 1, 1])
+    cmp_preset = sizing_cols[0].selectbox(
+        "Comparison sizing preset",
+        list(om.BACKTEST_SIZING_PRESETS),
+        index=list(om.BACKTEST_SIZING_PRESETS).index("Standard paper"),
+        key="cmp_sizing_preset",
+    )
+    preset_balance, preset_contracts = om.BACKTEST_SIZING_PRESETS[cmp_preset]
+    cmp_balance = float(sizing_cols[1].number_input(
+        "Comparison balance", min_value=1.0, value=float(preset_balance),
+        step=500.0, key=f"cmp_balance_{cmp_preset}",
+    ))
+    cmp_contracts = int(sizing_cols[2].number_input(
+        "Comparison contracts", min_value=1, value=int(preset_contracts),
+        step=1, key=f"cmp_contracts_{cmp_preset}",
+    ))
+    cmp_label = st.text_input(
+        "Comparison run label",
+        value=f"{cmp_symbol.lower()}_{cmp_group.lower().replace(' ', '_')}_compare",
+        key="cmp_run_label",
+    )
+
+    actions = st.columns([1, 1, 2])
+    run_comparison = actions[0].button(
+        "▶ Run Comparison",
+        type="primary",
+        disabled=not (cmp_profiles and cmp_range_ok),
+        key="cmp_run",
+    )
+    if actions[1].button("🔄 Refresh Latest Comparison", key="cmp_refresh"):
+        st.rerun()
+    actions[2].caption("Research-only output; no live API, broker, order preview, or execution.")
+
+    if run_comparison:
+        from datetime import datetime as _datetime
+
+        from src.backtesting.replay_runner import run_backtest as _run_backtest
+
+        with st.spinner(
+            f"Comparing {len(cmp_profiles)} profiles over {cmp_symbol} {dte_bucket} local data..."
+        ):
+            try:
+                result = _run_backtest(
+                    symbol=cmp_symbol,
+                    profile_ids=cmp_profiles,
+                    start=cmp_start,
+                    end=cmp_end,
+                    dte=cmp_dte,
+                    latest_days=cmp_latest_days,
+                    run_label=cmp_label,
+                    starting_balance=cmp_balance,
+                    contracts=cmp_contracts,
+                )
+                result.run_config["comparison_profile_group"] = cmp_group
+                stamp = _datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                _C.write_comparison_reports(
+                    result,
+                    [_C.comparison_latest_dir(),
+                     _C.comparison_run_dir(stamp, f"{cmp_symbol}_{cmp_label}")],
+                    stamp=stamp,
+                )
+                st.success(
+                    f"Comparison complete — {len(cmp_profiles)} profiles, "
+                    f"{result.counters.get('selected_trades', 0)} selected trades."
+                )
+            except Exception as exc:
+                st.error(f"Comparison failed: {type(exc).__name__}: {exc}")
+        st.rerun()
+
+    latest = ch.read_backtest_comparison(_C.comparison_latest_dir())
+    st.markdown("**Latest Comparison**")
+    st.caption(f"Reading: `{latest['results_dir']}`")
+    if not latest["available"]:
+        st.info(latest["reason"])
+    else:
+        rankings = latest["rankings"]
+
+        def _number(row, key, default=0.0):
+            try:
+                return float(row.get(key))
+            except (TypeError, ValueError):
+                return default
+
+        active = [row for row in rankings if _number(row, "total_trades") > 0]
+        if active:
+            best_expectancy = max(active, key=lambda row: _number(row, "expectancy_dollars"))
+            best_drawdown = min(active, key=lambda row: _number(row, "max_drawdown_pct"))
+            best_pf = max(active, key=lambda row: _number(row, "profit_factor"))
+            best_return = max(active, key=lambda row: _number(row, "return_pct"))
+            cards = st.columns(4)
+            cards[0].metric(
+                "Best Expectancy",
+                ch.fmt_money(best_expectancy.get("expectancy_dollars")),
+                best_expectancy.get("profile_name"),
+            )
+            cards[1].metric(
+                "Best Drawdown",
+                ch.fmt_pct(best_drawdown.get("max_drawdown_pct"), as_fraction=False),
+                best_drawdown.get("profile_name"),
+            )
+            cards[2].metric(
+                "Best Profit Factor",
+                best_pf.get("profit_factor"),
+                best_pf.get("profile_name"),
+            )
+            cards[3].metric(
+                "Best Return",
+                ch.fmt_pct(best_return.get("return_pct"), as_fraction=False),
+                best_return.get("profile_name"),
+            )
+        if latest.get("narrative"):
+            st.info(latest["narrative"])
+        st.caption(
+            str(latest.get("run_config", {}).get("ranking_method") or _C.RANKING_METHOD)
+        )
+        ranking_columns = [
+            "rank", "profile_name", "profile_kind", "promotion_status", "ranking_score",
+            "total_trades", "win_rate", "total_pnl_dollars", "return_pct",
+            "max_drawdown_dollars", "max_drawdown_pct", "profit_factor",
+            "expectancy_dollars", "max_consecutive_losses",
+        ]
+        st.dataframe(
+            [{key: row.get(key) for key in ranking_columns} for row in rankings],
+            width="stretch",
+            hide_index=True,
+        )
+        st.markdown("**Dynamic vs Control**")
+        if latest["dynamic_vs_control"]:
+            st.dataframe(latest["dynamic_vs_control"], width="stretch", hide_index=True)
+        else:
+            st.caption("More data will appear after comparison runs.")
+        impact_tabs = st.tabs(["Corridor Impact", "WDS Tier Impact"])
+        for tab, rows in zip(
+            impact_tabs, [latest["by_corridor"], latest["by_wds_tier"]], strict=False
+        ):
+            with tab:
+                if rows:
+                    st.dataframe(rows, width="stretch", hide_index=True)
+                else:
+                    st.caption("More data will appear after comparison runs.")
+        st.markdown("**Trade Logs by Profile**")
+        by_profile: dict[str, list[dict]] = {}
+        for row in latest["trade_rows"]:
+            by_profile.setdefault(str(row.get("_profile") or "Unknown"), []).append(row)
+        if not by_profile:
+            st.caption("More data will appear after comparison runs.")
+        for profile_id, rows in by_profile.items():
+            with st.expander(f"{_profile_label(profile_id)} — {len(rows)} trades"):
+                st.dataframe(
+                    [{k: v for k, v in row.items() if not k.startswith("_")} for row in rows],
+                    width="stretch",
+                    hide_index=True,
+                )
+
+    with st.expander("Advanced — comparison CLI command", expanded=False):
+        st.code(
+            om.backtest_compare_command(
+                cmp_symbol,
+                cmp_profile_request,
+                cmp_latest_days,
+                cmp_dte,
+                cmp_label,
+                cmp_balance,
+                cmp_contracts,
+            ),
+            language="bash",
+        )
+
+
 def render_backtests() -> None:
     """Phase 10C follow-up — usable LOCAL backtests: pick symbol / saved profile (incl.
     custom) / DTE / date mode (Latest N · Date range · All data), see how far back local
@@ -2291,6 +2558,8 @@ def render_backtests() -> None:
                 else:
                     st.caption("More data will appear after runs.")
     st.caption("Historical simulation only — no broker, no order preview, no execution.")
+
+    render_backtest_comparison()
 
     # ── Advanced — CLI equivalent (secondary fallback; not the main workflow) ──
     with st.expander("Advanced — CLI command (optional, runs the same thing)", expanded=False):
