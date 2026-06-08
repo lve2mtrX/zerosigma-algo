@@ -71,6 +71,17 @@ copy .env.example .env           # then edit .env locally
 
 ---
 
+## Windows desktop launcher
+
+The local Windows launcher lives at
+[`tools/windows/Launch_ZeroSigma_Algo_Cockpit.bat`](tools/windows/Launch_ZeroSigma_Algo_Cockpit.bat).
+Copy it to the Desktop or create a shortcut, then double-click it to start the
+cockpit. Close the dedicated Edge app window to stop Streamlit. This workflow is
+local only and does not enable broker execution. See
+[`tools/windows/README.md`](tools/windows/README.md) for setup and troubleshooting.
+
+---
+
 ## Run
 
 All three entry points work locally against the stub structure + mock quote providers. No broker. No live ZS API call.

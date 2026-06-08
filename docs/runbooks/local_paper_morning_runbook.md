@@ -2,16 +2,18 @@
 
 Use this during the next RTH session before starting a local paper test.
 
-## 1. Open the app
+## 1. Launch the cockpit and confirm readiness
 
-Run:
+Use the Desktop shortcut or Windows launcher:
 
 ```powershell
-python -m scripts.run_streamlit
+.\tools\windows\Launch_ZeroSigma_Algo_Cockpit.bat
 ```
 
-Confirm the app source is Live, the symbol is SPX, and the safety banner says
-local paper / no broker execution.
+As a terminal-only fallback, run `python -m scripts.run_streamlit`.
+
+Confirm the Morning Startup Checklist, the app source is Live, the symbol is
+SPX, and the safety banner says local paper / no broker execution.
 
 ## 2. Run RTH diagnostics
 
