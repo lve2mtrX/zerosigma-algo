@@ -24,10 +24,11 @@ BENCHMARK_CANDIDATES = (
 )
 
 
-def _profile_card(profile: StrategyProfile, why: str) -> dict[str, Any]:
+def _profile_card(profile: StrategyProfile, why: str, *, role: str) -> dict[str, Any]:
     return {
         "profile_id": profile.profile_id,
         "profile_name": profile.profile_name,
+        "role": role,
         "why_included": why,
         "why_not_production_approved": (
             "Forward paper is observation only. Positive historical control results "
@@ -46,10 +47,15 @@ def _profile_card(profile: StrategyProfile, why: str) -> dict[str, Any]:
             else f"{profile.stop_loss_pct:.0%} credit stop"
         ),
         "dte": profile.target_dte,
+        "starting_account_suggestion": 10000,
+        "contracts": 1,
         "account_sizing_suggestion": "$10,000 / 1 contract to start; compare with $2,500 / 1.",
         "what_to_watch_live": [
             "quote state stays Quotes: Available during RTH",
             "required strikes are present",
+            "entry credit and distance to short",
+            "WDS/corridor context",
+            "TP/SL/EOD behavior",
             "actual fill/exit behavior versus historical replay",
             "drawdown after one loss and after clustered losses",
         ],
@@ -70,10 +76,14 @@ def build_forward_readiness(
     stress_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profiles: list[dict[str, Any]] = []
-    for profile_id, why in BENCHMARK_CANDIDATES:
+    for index, (profile_id, why) in enumerate(BENCHMARK_CANDIDATES):
         loaded = load_profile_file(profile_id)
         if loaded.ok and loaded.profile is not None:
-            profiles.append(_profile_card(loaded.profile, why))
+            profiles.append(_profile_card(
+                loaded.profile,
+                why,
+                role="Benchmark" if index == 0 else "Secondary benchmark",
+            ))
     if (
         stress_recommendation
         and stress_recommendation.get("freeze_eligible")
@@ -84,6 +94,7 @@ def build_forward_readiness(
             profiles.append(_profile_card(
                 candidate,
                 "Optimized near-miss candidate cleared Phase 10I stress criteria.",
+                role="Research candidate",
             ))
         except TypeError:
             pass
@@ -101,6 +112,28 @@ def build_forward_readiness(
             "Live quotes or Sandbox mode."
         ),
     }
+
+
+def load_forward_readiness(directory: Path | None = None) -> dict[str, Any]:
+    """Read the existing local report, falling back to deterministic candidates."""
+    path = (directory or forward_readiness_latest_dir()) / "forward_paper_candidates.json"
+    fallback = build_forward_readiness()
+    if path.is_file():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("profiles"), list):
+                defaults = {
+                    row["profile_id"]: row for row in fallback["profiles"]
+                }
+                payload["profiles"] = [
+                    {**defaults.get(str(row.get("profile_id")), {}), **row}
+                    for row in payload["profiles"]
+                    if isinstance(row, dict)
+                ]
+                return payload
+        except (OSError, ValueError):
+            pass
+    return fallback
 
 
 def forward_readiness_base() -> Path:
@@ -130,6 +163,7 @@ def _markdown(report: dict[str, Any]) -> str:
             f"## {item['profile_name']}",
             "",
             f"- Profile: `{item['profile_id']}`",
+            f"- Role: {item['role']}",
             f"- Why included: {item['why_included']}",
             f"- Not production approved: {item['why_not_production_approved']}",
             f"- Entry window: {item['entry_window']}",

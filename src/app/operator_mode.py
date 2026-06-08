@@ -542,6 +542,201 @@ def quote_chain_dte(expiry: Any, today: Any) -> int | None:
         return None
 
 
+CHECK_PASS = "Pass"
+CHECK_BLOCKED = "Blocked"
+CHECK_UNKNOWN = "Unknown"
+
+PAPER_CANDIDATE_PROFILE_IDS = (
+    "morning_5k_call_tp75_control",
+    "morning_2k_call_no_tp_control",
+)
+
+SAFE_LOCAL_EXECUTION_MODES = ("disabled", "local_paper", "manual_trade_tracking")
+
+
+def local_paper_execution_mode(mode: Any) -> bool:
+    """True only for configured execution modes that cannot route a broker order."""
+    return str(mode or "").strip().lower() in SAFE_LOCAL_EXECUTION_MODES
+
+
+def _check_item(item: str, state: Any, pass_reason: str, blocked_reason: str) -> dict[str, str]:
+    if state is True:
+        return {"item": item, "status": CHECK_PASS, "reason": pass_reason}
+    if state is False:
+        return {"item": item, "status": CHECK_BLOCKED, "reason": blocked_reason}
+    return {"item": item, "status": CHECK_UNKNOWN, "reason": "Unable to confirm yet."}
+
+
+def morning_startup_checklist(
+    *,
+    app_source_live: Any,
+    symbol: Any,
+    structure_available: Any,
+    tasty_configured: Any,
+    tasty_authenticated: Any,
+    selected_profile_id: Any,
+    profile_dte: Any,
+    quote_chain_dte: Any,
+    required_strikes: Any,
+    quote_state: Any,
+    top_blocker: Any = None,
+    start_enabled: Any,
+    local_paper_only: Any,
+) -> list[dict[str, str]]:
+    """Ten deterministic operator checks for the morning local-paper workflow."""
+    profile = str(selected_profile_id or "").strip()
+    symbol_text = str(symbol or "").strip().upper()
+    try:
+        strikes_present = bool(list(required_strikes or []))
+    except TypeError:
+        strikes_present = False
+    try:
+        dte_matches = (
+            int(profile_dte) == int(quote_chain_dte)
+            if profile_dte is not None and quote_chain_dte is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        dte_matches = None
+    quote_state_text = str(quote_state or "").strip()
+    quotes_available = (
+        True if quote_state_text == "chain_returned_usable"
+        else None if not quote_state_text
+        else False
+    )
+    quote_label = quote_state_label(quote_state_text, top_blocker)
+    return [
+        _check_item(
+            "App source is Live",
+            app_source_live,
+            "Run Strategy is using Live data.",
+            "Switch the app data source to Live.",
+        ),
+        _check_item(
+            "Selected symbol is SPX",
+            symbol_text == "SPX" if symbol_text else None,
+            "Selected symbol is SPX.",
+            f"Selected symbol is {symbol_text or 'unknown'}; switch to SPX.",
+        ),
+        _check_item(
+            "ZerσSigma structure is available",
+            structure_available,
+            "ZerσSigma structure data is available.",
+            "Structure unavailable. Check ZS API auth/source.",
+        ),
+        _check_item(
+            "Tasty OAuth is configured/authenticated",
+            (
+                False if tasty_configured is False or tasty_authenticated is False
+                else True if tasty_configured is True and tasty_authenticated is True
+                else None
+            ),
+            "Tasty OAuth is configured and the quote path authenticated.",
+            "Tasty auth failed or is not configured. Check OAuth env values.",
+        ),
+        _check_item(
+            "Selected profile is this week's paper candidate",
+            profile in PAPER_CANDIDATE_PROFILE_IDS if profile else None,
+            "Selected profile is in this week's forward-paper candidate set.",
+            "Choose Morning 5K Call TP75 Control or Morning 2K Call No TP Control.",
+        ),
+        _check_item(
+            "Profile DTE equals quote-chain DTE",
+            dte_matches,
+            f"Profile and quote chain both target {profile_dte}DTE.",
+            f"Profile is {profile_dte}DTE but quote chain is {quote_chain_dte}DTE.",
+        ),
+        _check_item(
+            "Required strikes are present",
+            strikes_present,
+            f"{len(list(required_strikes or []))} required strikes are present.",
+            "Required strikes are missing. Check structure anchors and quote request.",
+        ),
+        _check_item(
+            "Quotes are Available",
+            quotes_available,
+            "Quotes are Available and usable.",
+            f"Quotes are {quote_label}. Fresh usable quotes are required.",
+        ),
+        _check_item(
+            "Start Paper Test is enabled",
+            start_enabled,
+            "Start Paper Test is enabled.",
+            "Start Paper Test is disabled. Follow the blocker guidance below.",
+        ),
+        _check_item(
+            "Local paper only / no broker execution",
+            local_paper_only,
+            "Local paper only. No broker execution.",
+            "Local-paper safety could not be confirmed. Do not start.",
+        ),
+    ]
+
+
+def readiness_next_action(
+    *,
+    reason: Any = None,
+    quote_state: Any = None,
+    top_blocker: Any = None,
+    structure_available: Any = True,
+) -> str:
+    """Friendly operator action for a blocked Start Paper Test decision."""
+    reason_text = str(reason or "")
+    state = str(quote_state or "")
+    blocker = str(top_blocker or "").lower()
+    if structure_available is False:
+        return "Structure unavailable. Check ZS API auth/source."
+    if "Profile targets" in reason_text and "quote chain" in reason_text:
+        return "After-hours preview only. Re-check during RTH."
+    if state == "auth_failed" or "authentication failed" in reason_text.lower():
+        return "Tasty auth failed. Check OAuth env values."
+    if state == "chain_returned_stale" or blocker == "stale":
+        return "Quotes are stale. Wait for RTH or use Sandbox."
+    if state == "chain_returned_missing_required_strikes":
+        return "Required strikes are missing. Check structure anchors and quote request."
+    if state == "quote_request_skipped" or "Required strikes are empty" in reason_text:
+        return "No required strikes were generated. Check structure anchors and selected profile."
+    if state == "chain_returned_validation_failed" and blocker == "spread_abs":
+        return "Quotes returned but failed spread validation. Do not start."
+    if state in ("chain_unavailable", "chain_resolved_quotes_unavailable"):
+        return "No usable quote chain. Run RTH diagnostics and re-check root/expiry."
+    if reason_text:
+        return reason_text
+    return "Readiness is unknown. Refresh status and run RTH diagnostics."
+
+
+def rth_diagnostic_commands(symbol: Any, profile_id: Any, dte: Any) -> list[str]:
+    """Copyable, read-only RTH diagnostic commands for the selected profile."""
+    sym = normalize_symbol(symbol)
+    profile = str(profile_id or PAPER_CANDIDATE_PROFILE_IDS[0]).strip()
+    try:
+        dte_value = int(dte)
+    except (TypeError, ValueError):
+        dte_value = 0
+    return [
+        f"python -m scripts.diagnose_tasty_quotes --symbol {sym} --dte {dte_value}",
+        f"python -m scripts.diagnose_cockpit_quote_status --symbol {sym} --dte {dte_value}",
+        (
+            "python -m scripts.diagnose_live_readiness "
+            f"--symbol {sym} --profile {profile} --dte {dte_value}"
+        ),
+    ]
+
+
+def eod_review_checklist() -> list[str]:
+    """Operator actions for closing out one local paper-test session."""
+    return [
+        "Stop paper test if it is still running.",
+        "Refresh Paper Portfolio.",
+        "Generate / Refresh EOD summary.",
+        "Review open and closed trades.",
+        "Review no-trade reasons.",
+        "Review quote blockers.",
+        "Save notes for tomorrow.",
+        "Compare live paper behavior to backtest expectation.",
+    ]
+
+
 def quote_state_banner(
     state: Any,
     symbol: Any,

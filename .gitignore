@@ -48,6 +48,7 @@ outputs/forward/*
 outputs/portfolio_forward/*
 outputs/backtests/*
 outputs/forward_readiness/*
+outputs/readiness/*
 !outputs/latest/.gitkeep
 !outputs/runs/.gitkeep
 !outputs/daily/.gitkeep
@@ -55,6 +56,7 @@ outputs/forward_readiness/*
 !outputs/portfolio_forward/.gitkeep
 !outputs/backtests/.gitkeep
 !outputs/forward_readiness/.gitkeep
+!outputs/readiness/.gitkeep
 
 # Local data caches
 data/

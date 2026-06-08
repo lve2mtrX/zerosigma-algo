@@ -3197,3 +3197,49 @@ Phase 10I stress/readiness results:
 - Added `docs/research/` as reference material for later review. References saved
   there are not model training data and should be converted into summaries,
   testable hypotheses, required data, proposed backtests, and status labels.
+
+---
+
+## 2026-06-08 — Phase 10J implementation plan: operator readiness runbook
+
+Branch: `codex/phase-10j-operator-readiness-runbook`.
+
+Phase 10J makes the existing local-paper workflow easy to operate during the
+next RTH session. It does not add strategy, selector, risk, quote-validation,
+broker, order-preview, Hermes, or machine-learning behavior.
+
+1. Add a Morning Startup Checklist shared by Run Strategy and pure tests. Every
+   prerequisite reports Pass, Blocked, or Unknown with an exact reason.
+2. Add copyable RTH diagnostic commands, including a selected-profile-aware live
+   readiness command.
+3. Map disabled Start Paper Test conditions to friendly next actions, including
+   after-hours DTE mismatch, stale/wide/missing quotes, ZS structure failure, and
+   Tasty OAuth failure.
+4. Surface the two Phase 10I forward-paper benchmark cards in Run Strategy,
+   clearly marked local-paper only and not production-approved.
+5. Add an EOD review checklist plus morning/EOD runbook docs.
+6. Persist the sanitized live-readiness diagnostic to
+   `outputs/readiness/latest/readiness_summary.json` for the app to display.
+7. Validate after-hours behavior without treating a closed-market or 0DTE/1DTE
+   mismatch as a code failure.
+
+Phase 10J implementation results:
+
+- Run Strategy now shows a ten-item Morning Startup Checklist with Pass, Blocked,
+  or Unknown status and an exact reason for every prerequisite.
+- Disabled Start Paper Test states now show a friendly next action. The current
+  after-hours result is correctly blocked because the selected benchmark targets
+  0DTE while the returned quote chain is 1DTE; the operator is told to re-check
+  during RTH.
+- Run Strategy includes selected-profile-aware RTH diagnostic commands, the two
+  forward-paper benchmark cards, and an EOD Review Checklist.
+- Added local paper morning and EOD review runbooks under `docs/runbooks/`.
+- `diagnose_live_readiness` now atomically writes a strict-allowlist sanitized
+  snapshot to `outputs/readiness/latest/readiness_summary.json`; Settings displays
+  the readable latest status without raw JSON.
+- Browser DOM validation confirmed the startup checklist, benchmark cards,
+  selected-profile diagnostic command, EOD checklist, disabled Start button,
+  blocker guidance, and Settings snapshot. Browser screenshot capture timed out,
+  but no framework overlay was present.
+- Validation: 893 tests passed, Ruff passed, 14/14 profiles valid, and
+  `git diff --check` passed.

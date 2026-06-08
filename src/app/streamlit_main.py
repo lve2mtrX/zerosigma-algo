@@ -1626,11 +1626,12 @@ def render_forward_runner() -> None:
         if _sel_runner_dict else _run_profile_dte
     )
     _quote_chain_dte = om.quote_chain_dte(getattr(chain, "expiry", None), now_et())
+    _local_paper_mode = om.local_paper_execution_mode(CFG.providers.execution_active)
     _readiness = om.paper_test_readiness(
         runner_can_start=can,
         runner_reason=om.humanize_runner_message(why),
         selected_profile_valid=bool(_sel_known and _sel_runner_dict),
-        local_paper_mode=True,
+        local_paper_mode=_local_paper_mode,
         structure_available=bool(structure is not None and structure_error is None)
         or _run_structure_name == "stub",
         required_strikes=quote_request.required_strikes,
@@ -1669,10 +1670,64 @@ def render_forward_runner() -> None:
         st.success(_readiness["reason"])
     else:
         st.warning(f"Cannot start paper test: {_readiness['reason']}")
+        st.info(
+            "Next action: " + om.readiness_next_action(
+                reason=_readiness["reason"],
+                quote_state=QUOTE_STATUS["state"],
+                top_blocker=_tb,
+                structure_available=bool(structure is not None and structure_error is None)
+                or _run_structure_name == "stub",
+            )
+        )
         if _readiness["preview_only"]:
             st.info(
                 "Preview only — cannot start live paper test until quotes are fresh/usable."
             )
+    _tasty_authenticated = (
+        True if QUOTE_STATUS["details"].get("chain_returned") else (
+            False if QUOTE_STATUS["state"] in ("not_configured", "auth_failed") else None
+        )
+    )
+    _startup_rows = om.morning_startup_checklist(
+        app_source_live=not _run_sandbox,
+        symbol=SYMBOL,
+        structure_available=bool(structure is not None and structure_error is None)
+        or _run_structure_name == "stub",
+        tasty_configured=ch.tasty_configured(),
+        tasty_authenticated=_tasty_authenticated,
+        selected_profile_id=sel_profile if _sel_known else None,
+        profile_dte=_profile_dte,
+        quote_chain_dte=_quote_chain_dte,
+        required_strikes=quote_request.required_strikes,
+        quote_state=QUOTE_STATUS["state"],
+        top_blocker=_tb,
+        start_enabled=_can_start,
+        local_paper_only=_local_paper_mode,
+    )
+    st.markdown("**Morning Startup Checklist**")
+    st.dataframe(_startup_rows, width="stretch", hide_index=True)
+    from src.backtesting import forward_readiness as _FR
+
+    _candidate_report = _FR.load_forward_readiness()
+    st.markdown("**This week's forward-paper candidates**")
+    _candidate_cols = st.columns(2)
+    for _idx, _card in enumerate((_candidate_report.get("profiles") or [])[:2]):
+        with _candidate_cols[_idx % 2].container(border=True):
+            st.markdown(f"**{_card.get('profile_name') or _card.get('profile_id')}**")
+            st.caption(f"{_card.get('role') or 'Benchmark'} · not production-approved")
+            st.write(_card.get("why_included") or "Forward-paper benchmark.")
+            st.caption(
+                f"Start: ${float(_card.get('starting_account_suggestion') or 10000):,.0f} "
+                f"/ {int(_card.get('contracts') or 1)} contract"
+            )
+            st.caption("Watch live: " + "; ".join(_card.get("what_to_watch_live") or []))
+    with st.expander("Advanced — RTH diagnostics commands", expanded=False):
+        for _cmd in om.rth_diagnostic_commands(SYMBOL, sel_profile, _profile_dte):
+            st.code(_cmd, language="powershell")
+        st.caption("Read-only diagnostics. No secrets, no broker execution, no order preview.")
+    with st.expander("EOD Review Checklist", expanded=False):
+        for _item in om.eod_review_checklist():
+            st.markdown(f"- {_item}")
     bcols = st.columns(6)
     if bcols[0].button(om.BTN_REFRESH, key="runner_refresh"):
         st.rerun()
@@ -3163,7 +3218,14 @@ def render_logs() -> None:
         _sig = [int(r.get("signal_count") or 0) for r in reversed(_runsum)]
         if _chart_ready(_sig):
             st.caption("Selected signals over runs (oldest → newest)")
-            st.bar_chart({"selected signals": _sig})
+            st.bar_chart(
+                [
+                    {"run": index, "selected_signals": value}
+                    for index, value in enumerate(_sig, start=1)
+                ],
+                x="run",
+                y="selected_signals",
+            )
         else:
             st.info("More data will appear after runs.")
 
@@ -3254,6 +3316,27 @@ def render_settings() -> None:
         st.caption(
             "These settings affect local paper lifecycle and sizing; the selected strategy "
             f"remains: {_settings_profile_name}."
+        )
+    from src.app import readiness_snapshot as _RS
+
+    _latest_readiness = _RS.read_readiness_snapshot()
+    st.markdown("**Latest readiness snapshot**")
+    if _latest_readiness:
+        _snap_cols = st.columns(4)
+        _snap_cols[0].metric("Captured", _latest_readiness.get("captured_at") or "—")
+        _snap_cols[1].metric("Profile", _latest_readiness.get("profile_id") or "—")
+        _snap_cols[2].metric(
+            "Quotes",
+            f"Quotes: {_latest_readiness.get('quote_label') or 'Unknown'}",
+        )
+        _snap_cols[3].metric(
+            "Start Paper Test",
+            "Enabled" if _latest_readiness.get("start_paper_test_enabled") else "Disabled",
+        )
+        st.caption(_latest_readiness.get("start_reason") or "No readiness reason captured.")
+    else:
+        st.caption(
+            "No readiness snapshot yet. Run the live-readiness diagnostic from Run Strategy."
         )
     with st.form("session_controls"):
         c1, c2, c3 = st.columns(3)

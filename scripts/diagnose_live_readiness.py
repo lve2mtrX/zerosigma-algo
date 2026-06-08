@@ -161,6 +161,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dte", type=int, default=0)
     parser.add_argument("--structure-provider", default="zerosigma_api")
     parser.add_argument("--quote-provider", default="tastytrade")
+    parser.add_argument(
+        "--output-root", default="outputs", help="root for sanitized latest-readiness snapshot"
+    )
     args = parser.parse_args(argv)
     result = collect_live_readiness(
         symbol=args.symbol.strip().upper(),
@@ -169,6 +172,9 @@ def main(argv: list[str] | None = None) -> int:
         structure_provider_name=args.structure_provider,
         quote_provider_name=args.quote_provider,
     )
+    from src.app.readiness_snapshot import write_readiness_snapshot
+
+    snapshot_path = write_readiness_snapshot(result, output_root=args.output_root)
     rows = [
         ("ZS configured", result["zs_configured"]),
         ("ZS structure available", result["structure_available"]),
@@ -200,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
     for label, value in rows:
         print(f"  {label.ljust(width)} : {value}")
     print("\nNo secrets shown. No broker execution. No order preview.")
+    print(f"Sanitized latest snapshot: {snapshot_path}")
     return 0
 
 

@@ -76,7 +76,7 @@ def test_live_readiness_blocks_profile_chain_dte_mismatch():
     assert om.quote_chain_dte("2026-06-08", datetime(2026, 6, 7)) == 1
 
 
-def test_live_readiness_cli_output_is_sanitized(monkeypatch, capsys):
+def test_live_readiness_cli_output_is_sanitized(monkeypatch, capsys, tmp_path):
     payload = {
         "symbol": "SPX",
         "target_dte": 0,
@@ -108,6 +108,7 @@ def test_live_readiness_cli_output_is_sanitized(monkeypatch, capsys):
     monkeypatch.setattr(live_cli, "collect_live_readiness", lambda **kwargs: payload)
     rc = live_cli.main([
         "--symbol", "SPX", "--profile", "morning_5k_call_tp75_control", "--dte", "0",
+        "--output-root", str(tmp_path),
     ])
     out = capsys.readouterr().out.lower()
     assert rc == 0
