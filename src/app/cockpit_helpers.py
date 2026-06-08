@@ -1693,6 +1693,62 @@ def read_backtest_robustness_review(results_dir: Any) -> dict[str, Any]:
     return out
 
 
+def read_backtest_stress_review(results_dir: Any) -> dict[str, Any]:
+    """Read Phase 10I near-miss stress-review outputs for Optimization Lab."""
+    import json as _json
+
+    out: dict[str, Any] = {
+        "available": False,
+        "reason": "",
+        "results_dir": str(results_dir),
+        "candidate_profile_snapshot": {},
+        "split_stress_summary": [],
+        "slippage_stress_summary": [],
+        "account_sizing_stress": [],
+        "concentration_summary": [],
+        "recommendation": {},
+        "narrative": "",
+    }
+    try:
+        directory = Path(results_dir)
+    except (TypeError, ValueError):
+        out["reason"] = "No stress-review directory configured."
+        return out
+    snapshot_path = directory / "candidate_profile_snapshot.json"
+    if not snapshot_path.is_file():
+        out["reason"] = "No near-miss stress review yet. Run the Phase 10I stress CLI."
+        return out
+    try:
+        out["candidate_profile_snapshot"] = _json.loads(
+            snapshot_path.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        out["reason"] = "Near-miss stress snapshot is unreadable."
+        return out
+    for key in (
+        "split_stress_summary",
+        "slippage_stress_summary",
+        "account_sizing_stress",
+        "concentration_summary",
+    ):
+        out[key] = _read_csv_rows(directory / f"{key}.csv")
+    narrative_path = directory / "narrative_summary.md"
+    if narrative_path.is_file():
+        try:
+            text = narrative_path.read_text(encoding="utf-8")
+            out["narrative"] = text.split("```json", 1)[0].replace(
+                "# Near-Miss Candidate Stress Review", ""
+            ).strip()
+            if "```json" in text:
+                out["recommendation"] = _json.loads(
+                    text.split("```json", 1)[1].split("```", 1)[0]
+                )
+        except (OSError, ValueError):
+            pass
+    out["available"] = True
+    return out
+
+
 def compute_wds(w1_strike: Any, w1_volume: Any, w2_strike: Any, w2_volume: Any) -> dict[str, Any]:
     """True WDS for ONE wing from its W1 (10K wing) + adjacent W2 strike.
     WSR = W2_volume / W1_volume; WDS = 1 - WSR. ``source`` is 'unavailable' (never

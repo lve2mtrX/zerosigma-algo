@@ -1573,6 +1573,7 @@ def render_forward_runner() -> None:
 
     # ── Phase 9I — App vs Profile data source for THIS run (never silently mismatch) ──
     _ovr_struct = _ovr_quote = None
+    _run_structure_name, _run_quote_name = resolved_structure_name, resolved_quote_name
     if _sel_known and _sel_runner_dict:
         _app_ds = om.providers_to_data_source(chosen_structure, chosen_quote)
         # Simple Mode: app data source wins by default (explicit, see caption).
@@ -1584,6 +1585,8 @@ def render_forward_runner() -> None:
         _run = om.resolve_run_source(
             _app_ds, _sel_runner_dict.get("structure_provider"),
             _sel_runner_dict.get("quote_provider"), prefer=_prefer)
+        _run_structure_name = _run["structure_provider"]
+        _run_quote_name = _run["quote_provider"]
         _status = om.run_source_status(chain_available=chain is not None,
                                        mismatch=_run["mismatch"])
         _badge = {"ready": "✅ ready", "warning": "⚠ warning", "unavailable": "⛔ unavailable"}
@@ -1616,10 +1619,60 @@ def render_forward_runner() -> None:
         st.warning("⚠ " + _mismatch["message"])
 
     can, why = control_ui.can_start(control_ui.get_status())
-    # Phase 10C follow-up — Start Paper Test is additionally blocked when LIVE quotes
-    # are stale (starting a live test that cannot price is pointless). Preview Strategy
-    # stays enabled but is marked preview-only. Sandbox is never stale → unaffected.
-    _can_start = can and not LIVE_QUOTES_STALE
+    _tb = QUOTE_STATUS["details"].get("top_blocker")
+    _run_sandbox = om.is_sandbox(_run_structure_name, _run_quote_name)
+    _profile_dte = (
+        _sel_runner_dict.get("target_dte")
+        if _sel_runner_dict else _run_profile_dte
+    )
+    _quote_chain_dte = om.quote_chain_dte(getattr(chain, "expiry", None), now_et())
+    _readiness = om.paper_test_readiness(
+        runner_can_start=can,
+        runner_reason=om.humanize_runner_message(why),
+        selected_profile_valid=bool(_sel_known and _sel_runner_dict),
+        local_paper_mode=True,
+        structure_available=bool(structure is not None and structure_error is None)
+        or _run_structure_name == "stub",
+        required_strikes=quote_request.required_strikes,
+        quote_state=QUOTE_STATUS["state"],
+        top_blocker=_tb,
+        sandbox=_run_sandbox,
+        profile_dte=_profile_dte,
+        quote_chain_dte=_quote_chain_dte,
+    )
+    _can_start = bool(_readiness["can_start"])
+    st.markdown("**Paper-test readiness**")
+    _ready_cards = st.columns(5)
+    _ready_cards[0].metric("Profile DTE", om.dte_label(_profile_dte))
+    _ready_cards[1].metric(
+        "Quote Chain DTE",
+        om.dte_label(_quote_chain_dte if _quote_chain_dte is not None else PREVIEW_DTE),
+    )
+    _ready_cards[2].metric(
+        "Required Strikes", str(_readiness["required_strike_count"])
+    )
+    _ready_cards[3].metric(
+        "Quote Provider Status",
+        f"Quotes: {_readiness['quote_label']}",
+    )
+    _ready_cards[4].metric(
+        "Start Paper Test", "Enabled" if _can_start else "Disabled"
+    )
+    st.caption(
+        "Required strikes: "
+        + (
+            ", ".join(f"{float(strike):g}" for strike in quote_request.required_strikes)
+            if quote_request.required_strikes else "none"
+        )
+    )
+    if _can_start:
+        st.success(_readiness["reason"])
+    else:
+        st.warning(f"Cannot start paper test: {_readiness['reason']}")
+        if _readiness["preview_only"]:
+            st.info(
+                "Preview only — cannot start live paper test until quotes are fresh/usable."
+            )
     bcols = st.columns(6)
     if bcols[0].button(om.BTN_REFRESH, key="runner_refresh"):
         st.rerun()
@@ -1629,7 +1682,9 @@ def render_forward_runner() -> None:
         ok, msg, pid = control_ui.start_runner(
             sel_profile, once=True, market_hours_only=bool(market_hours_only),
             structure_provider=_ovr_struct, quote_provider=_ovr_quote)
-        _pv = "Preview launched (preview-only — quotes are stale). " if (ok and LIVE_QUOTES_STALE) \
+        _pv = "Preview launched (preview-only — live quotes are blocked). " if (
+            ok and _readiness["preview_only"]
+        ) \
             else ("Preview launched. " if ok else "")
         (st.success if ok else st.error)(_pv + str(msg) + (f" (pid {pid})" if pid else ""))
         if ok:
@@ -1655,9 +1710,6 @@ def render_forward_runner() -> None:
         st.rerun()
     if not can:
         st.caption(f"_Start / Preview disabled: {om.humanize_runner_message(why)}_")
-    elif LIVE_QUOTES_STALE:
-        st.warning(om.START_TEST_STALE_REASON
-                   + " Preview Strategy still works (preview-only).")
     # Phase 10C — force-stop terminates the stored OS process; it is an
     # Advanced-only affordance. In Simple Mode it stays hidden (force=False).
     if not simple_mode:
@@ -2567,6 +2619,67 @@ def render_optimization_lab() -> None:
             )
     with review_tabs[3]:
         st.dataframe(review["expanded_run_summary"], width="stretch", hide_index=True)
+
+    from src.backtesting import stress_review as _S
+
+    st.markdown("**Near-Miss Candidate Review**")
+    stress = ch.read_backtest_stress_review(_S.stress_latest_dir())
+    st.caption(f"Reading: `{stress['results_dir']}`")
+    if not stress["available"]:
+        st.caption(stress["reason"])
+        return
+    if stress.get("narrative"):
+        st.info(stress["narrative"])
+    stress_recommendation = stress.get("recommendation") or {}
+    stress_cards = st.columns(4)
+    stress_cards[0].metric(
+        "Final Recommendation",
+        stress_recommendation.get("recommendation") or "No recommendation",
+    )
+    stress_cards[1].metric(
+        "Stress Criteria",
+        (
+            f"{stress_recommendation.get('passed_criteria', 0)}/"
+            f"{stress_recommendation.get('total_criteria', 0)}"
+        ),
+    )
+    snapshot = stress.get("candidate_profile_snapshot") or {}
+    stress_cards[2].metric("Candidate Hash", snapshot.get("parameter_hash") or "—")
+    stress_cards[3].metric(
+        "Profile Frozen",
+        "Eligible, disabled research only"
+        if stress_recommendation.get("freeze_eligible")
+        else "No — near-miss remains research",
+    )
+    stress_tabs = st.tabs([
+        "Split Stress",
+        "Fill Stress",
+        "Account Stress",
+        "Concentration Check",
+        "Final Recommendation",
+    ])
+    with stress_tabs[0]:
+        st.dataframe(stress["split_stress_summary"], width="stretch", hide_index=True)
+    with stress_tabs[1]:
+        st.dataframe(stress["slippage_stress_summary"], width="stretch", hide_index=True)
+        st.caption(
+            "Fill stress uses a conservative post-trade entry-credit deduction; "
+            "it is not lifecycle resimulation."
+        )
+    with stress_tabs[2]:
+        st.dataframe(stress["account_sizing_stress"], width="stretch", hide_index=True)
+    with stress_tabs[3]:
+        st.dataframe(stress["concentration_summary"], width="stretch", hide_index=True)
+    with stress_tabs[4]:
+        if stress_recommendation.get("freeze_eligible"):
+            st.success(
+                "Stress criteria passed. Candidate may be frozen as a disabled "
+                "research profile; this is not production approval."
+            )
+        else:
+            st.warning(
+                "Candidate did not clear every stress criterion. No profile should be frozen."
+            )
 
 
 def render_backtests() -> None:

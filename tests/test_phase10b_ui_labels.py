@@ -58,11 +58,10 @@ def test_quote_state_label_stale_vs_validation_split():
     # validation-failed + stale top blocker → "Stale" (the after-hours case)
     assert om.quote_state_label("chain_returned_validation_failed", "stale") == "Stale"
     # validation-failed + a spread/width blocker → "Validation Blocked"
-    assert (om.quote_state_label("chain_returned_validation_failed", "spread_abs")
-            == "Validation Blocked")
+    assert om.quote_state_label("chain_returned_validation_failed", "spread_abs") == "Wide"
     # the long pinned label is unchanged; this is the SHORT card label only
     assert om.quote_state_label("chain_returned_usable") == "Available"
-    assert om.quote_state_label("chain_returned_stale") == "Quotes Stale"
+    assert om.quote_state_label("chain_returned_stale") == "Stale"
     assert om.quote_state_label("quote_request_skipped") == "No Strikes"
     assert om.quote_state_label("chain_returned_missing_required_strikes") == "Missing Strikes"
     assert om.quote_state_label("chain_unavailable") == "No Chain"

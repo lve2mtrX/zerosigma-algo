@@ -85,10 +85,11 @@ def test_stale_decision_gating_wired_in_source():
     assert "om.decision_headline(" in _SRC
     assert '_dh["live"]' in _SRC
     assert "Preview Candidate" in _SRC
-    # Start Paper Test is additionally gated on stale LIVE quotes; Preview is not
-    assert "_can_start = can and not LIVE_QUOTES_STALE" in _SRC
+    # Start Paper Test uses the shared all-blocker readiness gate; Preview is not.
+    assert "om.paper_test_readiness(" in _SRC
+    assert '_can_start = bool(_readiness["can_start"])' in _SRC
     assert "disabled=not runner_profiles or not _can_start" in _SRC
-    assert "om.START_TEST_STALE_REASON" in _SRC
+    assert "Preview only — cannot start live paper test until quotes are fresh/usable." in _SRC
 
 
 # ── Task C/D — backtest data discovery + UI runner ────────────────────────────

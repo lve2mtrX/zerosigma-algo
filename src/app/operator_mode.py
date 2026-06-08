@@ -399,7 +399,7 @@ _QUOTE_STATE_SHORT = {
     "quote_request_skipped": "No Strikes",
     "chain_resolved_quotes_unavailable": "Chain Resolved",
     "chain_returned_missing_required_strikes": "Missing Strikes",
-    "chain_returned_stale": "Quotes Stale",
+    "chain_returned_stale": "Stale",
     "mock": "Sandbox",
     "not_configured": "Not Configured",
     "auth_failed": "Auth Failed",
@@ -415,10 +415,131 @@ def quote_state_label(state: Any, top_blocker: Any = None) -> str:
     'Validation Blocked'. Keeps the long cockpit_quote_status['label'] untouched."""
     s = str(state or "").strip()
     if s == "chain_returned_stale":
-        return "Quotes Stale"
+        return "Stale"
     if s == "chain_returned_validation_failed":
-        return "Stale" if str(top_blocker or "").lower() == "stale" else "Validation Blocked"
+        blocker = str(top_blocker or "").lower()
+        if blocker == "stale":
+            return "Stale"
+        if blocker == "spread_abs":
+            return "Wide"
+        return "Validation Blocked"
     return _QUOTE_STATE_SHORT.get(s, "Unknown")
+
+
+_LIVE_QUOTE_BLOCK_REASONS = {
+    "not_configured": "Tasty quotes are not configured.",
+    "auth_failed": "Tasty authentication failed.",
+    "root_unresolved": "Tasty could not resolve the option root.",
+    "expiration_unavailable": "The requested quote-chain expiry is unavailable.",
+    "quote_request_skipped": (
+        "Required strikes are empty. Structure anchors may be missing or the "
+        "selected profile may not produce a quote request."
+    ),
+    "chain_unavailable": "No live option chain is available.",
+    "chain_resolved_quotes_unavailable": "The option chain resolved, but quotes are unavailable.",
+    "chain_returned_missing_required_strikes": "The live chain is missing required strikes.",
+    "chain_returned_stale": "Live quotes are stale.",
+    "chain_returned_validation_failed": "Live quotes failed validation.",
+    "unknown_error": "The live quote provider returned an unknown error.",
+}
+
+
+def paper_test_readiness(
+    *,
+    runner_can_start: Any,
+    runner_reason: Any = None,
+    selected_profile_valid: Any,
+    local_paper_mode: Any,
+    structure_available: Any,
+    required_strikes: Any,
+    quote_state: Any,
+    top_blocker: Any = None,
+    sandbox: Any = False,
+    profile_dte: Any = None,
+    quote_chain_dte: Any = None,
+) -> dict[str, Any]:
+    """Return the shared Run Strategy/live-readiness decision.
+
+    Sandbox intentionally bypasses the live-chain requirement, but never the
+    local runner, profile, structure, or required-strike prerequisites.
+    """
+    state = str(quote_state or "").strip()
+    blocker = str(top_blocker or "").strip().lower()
+    strikes = list(required_strikes or [])
+    result = {
+        "can_start": False,
+        "preview_only": False,
+        "reason": "",
+        "quote_label": quote_state_label(state, blocker),
+        "required_strike_count": len(strikes),
+    }
+    if not bool(runner_can_start):
+        result["reason"] = str(runner_reason or "The local paper-test runner is not ready.")
+        return result
+    if not bool(selected_profile_valid):
+        result["reason"] = "The selected strategy profile is missing or invalid."
+        return result
+    if not bool(local_paper_mode):
+        result["reason"] = "Start Paper Test requires local paper mode with no broker execution."
+        return result
+    if not bool(structure_available):
+        result["reason"] = "Structure data is unavailable for the selected profile."
+        return result
+    if not strikes:
+        result["reason"] = _LIVE_QUOTE_BLOCK_REASONS["quote_request_skipped"]
+        result["preview_only"] = not bool(sandbox)
+        return result
+    if bool(sandbox):
+        result.update({
+            "can_start": True,
+            "reason": "Ready for a local Sandbox paper test.",
+            "quote_label": "Sandbox",
+        })
+        return result
+    try:
+        profile_dte_int = int(profile_dte) if profile_dte is not None else None
+        chain_dte_int = int(quote_chain_dte) if quote_chain_dte is not None else None
+    except (TypeError, ValueError):
+        profile_dte_int = chain_dte_int = None
+    if (
+        profile_dte_int is not None
+        and chain_dte_int is not None
+        and profile_dte_int != chain_dte_int
+    ):
+        result["reason"] = (
+            f"Profile targets {profile_dte_int}DTE, but the live quote chain is "
+            f"{chain_dte_int}DTE."
+        )
+        result["preview_only"] = True
+        return result
+    if state == "chain_returned_usable":
+        result.update({
+            "can_start": True,
+            "reason": "Ready for a local Live-data paper test. No broker execution.",
+        })
+        return result
+    reason = _LIVE_QUOTE_BLOCK_REASONS.get(state, "Live quotes are not usable.")
+    if state == "chain_returned_validation_failed" and blocker:
+        reason = (
+            "Live quotes are too wide."
+            if blocker == "spread_abs"
+            else f"Live quotes failed validation: {blocker}."
+        )
+    result["reason"] = reason
+    result["preview_only"] = True
+    return result
+
+
+def quote_chain_dte(expiry: Any, today: Any) -> int | None:
+    """Calendar-day DTE for the actual returned chain expiry."""
+    try:
+        expiry_date = datetime.fromisoformat(str(expiry)[:10]).date()
+        today_date = today.date() if hasattr(today, "date") else datetime.fromisoformat(
+            str(today)[:10]
+        ).date()
+        return max(0, (expiry_date - today_date).days)
+    except (TypeError, ValueError):
+        return None
 
 
 def quote_state_banner(

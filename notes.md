@@ -3141,3 +3141,59 @@ Phase 10H study results:
   all-data expectancy, but one split had only 9 validation trades.
 - Freeze result: 7/8 criteria passed; validation trade floor failed. No profile
   was frozen. Recommendation: keep researching before forward paper.
+
+---
+
+## 2026-06-08 — Phase 10I implementation plan: live paper readiness
+
+Branch: `codex/phase-10i-live-paper-readiness`.
+
+This week is operational readiness week: make local paper tests dependable
+before adding Hermes, machine-learning, or broader research-library automation.
+
+1. Reconcile Tasty/RTH quote-state diagnostics so `diagnose_tasty_quotes`,
+   `diagnose_cockpit_quote_status`, Live Cockpit, Run Strategy, and scanner quote
+   requests distinguish not configured, auth failed, root unresolved, expiry
+   unavailable, no required strikes, no chain, missing required strikes, stale,
+   wide/spread blocked, and usable.
+2. Add a sanitized `diagnose_live_readiness` parity CLI that shows ZS/structure,
+   required quote strikes, Tasty status, top quote blocker, and whether Start
+   Paper Test should be enabled. No secrets, no broker, no order preview.
+3. Make Run Strategy readiness explicit for the selected profile: synopsis, Profile
+   DTE, Quote Chain DTE, required strikes, quote status, and exact Start Paper
+   Test enable/disable reason. Preview may run when quotes are blocked; Start
+   must not.
+4. Stress-review near-miss candidate `1a30a6cdf1b150c0` without further
+   optimization: split sensitivity, fill/slippage haircuts, account sizing, and
+   concentration checks.
+5. Freeze the optimized profile only if it survives stress rules. Otherwise write
+   a plain research summary and no profile.
+6. Write a small forward-paper readiness report for this week’s candidates. These
+   are not production-approved and still run only in local paper.
+7. Add lightweight research-reference docs/templates for future Claude/Codex
+   review. References are not model training data; every useful reference should
+   become a summary, hypothesis, required data, proposed backtest, and status.
+8. No Hermes/ML implementation, no strategy/selector/risk math changes, no quote
+   validation loosening, no broker execution, and no order preview.
+
+Phase 10I stress/readiness results:
+
+- Run Strategy now uses a shared Start Paper Test readiness gate instead of a
+  stale-only quote check. Live starts require local paper mode, a valid selected
+  profile, structure data, required strikes, and a usable quote chain; Sandbox
+  remains explicitly allowed. Preview Strategy remains available when Live quotes
+  are blocked.
+- Added sanitized live-readiness diagnostics for the selected profile:
+  `python -m scripts.diagnose_live_readiness --symbol SPX --profile morning_5k_call_tp75_control --dte 0`.
+- Near-miss candidate `1a30a6cdf1b150c0` produced 35 trades across 147 sessions
+  and passed 5/7 Phase 10I stress criteria. It failed the validation trade floor
+  in several split configurations and failed the 15% account-drawdown guard for
+  small/high-leverage sizing. No profile was frozen.
+- Fill stress stayed positive after 5% and 10% conservative credit haircuts, but
+  account sizing remains the practical risk constraint.
+- Forward-paper readiness report recommends only the two benchmark controls for
+  this week: Morning 5K Call TP75 Control and Morning 2K Call No TP Control.
+  Positive control results remain comparison benchmarks, not production approval.
+- Added `docs/research/` as reference material for later review. References saved
+  there are not model training data and should be converted into summaries,
+  testable hypotheses, required data, proposed backtests, and status labels.
