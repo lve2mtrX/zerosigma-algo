@@ -47,6 +47,7 @@ outputs/daily/*
 outputs/forward/*
 outputs/portfolio_forward/*
 outputs/backtests/*
+outputs/research/*
 outputs/forward_readiness/*
 outputs/readiness/*
 !outputs/latest/.gitkeep
@@ -55,6 +56,7 @@ outputs/readiness/*
 !outputs/forward/.gitkeep
 !outputs/portfolio_forward/.gitkeep
 !outputs/backtests/.gitkeep
+!outputs/research/.gitkeep
 !outputs/forward_readiness/.gitkeep
 !outputs/readiness/.gitkeep
 

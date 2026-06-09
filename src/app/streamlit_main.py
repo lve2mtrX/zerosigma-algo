@@ -2384,6 +2384,130 @@ def render_backtest_comparison() -> None:
         )
 
 
+def render_learning_review() -> None:
+    """Phase 11A readable research evidence and learned-grid recommendations."""
+    from src.backtesting import learning as _L
+
+    st.divider()
+    st.markdown("#### Learning Review")
+    st.caption(
+        "Research-only evidence from historical trades, candidates, and skipped days. "
+        "Low sample sizes and apparent feature edges require chronological validation."
+    )
+    latest = ch.read_backtest_learning(_L.research_latest_dir())
+    actions = st.columns([1, 3])
+    if actions[0].button("Refresh Learning Review", key="learning_refresh"):
+        st.rerun()
+    actions[1].caption(f"Reading: `{latest['results_dir']}`")
+    if not latest["available"]:
+        st.info(latest["reason"])
+        st.code(
+            "python -m scripts.backtest_learn --symbol SPX --dte 0 --all-data "
+            "--profiles all-main --starting-balance 10000 --contracts 1 "
+            "--run-label learn_spx_all_main",
+            language="bash",
+        )
+        return
+    config = latest.get("run_config") or {}
+    cards = st.columns(4)
+    cards[0].metric(
+        "Trades Studied",
+        (config.get("source_counters") or {}).get("selected_trades", 0),
+    )
+    cards[1].metric(
+        "Candidates Studied",
+        (config.get("source_counters") or {}).get("candidates", 0),
+    )
+    cards[2].metric("Hypotheses", config.get("hypothesis_count", 0))
+    cards[3].metric("Learned Grid Variants", config.get("learned_parameter_set_count", 0))
+    st.warning(
+        "Feature buckets describe historical association, not causality. "
+        "The learned grid remains bounded and must survive validation and holdout."
+    )
+    summary = latest["feature_performance_summary"]
+
+    def _number(row, key, default=-1e12):
+        try:
+            return float(row.get(key))
+        except (TypeError, ValueError):
+            return default
+
+    supported = [
+        row for row in summary
+        if str(row.get("low_sample_warning")).lower() not in {"true", "1", "yes"}
+    ]
+    best = sorted(
+        supported or summary,
+        key=lambda row: (
+            -_number(row, "expectancy_dollars"),
+            -_number(row, "trade_count", 0),
+            str(row.get("feature")),
+            str(row.get("bucket")),
+        ),
+    )[:8]
+    worst = sorted(
+        supported or summary,
+        key=lambda row: (
+            _number(row, "expectancy_dollars"),
+            -_number(row, "trade_count", 0),
+            str(row.get("feature")),
+            str(row.get("bucket")),
+        ),
+    )[:8]
+    tabs = st.tabs([
+        "Best / Worst Buckets",
+        "No-Trade Blockers",
+        "Strategy Hypotheses",
+        "Recommended Grids",
+        "Assumption Audit",
+    ])
+    with tabs[0]:
+        columns = st.columns(2)
+        columns[0].markdown("**Best supported buckets**")
+        columns[0].dataframe(best, width="stretch", hide_index=True)
+        columns[1].markdown("**Worst supported buckets**")
+        columns[1].dataframe(worst, width="stretch", hide_index=True)
+        with st.expander("Feature performance summary", expanded=False):
+            st.dataframe(summary, width="stretch", hide_index=True)
+    with tabs[1]:
+        blockers = latest["no_trade_blocker_summary"]
+        if blockers:
+            st.dataframe(blockers, width="stretch", hide_index=True)
+        else:
+            st.caption("No skipped/no-trade blockers were recorded.")
+    with tabs[2]:
+        hypotheses = latest["hypotheses"]
+        if hypotheses:
+            display = [{
+                "Hypothesis": row.get("hypothesis_id"),
+                "Idea": row.get("idea"),
+                "Evidence": row.get("evidence"),
+                "Stage": row.get("research_stage"),
+                "Low Sample": row.get("low_sample_warning"),
+            } for row in hypotheses]
+            st.dataframe(display, width="stretch", hide_index=True)
+        else:
+            st.caption("No hypotheses were generated.")
+    with tabs[3]:
+        st.info(
+            "Recommended next grid: `learned_hypotheses`. It includes the named "
+            "call/dynamic benchmarks and bounded evidence-driven research variants."
+        )
+        st.code(
+            "python -m scripts.backtest_optimize --symbol SPX --dte 0 --all-data "
+            "--grid learned_hypotheses --starting-balance 10000 --contracts 1 "
+            "--max-combinations 48 --run-label learned_grid_smoke",
+            language="bash",
+        )
+        st.dataframe(latest["learned_parameter_sets"], width="stretch", hide_index=True)
+    with tabs[4]:
+        if latest.get("audit"):
+            with st.expander("Current replay assumptions versus exploratory assumptions", expanded=False):
+                st.markdown(latest["audit"])
+        else:
+            st.caption("No assumption audit is available.")
+
+
 def render_optimization_lab() -> None:
     """Phase 10G research-only optimization controls and latest results."""
     from src.backtesting import optimization as _O
@@ -2405,7 +2529,7 @@ def render_optimization_lab() -> None:
         "Grid selection",
         [
             "core_morning", "core_eod", "dynamic_selector_experiments",
-            "controls_baseline", "custom_selected_profiles",
+            "controls_baseline", "learned_hypotheses", "custom_selected_profiles",
         ],
         key="opt_grid",
     )
@@ -2568,7 +2692,11 @@ def render_optimization_lab() -> None:
         values = split_dates.get(key) or []
         card.metric(label, f"{len(values)} sessions", f"{values[0]} → {values[-1]}" if values else "—")
     if rankings:
-        best = (latest["promotion_candidates"] or rankings)[0]
+        research_rankings = [
+            row for row in rankings
+            if row.get("promotion_status") not in {"Benchmark Control", "Comparison Baseline"}
+        ]
+        best = (latest["promotion_candidates"] or research_rankings or rankings)[0]
         benchmarks = [
             row for row in rankings if row.get("promotion_status") == "Benchmark Control"
         ]
@@ -3077,6 +3205,7 @@ def render_backtests() -> None:
     st.caption("Historical simulation only — no broker, no order preview, no execution.")
 
     render_backtest_comparison()
+    render_learning_review()
     render_optimization_lab()
 
     # ── Advanced — CLI equivalent (secondary fallback; not the main workflow) ──

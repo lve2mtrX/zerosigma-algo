@@ -54,6 +54,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profile-ids", nargs="+", default=[])
     parser.add_argument("--trading-root", default=None)
     parser.add_argument("--output-root", default=None)
+    parser.add_argument(
+        "--from-research",
+        default=None,
+        help="generated_strategy_hypotheses.json or containing directory for learned_hypotheses",
+    )
     args = parser.parse_args(argv)
     if args.start and not args.end:
         parser.error("--start requires --end")
@@ -81,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         train_end=args.train_end,
         validation_end=args.validation_end,
         trading_root=args.trading_root,
+        from_research=args.from_research,
     )
     print("ZerσSigma Algo — optimization research harness (no broker/live API)")
     print(

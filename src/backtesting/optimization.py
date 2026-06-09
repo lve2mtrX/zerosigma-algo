@@ -119,6 +119,11 @@ GRID_SPECS: dict[str, dict[str, Any]] = {
             "distance_rule": ["base"],
         },
     },
+    "learned_hypotheses": {
+        "base_profile_ids": [],
+        "dimensions": {},
+        "source": "outputs/research/latest/generated_strategy_hypotheses.json",
+    },
 }
 
 DEFERRED_PARAMETERS = {
@@ -152,6 +157,7 @@ class OptimizationConfig:
     train_end: str | None = None
     validation_end: str | None = None
     trading_root: str | None = None
+    from_research: str | None = None
 
 
 @dataclass
@@ -294,10 +300,48 @@ def build_parameter_grid(
     optimizer_run_id: str,
     max_combinations: int = 12,
     profile_ids: list[str] | tuple[str, ...] | None = None,
+    from_research: str | Path | None = None,
 ) -> list[GeneratedProfile]:
     """Build a deterministic, reproducible in-memory generated-profile grid."""
     if grid_name not in GRID_SPECS:
         raise ValueError(f"unknown optimization grid {grid_name!r}")
+    if grid_name == "learned_hypotheses":
+        from src.backtesting.learning import load_learned_parameter_sets
+
+        learned = load_learned_parameter_sets(from_research)
+        allowed = set(profile_ids or ())
+        if allowed:
+            learned = [row for row in learned if row.get("base_profile_id") in allowed]
+        if not learned:
+            raise ValueError("learned_hypotheses produced no parameter sets")
+        benchmarks = [row for row in learned if row.get("benchmark")]
+        research = [row for row in learned if not row.get("benchmark")]
+        maximum = max_combinations if max_combinations > 0 else len(learned)
+        selected = benchmarks[:maximum]
+        remaining = max(0, maximum - len(selected))
+        if remaining:
+            selected.extend(
+                research[index]
+                for index in _spread_indices(len(research), remaining)
+            )
+        generated: list[GeneratedProfile] = []
+        for index, row in enumerate(selected, start=1):
+            base_id = str(row.get("base_profile_id") or "")
+            parameters = dict(row.get("parameters") or {})
+            parameters["hypothesis_id"] = row.get("hypothesis_id")
+            parameters["learned_variant_id"] = row.get("variant_id")
+            parameters["research_benchmark"] = bool(row.get("benchmark"))
+            loaded = load_profile_file(base_id)
+            if not loaded.ok or loaded.profile is None:
+                raise ValueError(f"base profile {base_id!r} not loadable: {loaded.errors}")
+            generated.append(_generated_profile(
+                loaded.profile,
+                parameters,
+                grid_name=grid_name,
+                optimizer_run_id=optimizer_run_id,
+                parameter_set_id=f"p{index:04d}",
+            ))
+        return generated
     spec = GRID_SPECS[grid_name]
     bases = list(profile_ids or spec["base_profile_ids"])
     if not bases:
@@ -398,6 +442,17 @@ def _split_result_row(
         starting_balance=config.starting_balance,
         contracts=config.contracts,
     )
+    learned = generated.parameters.get("hypothesis_id") is not None
+    profile_kind = (
+        (
+            "control"
+            if str(generated.profile.preset_kind or "").lower() == "control"
+            else "benchmark"
+        )
+        if generated.parameters.get("research_benchmark")
+        else "research" if learned
+        else generated.profile.preset_kind or "research"
+    )
     return {
         "split": split_name,
         "profile_id": pid,
@@ -405,7 +460,7 @@ def _split_result_row(
         "base_profile_id": generated.profile.base_profile_id,
         "parameter_set_id": generated.profile.parameter_set_id,
         "parameter_hash": generated.parameter_hash,
-        "profile_kind": generated.profile.preset_kind or "research",
+        "profile_kind": profile_kind,
         "synopsis": generated.synopsis,
         "sessions": len(dates),
         "split_start": dates[0],
@@ -475,10 +530,16 @@ def robust_score(row: dict[str, Any]) -> float:
 
 
 def _promotion(row: dict[str, Any], warnings: list[dict[str, Any]]) -> tuple[str, str]:
-    if str(row.get("profile_kind") or "").lower() == "control":
+    profile_kind = str(row.get("profile_kind") or "").lower()
+    if profile_kind == "control":
         return (
             "Benchmark Control",
             "Positive control result is comparison-only and requires manual approval.",
+        )
+    if profile_kind == "benchmark":
+        return (
+            "Comparison Baseline",
+            "Existing dynamic profile included for comparison; not a learned candidate.",
         )
     validation_trades = int(_f(row.get("validation_total_trades")))
     holdout_trades = int(_f(row.get("holdout_total_trades")))
@@ -559,6 +620,7 @@ def run_optimization(config: OptimizationConfig, *, optimizer_run_id: str | None
         optimizer_run_id=run_id,
         max_combinations=config.max_combinations,
         profile_ids=config.profile_ids,
+        from_research=config.from_research,
     )
     result = run_backtest(
         symbol=config.symbol,
@@ -589,7 +651,7 @@ def run_optimization(config: OptimizationConfig, *, optimizer_run_id: str | None
             "base_profile_id": item.profile.base_profile_id,
             "parameter_set_id": item.profile.parameter_set_id,
             "parameter_hash": item.parameter_hash,
-            "profile_kind": item.profile.preset_kind or "research",
+            "profile_kind": by_split["train"][index]["profile_kind"],
             "synopsis": item.synopsis,
             **_prefixed(train, "train"),
             **_prefixed(validation, "validation"),

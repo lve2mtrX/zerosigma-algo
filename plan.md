@@ -798,3 +798,28 @@ informs the QuoteProvider choice.
 - `force_stop` on a `BASELINE_CASH_SETTLE` position is intentionally a no-op
   at the paper-account level — the docs make this explicit; you should not
   call it on no-stop positions.
+
+---
+
+## Phase 11A — Backtest learning layer + optimization upgrade
+
+Branch: `codex/phase-11a-backtest-learning-optimization`.
+
+Phase 11A adds a deterministic, research-only learning layer over existing
+backtest artifacts. It does not change live strategy behavior, existing profile
+behavior, selector math, risk math, quote validation, or execution boundaries.
+
+1. Audit current replay assumptions against likely earlier exploratory
+   assumptions and write the differences that need evidence-based testing.
+2. Extract normalized trade, candidate, and no-trade feature tables from the
+   existing `BacktestResult` contract.
+3. Summarize empirical performance by entry window, side, threshold, WDS,
+   corridor, credit, distance, exit reason, month, and profile family.
+4. Generate deterministic strategy hypotheses with evidence, failure modes,
+   required data, and validation plans.
+5. Convert supported hypotheses into a bounded, reproducible
+   `learned_hypotheses` optimization grid.
+6. Add a readable Learning Review to the Backtests Optimization Lab without
+   exposing raw JSON in Simple Mode.
+7. Compare the learned grid with the current named controls and dynamic
+   profiles. Treat all results as research evidence, not production approval.

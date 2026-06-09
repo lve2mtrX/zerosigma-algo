@@ -3243,3 +3243,51 @@ Phase 10J implementation results:
   but no framework overlay was present.
 - Validation: 893 tests passed, Ruff passed, 14/14 profiles valid, and
   `git diff --check` passed.
+
+---
+
+## 2026-06-08 — Phase 11A implementation plan: backtest learning layer
+
+Branch: `codex/phase-11a-backtest-learning-optimization`.
+
+1. Reuse the existing replay result and report contracts; do not fork strategy,
+   selector, risk, quote-validation, or lifecycle behavior.
+2. Add research-only feature extraction for trades, candidates, and no-trade
+   rows, including explicit buckets for entry time, credit, distance, WDS,
+   corridor, side, threshold, and profile family.
+3. Write deterministic empirical summaries and a current-vs-exploratory
+   assumption audit under `outputs/research/latest/`.
+4. Generate bounded, explainable strategy hypotheses from supported feature
+   evidence; label low-sample and overfit risks plainly.
+5. Add `backtest_learn` plus a `learned_hypotheses` optimizer grid that consumes
+   generated hypotheses without changing existing profiles.
+6. Add a readable Backtests Learning Review and compare learned candidates with
+   the named control and dynamic benchmarks.
+
+Phase 11A implementation results:
+
+- Added a downstream-only learning layer and `backtest_learn` CLI. The all-data
+  SPX 0DTE all-main smoke analyzed 154 trades, 1,010 candidates, and 438
+  no-trade rows across 148 available dates.
+- The all-main dynamic profiles produced -$847.50 total P&L. Put credit produced
+  -$907.50 across 100 trades while call credit produced +$60.00 across 54
+  trades. The 25-49.99 point distance bucket was positive; the 10-24.99 bucket
+  was materially negative.
+- The most common no-trade blocker was the combined rejected/base-eligibility/
+  score-threshold gate. Its removal would increase opportunities, but the
+  learning report explicitly treats that count as an upper bound rather than
+  evidence that looser gates would be profitable.
+- Generated four deterministic hypotheses and a bounded 10-variant learned grid
+  containing the two named call controls, two original dynamic comparison
+  baselines, and six evidence-driven research variants.
+- The learned-grid 60/20/20 smoke produced no forward-paper candidate. All six
+  learned variants were positive in validation and holdout, but each failed the
+  validation trade-count floor. The strongest broader learned variant had 5
+  validation trades at $65.00 expectancy and 8 holdout trades at $80.00
+  expectancy.
+- The original Morning 5K Call TP75 benchmark remained positive across train,
+  validation, and holdout. Morning 2K dynamic ranked highest on validation but
+  had materially negative holdout expectancy.
+- Added a Backtests Learning Review with supported/worst buckets, no-trade
+  blockers, hypotheses, recommended grids, and the assumption audit. Browser
+  validation confirmed the rendered section and no console errors.

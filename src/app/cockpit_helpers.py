@@ -1636,6 +1636,70 @@ def read_backtest_optimization(results_dir: Any) -> dict[str, Any]:
     return out
 
 
+def read_backtest_learning(results_dir: Any) -> dict[str, Any]:
+    """Read Phase 11A research outputs for the Backtests Learning Review."""
+    import json as _json
+
+    out: dict[str, Any] = {
+        "available": False,
+        "reason": "",
+        "results_dir": str(results_dir),
+        "run_config": {},
+        "feature_performance_summary": [],
+        "no_trade_blocker_summary": [],
+        "by_side": [],
+        "by_threshold": [],
+        "by_entry_window": [],
+        "by_wds_tier": [],
+        "by_corridor": [],
+        "hypotheses": [],
+        "learned_parameter_sets": [],
+        "audit": "",
+        "hypotheses_markdown": "",
+    }
+    try:
+        directory = Path(results_dir)
+    except (TypeError, ValueError):
+        out["reason"] = "No learning-review directory configured."
+        return out
+    summary_path = directory / "feature_performance_summary.csv"
+    if not summary_path.is_file():
+        out["reason"] = "No learning review yet. Run the Phase 11A learning CLI."
+        return out
+    for key in (
+        "feature_performance_summary", "no_trade_blocker_summary", "by_side",
+        "by_threshold", "by_entry_window", "by_wds_tier", "by_corridor",
+    ):
+        out[key] = _read_csv_rows(directory / f"{key}.csv")
+    config_path = directory / "run_config.json"
+    hypotheses_path = directory / "generated_strategy_hypotheses.json"
+    try:
+        if config_path.is_file():
+            out["run_config"] = _json.loads(config_path.read_text(encoding="utf-8"))
+        if hypotheses_path.is_file():
+            payload = _json.loads(hypotheses_path.read_text(encoding="utf-8"))
+            out["hypotheses"] = payload.get("hypotheses") or []
+            out["learned_parameter_sets"] = payload.get("learned_parameter_sets") or []
+    except (OSError, ValueError):
+        pass
+    for key, filename, heading in (
+        ("audit", "backtest_assumption_audit.md", "# Backtest Assumption Audit"),
+        (
+            "hypotheses_markdown",
+            "generated_strategy_hypotheses.md",
+            "# Generated Strategy Hypotheses",
+        ),
+    ):
+        path = directory / filename
+        if path.is_file():
+            try:
+                out[key] = path.read_text(encoding="utf-8").replace(heading, "").strip()
+            except OSError:
+                out[key] = ""
+    out["available"] = True
+    return out
+
+
 def read_backtest_robustness_review(results_dir: Any) -> dict[str, Any]:
     """Read Phase 10H robustness-review outputs for the Optimization Lab."""
     import json as _json
