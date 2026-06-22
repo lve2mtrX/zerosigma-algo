@@ -32,6 +32,12 @@ def _regime_template(event: RegimeChangeEvent) -> str:
         return "CORRIDOR_BROKE"
     if _contains(signals, "wds", "wing"):
         return "WDS_WEAKENED"
+    if _contains(signals, "daily_da_gex", "whipsaw"):
+        return "DA_GEX_PATH_CHANGED"
+    if _contains(signals, "opex_context"):
+        return "OPEX_CONTEXT_CHANGED"
+    if _contains(signals, "greek_data", "greek_api_field"):
+        return "GREEK_DATA_DEGRADED"
     return "REGIME_CHANGED"
 
 
@@ -59,6 +65,8 @@ def regime_change_to_alert(
         old_level=event.levels_involved.get("old_maxvol"),
         new_level=event.levels_involved.get("new_maxvol"),
         wds_tier=event.levels_involved.get("wds_tier"),
+        daily_regime=event.levels_involved.get("daily_regime"),
+        context_regime=event.levels_involved.get("context_regime"),
         detail=event.plain_english_alert,
     )
     reasons = event.reason_codes or ("regime_changed",)

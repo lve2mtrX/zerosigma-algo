@@ -53,6 +53,7 @@ from src.providers.quotes.tastytrade_provider import (  # noqa: E402
 )
 from src.providers.structure.factory import build_structure_provider  # noqa: E402
 from src.providers.structure.stub import StubStructureProvider  # noqa: E402
+from src.regime.opex import classify_opex_context  # noqa: E402
 from src.reporting.config_change_log import (  # noqa: E402
     log_config_change,
     log_session_snapshot,
@@ -467,9 +468,9 @@ def render_provider_status() -> None:
             if provider_status.get("public_only"):
                 st.info(
                     "`public_only` mode — no Authorization header sent. "
-                    "`/exposure/series` is skipped, so **Put Ceiling / Call Floor / "
-                    "MaxVol will be None**. Switch to `bearer` / `login` / `service_token` "
-                    "and set `ZS_API_ENABLE_EXPOSURE_SERIES=true` to populate them."
+                    "`/exposure/series` is skipped, but canonical `/market/snapshot` "
+                    "chain rows can still provide Greek and volume fields. Subscription "
+                    "auth remains required for the dedicated series and DDOI endpoints."
                 )
             missing = (structure.raw or {}).get("missing_fields") or []
             if missing:
@@ -588,6 +589,28 @@ def render_market() -> None:
     top[5].metric("Secondary gamma", gamma["secondary_fmt"])
     if not gamma["available"]:
         st.caption("Primary/secondary gamma unavailable from current structure payload.")
+
+    _greek_available = tuple(getattr(ex, "greek_api_available_fields", ()) or ())
+    _greek_missing = tuple(getattr(ex, "greek_api_missing_fields", ()) or ())
+    _latest_regime = ch.latest_best_candidate(OUTPUT_ROOT) or {}
+    _daily_label = _latest_regime.get("daily_regime_label")
+    _context = classify_opex_context(now_et().date())
+    if simple_mode:
+        if _greek_available:
+            _lower_tier = {"theta", "charm", "vanna", "vomma", "speed", "zomma"}
+            _lower_available = len(_lower_tier.intersection(_greek_available))
+            st.caption(
+                f"Greek API status: {_lower_available}/6 lower-tier Greek families available"
+                + (f"; {len(_greek_missing)} fields unavailable." if _greek_missing else ".")
+            )
+        else:
+            st.caption("Greek API status: lower-tier field availability is unavailable.")
+        st.caption(
+            f"Daily DA-GEX path: {_daily_label or 'Waiting for scanner observations'}  ·  "
+            f"Expiration context: {_context.label}."
+        )
+        if _latest_regime.get("maxvol_migration") not in (None, "", 0, 0.0):
+            st.caption(f"MaxVol migration: {_latest_regime.get('maxvol_migration')} points.")
 
     # ── Wing Stack (Phase 9H): put ceilings + call floors at 2K/5K/10K ──
     ws = ch.wing_stack(ex, spot_val)
@@ -786,6 +809,27 @@ def render_market() -> None:
             _missing = (structure.raw or {}).get("missing_fields") or []
             if _missing:
                 st.caption("Structure fields unavailable from payload: " + ", ".join(_missing))
+            st.markdown("**Greek API parity / regime diagnostics**")
+            st.text(f"source endpoint             : {getattr(ex, 'greek_api_source_endpoint', None) or 'unavailable'}")
+            st.text(f"available Greek fields      : {', '.join(_greek_available) or 'none'}")
+            st.text(f"missing Greek fields        : {', '.join(_greek_missing) or 'none'}")
+            st.text(f"aggregate raw GEX / DEX     : {ex.total_raw_gex_bn} / {ex.total_dex_bn}")
+            st.text(f"aggregate VEX / CEX         : {ex.total_vex_bn} / {ex.total_cex_bn}")
+            st.text(f"daily regime code           : {_latest_regime.get('daily_regime_code') or 'unavailable'}")
+            st.text(f"daily regime reasons        : {_latest_regime.get('daily_regime_reason_codes') or 'unavailable'}")
+            st.text(f"context regime code         : {_latest_regime.get('context_regime_code') or _context.code}")
+            st.text(f"OpEx context / days         : {_context.opex_context} / {_context.days_to_opex}")
+            st.text(f"expiration context          : {_context.expiration_context}")
+            st.text(f"MaxVol migration            : {_latest_regime.get('maxvol_migration') or 'none'}")
+            st.text(f"regime/Greek alert reasons  : {_latest_regime.get('alert_reason_codes') or 'none'}")
+            with st.expander("Greek units and unavailable reasons", expanded=False):
+                st.json({
+                    "units": getattr(ex, "greek_api_units", {}) or {},
+                    "iv_skew_metadata": getattr(ex, "greek_api_iv_metadata", {}) or {},
+                    "unavailable_reasons": (
+                        getattr(ex, "greek_api_unavailable_reasons", {}) or {}
+                    ),
+                })
 
 
 def _render_candidate_simple(c, rd: dict) -> None:

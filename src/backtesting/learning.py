@@ -39,6 +39,10 @@ _COMMON_FEATURES = (
     "eod_exception_candidate", "risk_quality_label", "risk_quality_status",
     "risk_quality_reason_codes", "regime_compatibility_label",
     "regime_compatibility_reason_codes",
+    "daily_regime_code", "daily_regime_label", "context_regime_code",
+    "context_regime_label", "da_gex_path_summary", "maxvol_migration",
+    "greek_api_available_fields", "greek_api_missing_fields",
+    "greek_data_availability", "alerts_emitted", "alert_reason_codes",
 )
 
 _PERFORMANCE_DIMENSIONS = (
@@ -63,6 +67,10 @@ _PERFORMANCE_DIMENSIONS = (
     ("credit_to_stop_risk", "credit_to_stop_risk_bucket"),
     ("eod_exception", "eod_exception_candidate"),
     ("regime_compatibility", "regime_compatibility_label"),
+    ("daily_regime", "daily_regime_code"),
+    ("context_regime", "context_regime_code"),
+    ("greek_data_availability", "greek_data_availability"),
+    ("regime_alert_reason", "alert_reason_codes"),
 )
 
 _INTERACTIONS = (
@@ -258,6 +266,13 @@ def _feature_row(row: dict[str, Any], *, outcome_row: dict[str, Any] | None = No
     distance = _f(row.get("distance_from_spot_to_short"))
     pnl = _f(outcome_row.get("pnl_dollars"))
     date = str(row.get("date") or "")
+    available_greeks = str(row.get("greek_api_available_fields") or "").strip()
+    missing_greeks = str(row.get("greek_api_missing_fields") or "").strip()
+    greek_availability = (
+        "Complete" if available_greeks and not missing_greeks
+        else "Degraded" if available_greeks and missing_greeks
+        else "Unavailable"
+    )
     risk_fields = evaluate_backtest_row({**row, **{
         key: outcome_row.get(key, row.get(key))
         for key in ("contracts", "tp_mode", "sl_mode", "historical_expectancy")
@@ -284,6 +299,7 @@ def _feature_row(row: dict[str, Any], *, outcome_row: dict[str, Any] | None = No
             else "unavailable"
         ),
         "month": date[:7] if len(date) >= 7 else "Unavailable",
+        "greek_data_availability": greek_availability,
         "tp_sl_config": (
             f"{outcome_row.get('tp_mode') or 'Unknown TP'} / "
             f"{outcome_row.get('sl_mode') or 'Unknown SL'}"
@@ -1116,6 +1132,12 @@ def write_learning_reports(result: LearningResult, out_dirs: list[Path]) -> list
         "by_credit_to_stop_risk": (result.performance_tables["credit_to_stop_risk"], ()),
         "by_eod_exception": (result.performance_tables["eod_exception"], ()),
         "by_regime_compatibility": (result.performance_tables["regime_compatibility"], ()),
+        "by_daily_regime": (result.performance_tables["daily_regime"], ()),
+        "by_context_regime": (result.performance_tables["context_regime"], ()),
+        "by_greek_data_availability": (
+            result.performance_tables["greek_data_availability"], ()
+        ),
+        "by_regime_alert_reason": (result.performance_tables["regime_alert_reason"], ()),
         "no_trade_blocker_summary": (result.no_trade_blockers, ()),
         "risk_quality_rejection_summary": (result.risk_quality_rejections, ()),
         "profitability_attribution_summary": (result.profitability_attribution, ()),

@@ -61,6 +61,75 @@ _VALID_AUTH_MODES = {"none", "public_only", "bearer", "login", "service_token"}
 # must not send it when the user has opted into public-only reads.
 _AUTHED_MODES = {"bearer", "login", "service_token"}
 
+GREEK_SERIES_SUFFIXES: dict[str, str] = {
+    "delta": "delta",
+    "gamma": "gamma",
+    "vega": "vega",
+    "theta": "theta",
+    "vanna": "vanna",
+    "charm": "charm",
+    "vomma": "vomma",
+    "speed": "speed",
+    "zomma": "zomma",
+    "iv": "iv",
+    "oi": "oi",
+    "volume": "volume",
+    "raw_gex": "raw_gex_1pct",
+    "da_gex": "da_gex_1pct",
+    "dex": "dex_1pct",
+    "vex": "vex_1vol",
+    "vex_skew": "vex_skew_1vol",
+    "cex": "cex",
+    "charm_skew": "charm_skew",
+    "cex_skew": "cex_skew",
+    "speed_exp": "speed_exp",
+    "vomma_exp": "vomma_exp",
+    "zomma_exp": "zomma_exp",
+}
+
+GREEK_API_UNITS: dict[str, str] = {
+    "delta": "raw worker Greek (unitless)",
+    "gamma": "raw worker Greek (per $1 spot move)",
+    "vega": "raw worker Greek",
+    "theta": "raw worker Greek",
+    "vanna": "raw worker Greek",
+    "charm": "raw worker Greek",
+    "vomma": "raw worker Greek",
+    "speed": "raw worker Greek",
+    "zomma": "raw worker Greek",
+    "iv": "decimal implied volatility",
+    "iv_skew": "decimal implied-volatility metadata",
+    "iv_skew_metadata": "decimal implied-volatility metadata",
+    "oi": "contracts",
+    "volume": "contracts",
+    "raw_gex": "$Bn per 1% spot move",
+    "da_gex": "$Bn per 1% spot move",
+    "dex": "$Bn per 1% spot move",
+    "vex": "$Bn per +1 volatility point",
+    "vex_skew": "$Bn per +1 volatility point",
+    "cex": "$Bn per worker charm time unit",
+    "charm_skew": "raw worker Greek",
+    "cex_skew": "$Bn per worker charm time unit",
+    "speed_exp": "$Bn per squared 1% spot move",
+    "vomma_exp": "$Bn per squared 1% volatility move",
+    "zomma_exp": "$Bn per 1% spot x 1% volatility move",
+    "total_gex_1pct": "$Bn per 1% spot move",
+    "total_raw_gex_1pct": "$Bn per 1% spot move",
+    "total_da_gex_1pct": "$Bn per 1% spot move",
+    "total_dex_1pct": "$Bn per 1% spot move",
+    "total_vex_1vol": "$Bn per +1 volatility point",
+    "total_cex": "$Bn per worker charm time unit",
+}
+
+AGGREGATE_GREEK_FIELDS = (
+    "total_gex_1pct",
+    "total_raw_gex_1pct",
+    "total_da_gex_1pct",
+    "total_dex_1pct",
+    "total_vex_1vol",
+    "total_cex",
+)
+
 
 def _coerce_bool(v: Any, default: bool = False) -> bool:
     if v is None:
@@ -129,6 +198,70 @@ def _parse_ts(value: Any) -> datetime:
         except ValueError:
             pass
     return now_et()
+
+
+def _first_float(source: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        if key in source and source[key] is not None:
+            value = _safe_float(source[key])
+            if value is not None:
+                return value
+    return None
+
+
+def _chain_rows(chain: dict[str, Any]) -> list[dict[str, Any]]:
+    canonical = chain.get("rows")
+    if isinstance(canonical, list) and canonical:
+        return [dict(row) for row in canonical if isinstance(row, dict)]
+
+    calls = chain.get("calls") if isinstance(chain.get("calls"), dict) else {}
+    puts = chain.get("puts") if isinstance(chain.get("puts"), dict) else {}
+    strike_keys = set(calls) | set(puts)
+    rows: list[dict[str, Any]] = []
+    for strike_key in strike_keys:
+        strike = _safe_float(strike_key)
+        if strike is None:
+            continue
+        row: dict[str, Any] = {"strike": strike}
+        for prefix, payload in (("c", calls.get(strike_key)), ("p", puts.get(strike_key))):
+            if not isinstance(payload, dict):
+                continue
+            for suffix in GREEK_SERIES_SUFFIXES.values():
+                value = payload.get(suffix)
+                if value is None:
+                    value = payload.get(f"{prefix}_{suffix}")
+                if value is not None:
+                    row[f"{prefix}_{suffix}"] = value
+        rows.append(row)
+    return rows
+
+
+def extract_per_strike_greek_series(
+    chain: dict[str, Any],
+) -> tuple[
+    dict[str, dict[str, tuple[float | None, ...]]],
+    tuple[str, ...],
+    tuple[str, ...],
+]:
+    """Lift canonical API chain rows without recomputing or backfilling Greeks."""
+    rows = _chain_rows(chain)
+    rows.sort(key=lambda row: _safe_float(row.get("strike")) or float("inf"))
+    series: dict[str, dict[str, tuple[float | None, ...]]] = {}
+    available: list[str] = []
+    missing: list[str] = []
+    for metric, suffix in GREEK_SERIES_SUFFIXES.items():
+        call_key, put_key = f"c_{suffix}", f"p_{suffix}"
+        present = any(call_key in row or put_key in row for row in rows)
+        if not present:
+            missing.append(metric)
+            continue
+        available.append(metric)
+        series[metric] = {
+            "strikes": tuple(_safe_float(row.get("strike")) for row in rows),
+            "calls": tuple(_safe_float(row.get(call_key)) for row in rows),
+            "puts": tuple(_safe_float(row.get(put_key)) for row in rows),
+        }
+    return series, tuple(available), tuple(missing)
 
 
 @dataclass
@@ -364,6 +497,8 @@ class ZeroSigmaApiStructureProvider:
 
         self._state.last_missing_fields = missing
 
+        greek_unavailable = dict(exposures.greek_api_unavailable_reasons)
+
         return StructureSnapshot(
             symbol=sym,
             spot=spot,
@@ -375,6 +510,12 @@ class ZeroSigmaApiStructureProvider:
             raw={
                 "missing_fields": list(missing),
                 "subscription_active": self._state.has_subscription,
+                "greek_api_available_fields": list(exposures.greek_api_available_fields),
+                "greek_api_missing_fields": list(exposures.greek_api_missing_fields),
+                "greek_api_source_endpoint": exposures.greek_api_source_endpoint,
+                "greek_api_units": dict(exposures.greek_api_units),
+                "greek_api_unavailable_reasons": greek_unavailable,
+                "greek_api_iv_metadata": dict(exposures.greek_api_iv_metadata),
             },
         )
 
@@ -438,19 +579,35 @@ class ZeroSigmaApiStructureProvider:
             total_gex_bn, da_gex_bn, vex, dex, cex, gamma_regime.
         """
         exp    = snap_payload.get("exposures") or {}
+        chain  = snap_payload.get("chain") or {}
         wings  = exp.get("wings")  or {}
         gamma  = exp.get("gamma")  or {}
 
+        per_strike_greeks, series_available, series_missing = (
+            extract_per_strike_greek_series(chain)
+            if isinstance(chain, dict)
+            else ({}, (), tuple(GREEK_SERIES_SUFFIXES))
+        )
+        iv_metadata = (
+            dict(chain.get("straddle_iv_meta") or {}) if isinstance(chain, dict) else {}
+        )
+
         # ── aggregate exposures ──
-        total_gex_bn  = _safe_float(exp.get("total_gex_1pct") or exp.get("total_gex_bn"))
-        total_vex_bn  = _safe_float(exp.get("total_vex_1vol") or exp.get("vex")
-                                    or exp.get("total_vex_bn"))
-        da_gex_signed = _safe_float(exp.get("total_da_gex_1pct") or exp.get("da_gex_bn")
-                                    or exp.get("da_gex_signed"))
-        # (total_dex_1pct / total_cex are read in case a future field lands;
-        #  ExposureContext doesn't expose them today — kept as locals.)
-        _ = _safe_float(exp.get("total_dex_1pct") or exp.get("dex"))
-        _ = _safe_float(exp.get("total_cex")      or exp.get("cex"))
+        total_gex_bn = _first_float(exp, "total_gex_1pct", "total_gex_bn")
+        total_raw_gex_bn = _first_float(exp, "total_raw_gex_1pct", "raw_gex")
+        total_vex_bn = _first_float(exp, "total_vex_1vol", "vex", "total_vex_bn")
+        da_gex_signed = _first_float(
+            exp, "total_da_gex_1pct", "da_gex_bn", "da_gex_signed"
+        )
+        total_dex_bn = _first_float(exp, "total_dex_1pct", "dex")
+        total_cex_bn = _first_float(exp, "total_cex", "cex")
+        aggregate_available = tuple(
+            field for field in AGGREGATE_GREEK_FIELDS
+            if _first_float(exp, field) is not None
+        )
+        aggregate_missing = tuple(
+            field for field in AGGREGATE_GREEK_FIELDS if field not in aggregate_available
+        )
 
         # ── gamma regime / flip ──
         regime_raw: str | None = gamma.get("regime") or exp.get("gamma_regime")
@@ -498,10 +655,13 @@ class ZeroSigmaApiStructureProvider:
         put_ceiling_10k_w2_strike = put_ceiling_10k_w2_volume = None
         maxvol = None
         maxvol_volume: float | None = None
-        if vol_series:
-            strikes = vol_series.get("strikes") or []
-            calls = vol_series.get("calls") or []
-            puts = vol_series.get("puts") or []
+        volume_source = vol_series
+        if volume_source is None and "volume" in per_strike_greeks:
+            volume_source = per_strike_greeks["volume"]
+        if volume_source:
+            strikes = list(volume_source.get("strikes") or [])
+            calls = list(volume_source.get("calls") or [])
+            puts = list(volume_source.get("puts") or [])
             if strikes and len(strikes) == len(calls) == len(puts):
                 put_ceiling_2k = _highest_strike_where(strikes, puts, 2000.0)
                 put_ceiling_5k = _highest_strike_where(strikes, puts, 5000.0)
@@ -572,9 +732,30 @@ class ZeroSigmaApiStructureProvider:
             if value is None:
                 missing.append(name)
 
+        greek_available = tuple(dict.fromkeys((*aggregate_available, *series_available)))
+        if iv_metadata:
+            greek_available = tuple(dict.fromkeys((*greek_available, "iv_skew_metadata")))
+        greek_missing = tuple(dict.fromkeys((*aggregate_missing, *series_missing)))
+        unavailable_reasons = {
+            field: (
+                "aggregate_not_exposed_by_market_snapshot"
+                if field.startswith("total_")
+                else "field_not_present_in_market_snapshot_chain"
+            )
+            for field in greek_missing
+        }
+        unavailable_reasons["total_theta"] = "aggregate_theta_not_exposed_by_api"
+        unavailable_reasons["ddoi_pin"] = "available_only_from_separate_ddoi_history_endpoint"
+        source_endpoint = "/api/v1/market/snapshot"
+        if vol_series is not None:
+            source_endpoint += " + /api/v1/exposure/series?metric=volume"
+
         return ExposureContext(
             total_gex_bn=total_gex_bn,
+            total_raw_gex_bn=total_raw_gex_bn,
+            total_dex_bn=total_dex_bn,
             total_vex_bn=total_vex_bn,
+            total_cex_bn=total_cex_bn,
             gamma_flip=gamma_flip,
             call_wall=call_wall,
             put_wall=put_wall,
@@ -601,6 +782,16 @@ class ZeroSigmaApiStructureProvider:
             gamma_primary=gamma_primary,
             gamma_secondary=gamma_secondary,
             ddoi_pin=ddoi_pin,
+            greek_api_available_fields=greek_available,
+            greek_api_missing_fields=greek_missing,
+            greek_api_source_endpoint=source_endpoint,
+            greek_api_units={
+                field: GREEK_API_UNITS[field]
+                for field in greek_available if field in GREEK_API_UNITS
+            },
+            greek_api_unavailable_reasons=unavailable_reasons,
+            greek_api_iv_metadata=iv_metadata,
+            per_strike_greek_series=per_strike_greeks,
         )
 
 

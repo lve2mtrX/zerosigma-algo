@@ -83,6 +83,18 @@ PHASE_11D_APPENDED = (
     "total_gex_bn", "total_vex_bn",
 )
 
+# Phase 11F APPENDED after Phase 11D. Research/diagnostic fields only.
+PHASE_11F_APPENDED = (
+    "total_raw_gex_bn", "total_dex_bn", "total_cex_bn",
+    "greek_api_available_fields", "greek_api_missing_fields",
+    "greek_api_source_endpoint", "greek_api_units",
+    "daily_regime_code", "daily_regime_label", "daily_regime_reason_codes",
+    "da_gex_path_observations", "da_gex_sign_changes", "da_gex_path_summary",
+    "context_regime_code", "context_regime_label", "context_regime_reason_codes",
+    "opex_context", "days_to_opex", "expiration_context",
+    "alerts_emitted", "alert_reason_codes",
+)
+
 
 def test_default_ranked_fields_keeps_phase_le_4_tail_intact():
     """Every Phase ≤4 column appears in _DEFAULT_RANKED_FIELDS BEFORE the
@@ -247,7 +259,7 @@ def test_existing_phase_le_4_column_indices_preserved():
     qrr = fields.index("quote_rejection_reason")
     allowed = (set(PHASE_4P1_APPENDED) | set(PHASE_4P2_APPENDED)
                | set(PHASE_5_APPENDED) | set(PHASE_6_APPENDED)
-               | set(PHASE_11D_APPENDED))
+               | set(PHASE_11D_APPENDED) | set(PHASE_11F_APPENDED))
     for col in fields[qrr + 1:]:
         assert col in allowed, (
             f"unexpected column {col!r} appended after quote_rejection_reason"
@@ -274,4 +286,12 @@ def test_phase11d_regime_columns_append_after_phase6():
     assert set(PHASE_11D_APPENDED) <= set(fields)
     assert max(fields.index(column) for column in PHASE_6_APPENDED) < min(
         fields.index(column) for column in PHASE_11D_APPENDED
+    )
+
+
+def test_phase11f_columns_append_after_phase11d():
+    fields = list(rs._DEFAULT_RANKED_FIELDS)
+    assert set(PHASE_11F_APPENDED) <= set(fields)
+    assert max(fields.index(column) for column in PHASE_11D_APPENDED) < min(
+        fields.index(column) for column in PHASE_11F_APPENDED
     )

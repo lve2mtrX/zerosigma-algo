@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import date as date_type
 from datetime import datetime
 from typing import Any
 
+from src.regime.daily_path import DaGexPathState, classify_daily_path
+from src.regime.opex import classify_opex_context
 from src.regime.types import RegimeLabel, RegimeSnapshot
 
 NEAR_LEVEL_POINTS = 5.0
@@ -79,6 +82,7 @@ def build_regime_snapshot(
     quote_quality_status: str | None = None,
     spot_history: Sequence[float] | None = None,
     previous: RegimeSnapshot | None = None,
+    da_gex_path: DaGexPathState | None = None,
 ) -> RegimeSnapshot:
     """Build one pure snapshot without fetching or synthesizing external data."""
     exposures = _value(structure, "exposures") or structure
@@ -144,6 +148,16 @@ def build_regime_snapshot(
         if previous and maxvol is not None and previous.maxvol_strike is not None
         else None
     )
+    daily_path = classify_daily_path(da_gex_path)
+    timestamp_text = _timestamp(timestamp, structure)
+    try:
+        context_date = datetime.fromisoformat(timestamp_text).date()
+    except ValueError:
+        try:
+            context_date = date_type.fromisoformat(timestamp_text[:10])
+        except ValueError:
+            context_date = None
+    opex = classify_opex_context(context_date) if context_date is not None else None
     realized_range = _realized_range(spot_history)
     quote_status = str(quote_quality_status or "unknown").lower()
     unusable_quote = quote_status in {"unusable", "invalid", "rejected", "stale"}
@@ -239,7 +253,21 @@ def build_regime_snapshot(
     if unusable_quote:
         confidence = min(confidence, 0.25)
     quality = "HIGH" if confidence >= 0.75 else "MEDIUM" if confidence >= 0.50 else "LOW"
-    reasons.append("deferred_inputs_unavailable")
+    greek_available = tuple(_value(exposures, "greek_api_available_fields") or ())
+    greek_missing = tuple(_value(exposures, "greek_api_missing_fields") or ())
+    deferred_fields = tuple(
+        field for field in (
+            "charm", "vanna", "theta_adjusted_charm", "vix", "iv_surface",
+            "dom", "news", "per_strike_vex_skew",
+        )
+        if {
+            "charm": "charm",
+            "vanna": "vanna",
+            "per_strike_vex_skew": "vex_skew",
+        }.get(field, field) not in greek_available
+    )
+    if deferred_fields:
+        reasons.append("deferred_inputs_unavailable")
     summary = (
         f"{symbol or 'Symbol'} is {label.value.replace('_', ' ').title()}: "
         f"gamma is {gamma_regime or 'unavailable'}, corridor is "
@@ -248,7 +276,7 @@ def build_regime_snapshot(
     )
 
     return RegimeSnapshot(
-        timestamp=_timestamp(timestamp, structure),
+        timestamp=timestamp_text,
         symbol=symbol,
         spot=current_spot,
         gamma_regime=gamma_regime,
@@ -280,4 +308,27 @@ def build_regime_snapshot(
         quality_label=quality,
         reason_codes=tuple(dict.fromkeys(reasons)),
         plain_english_summary=summary,
+        deferred_fields=deferred_fields,
+        total_raw_gex_bn=_number(_value(exposures, "total_raw_gex_bn")),
+        total_dex_bn=_number(_value(exposures, "total_dex_bn")),
+        total_cex_bn=_number(_value(exposures, "total_cex_bn")),
+        greek_api_available_fields=greek_available,
+        greek_api_missing_fields=greek_missing,
+        greek_api_source_endpoint=_value(exposures, "greek_api_source_endpoint"),
+        greek_api_units=dict(_value(exposures, "greek_api_units") or {}),
+        greek_api_unavailable_reasons=dict(
+            _value(exposures, "greek_api_unavailable_reasons") or {}
+        ),
+        daily_regime_code=daily_path.code,
+        daily_regime_label=daily_path.label,
+        daily_regime_reason_codes=daily_path.reason_codes,
+        da_gex_path_observations=daily_path.observation_count,
+        da_gex_sign_changes=daily_path.sign_changes,
+        da_gex_path_summary=daily_path.summary,
+        context_regime_code=opex.code if opex else "R_UNKNOWN",
+        context_regime_label=opex.label if opex else "Unknown OpEx Context",
+        context_regime_reason_codes=opex.reason_codes if opex else ("timestamp_unavailable",),
+        opex_context=opex.opex_context if opex else "unknown",
+        days_to_opex=opex.days_to_opex if opex else None,
+        expiration_context=opex.expiration_context if opex else "UNKNOWN",
     )

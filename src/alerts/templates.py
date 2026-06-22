@@ -82,6 +82,21 @@ PROMPT_TEMPLATES: dict[str, PromptTemplate] = {
         message="{symbol} quote quality failed validation. {detail}",
         operator_message="Do not trust this {symbol} mark. Quote quality is bad. {detail}",
     ),
+    "DA_GEX_PATH_CHANGED": PromptTemplate(
+        title="Daily DA-GEX path changed",
+        message="{symbol} daily path is now {daily_regime}. {detail}",
+        operator_message="Come check {symbol}: DA-GEX path changed to {daily_regime}. {detail}",
+    ),
+    "OPEX_CONTEXT_CHANGED": PromptTemplate(
+        title="Expiration context changed",
+        message="{symbol} context is now {context_regime}. {detail}",
+        operator_message="{symbol} moved into {context_regime} context. {detail}",
+    ),
+    "GREEK_DATA_DEGRADED": PromptTemplate(
+        title="Greek data degraded",
+        message="{symbol} Greek availability changed. {detail}",
+        operator_message="Do not trust the full structure read on {symbol}: Greek data degraded. {detail}",
+    ),
 }
 
 

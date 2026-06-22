@@ -15,6 +15,7 @@ import src.app.cockpit_helpers as ch
 from src.backtesting import schemas
 from src.providers.quotes.types import OptionChainSnapshot, OptionQuote, OptionType
 from src.providers.structure.types import StructureSnapshot
+from src.providers.structure.zerosigma_api import GREEK_API_UNITS
 from src.replay.snapshot_loader import map_payload_to_snapshot
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -98,6 +99,112 @@ def exposure_series_at(rows: list[dict], ts: datetime, symbol: str) -> dict[str,
     triples.sort(key=lambda t: t[0])
     return {"strikes": [t[0] for t in triples], "calls": [t[1] for t in triples],
             "puts": [t[2] for t in triples], "spot": spot}
+
+
+_RAW_GREEK_PAIRS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "delta": (("CALL Delta", "c_delta"), ("PUT Delta", "p_delta")),
+    "gamma": (("CALL Gamma", "c_gamma"), ("PUT Gamma", "p_gamma")),
+    "theta": (("CALL Theta", "c_theta"), ("PUT Theta", "p_theta")),
+    "vanna": (("CALL Vanna", "c_vanna"), ("PUT Vanna", "p_vanna")),
+    "charm": (("CALL Charm", "c_charm"), ("PUT Charm", "p_charm")),
+    "vomma": (("CALL Vomma", "c_vomma"), ("PUT Vomma", "p_vomma")),
+    "speed": (("CALL Speed", "c_speed"), ("PUT Speed", "p_speed")),
+    "zomma": (("CALL Zomma", "c_zomma"), ("PUT Zomma", "p_zomma")),
+    "iv": (("CALL IMPL_VOL", "c_iv"), ("PUT IMPL_VOL", "p_iv")),
+    "oi": (("CALL OPEN_INT", "c_oi"), ("PUT OPEN_INT", "p_oi")),
+    "volume": (("CALL Volume", "c_volume"), ("PUT Volume", "p_volume")),
+    "da_gex": (
+        ("CALL Delta Adj GEX", "CALL DA GEX", "c_da_gex_1pct"),
+        ("PUT Delta Adj GEX", "PUT DA GEX", "p_da_gex_1pct"),
+    ),
+    "raw_gex": (("CALL GEX", "c_raw_gex_1pct"), ("PUT GEX", "p_raw_gex_1pct")),
+    "dex": (("CALL DEX", "c_dex_1pct"), ("PUT DEX", "p_dex_1pct")),
+    "vex": (("CALL VEX", "c_vex_1vol"), ("PUT VEX", "p_vex_1vol")),
+    "cex": (("CALL CEX", "c_cex"), ("PUT CEX", "p_cex")),
+}
+
+
+def greek_metrics_at(rows: list[dict], ts: datetime) -> dict[str, Any]:
+    """Research-only Greek availability/aggregate read for one raw timestamp."""
+    snapshot_rows = [row for row in rows if row.get("_ts") == ts]
+    available: list[str] = []
+    missing: list[str] = []
+    totals: dict[str, float | None] = {}
+    for metric, (call_names, put_names) in _RAW_GREEK_PAIRS.items():
+        seen = any(
+            any(
+                name in row and row.get(name) not in (None, "")
+                for name in (*call_names, *put_names)
+            )
+            for row in snapshot_rows
+        )
+        if not seen:
+            missing.append(metric)
+            totals[metric] = None
+            continue
+        available.append(metric)
+        total = 0.0
+        for row in snapshot_rows:
+            total += _num(_col(row, *call_names)) or 0.0
+            total += _num(_col(row, *put_names)) or 0.0
+        totals[metric] = total
+
+    for metric, net_names in (
+        ("da_gex", ("NET DELTA-ADJ GEX", "NET DA GEX")),
+        ("raw_gex", ("NET GEX",)),
+    ):
+        values = [_num(_col(row, *net_names)) for row in snapshot_rows]
+        usable = [value for value in values if value is not None]
+        if usable:
+            totals[metric] = sum(usable)
+            if metric not in available:
+                available.append(metric)
+                missing = [value for value in missing if value != metric]
+    return {
+        "totals": totals,
+        "available_fields": tuple(available),
+        "missing_fields": tuple(missing),
+        "source_endpoint": "backtest_raw_csv",
+        "units": {
+            metric: GREEK_API_UNITS.get(metric, "raw source units") for metric in available
+        },
+    }
+
+
+def da_gex_observations(
+    rows: list[dict], timestamps: list[datetime]
+) -> list[tuple[datetime, float | None]]:
+    """Single-pass DA-GEX totals in chronological timestamp order."""
+    allowed = set(timestamps)
+    net_totals: dict[datetime, float] = {}
+    side_totals: dict[datetime, float] = {}
+    net_seen: set[datetime] = set()
+    side_seen: set[datetime] = set()
+    for row in rows:
+        timestamp = row.get("_ts")
+        if timestamp not in allowed:
+            continue
+        net = _num(_col(row, "NET DELTA-ADJ GEX", "NET DA GEX"))
+        if net is not None:
+            net_totals[timestamp] = net_totals.get(timestamp, 0.0) + net
+            net_seen.add(timestamp)
+            continue
+        call_value = _num(_col(row, "CALL Delta Adj GEX", "CALL DA GEX", "c_da_gex_1pct"))
+        put_value = _num(_col(row, "PUT Delta Adj GEX", "PUT DA GEX", "p_da_gex_1pct"))
+        if call_value is not None or put_value is not None:
+            side_totals[timestamp] = (
+                side_totals.get(timestamp, 0.0) + (call_value or 0.0) + (put_value or 0.0)
+            )
+            side_seen.add(timestamp)
+    return [
+        (
+            timestamp,
+            net_totals[timestamp] if timestamp in net_seen
+            else side_totals[timestamp] if timestamp in side_seen
+            else None,
+        )
+        for timestamp in timestamps
+    ]
 
 
 def map_structure(rows: list[dict], ts: datetime, symbol: str) -> StructureSnapshot:

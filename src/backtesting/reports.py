@@ -35,6 +35,21 @@ _CANDIDATE_COLUMNS: list[str] = [
     "selected_trade", "skipped_reason",
 ]
 
+_PHASE11F_RESEARCH_COLUMNS: list[str] = [
+    "regime_snapshot_json", "regime_label", "regime_confidence",
+    "regime_quality_label", "regime_reason_codes", "regime_summary",
+    "da_gex_signed", "maxvol", "maxvol_migration",
+    "total_gex_bn", "total_raw_gex_bn", "total_dex_bn", "total_vex_bn", "total_cex_bn",
+    "greek_api_available_fields", "greek_api_missing_fields",
+    "greek_api_source_endpoint", "greek_api_units",
+    "daily_regime_code", "daily_regime_label", "daily_regime_reason_codes",
+    "da_gex_path_observations", "da_gex_sign_changes", "da_gex_path_summary",
+    "context_regime_code", "context_regime_label", "context_regime_reason_codes",
+    "opex_context", "days_to_opex", "expiration_context",
+    "alerts_emitted", "alert_reason_codes",
+]
+_CANDIDATE_COLUMNS.extend(_PHASE11F_RESEARCH_COLUMNS)
+
 _EXIT_COLUMNS: list[str] = [
     "contracts", "tp_mode", "sl_mode", "exit_timestamp", "exit_reason",
     "exit_debit_points", "exit_debit_dollars", "pnl_points", "pnl_dollars",
@@ -54,6 +69,9 @@ _NO_TRADE_COLUMNS: list[str] = [
     "selector_filtered_count", "corridor_valid", "active_wds", "raw_wds", "wds_tier",
     "top_selector_reason", "top_risk_reason", "top_quote_reason",
     "side_allowed_by_config", "missing_price_count",
+    "daily_regime_code", "daily_regime_label", "context_regime_code",
+    "context_regime_label", "greek_api_available_fields", "greek_api_missing_fields",
+    "alerts_emitted", "alert_reason_codes",
 ]
 
 _METRIC_KEYS: list[str] = [

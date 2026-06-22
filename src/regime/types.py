@@ -77,12 +77,40 @@ class RegimeSnapshot:
     reason_codes: tuple[str, ...] = ()
     plain_english_summary: str = ""
     deferred_fields: tuple[str, ...] = field(default=DEFERRED_REGIME_FIELDS)
+    total_raw_gex_bn: float | None = None
+    total_dex_bn: float | None = None
+    total_cex_bn: float | None = None
+    greek_api_available_fields: tuple[str, ...] = ()
+    greek_api_missing_fields: tuple[str, ...] = ()
+    greek_api_source_endpoint: str | None = None
+    greek_api_units: dict[str, str] = field(default_factory=dict)
+    greek_api_unavailable_reasons: dict[str, str] = field(default_factory=dict)
+    daily_regime_code: str = "R0_PROVISIONAL"
+    daily_regime_label: str = "Provisional / Insufficient DA-GEX Path"
+    daily_regime_reason_codes: tuple[str, ...] = ()
+    da_gex_path_observations: int = 0
+    da_gex_sign_changes: int = 0
+    da_gex_path_summary: str = ""
+    context_regime_code: str = "R_UNKNOWN"
+    context_regime_label: str = "Unknown OpEx Context"
+    context_regime_reason_codes: tuple[str, ...] = ()
+    opex_context: str = "unknown"
+    days_to_opex: int | None = None
+    expiration_context: str = "UNKNOWN"
+    alerts_emitted: tuple[str, ...] = ()
+    alert_reason_codes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         row = asdict(self)
         row["final_regime_label"] = self.final_regime_label.value
         row["reason_codes"] = list(self.reason_codes)
         row["deferred_fields"] = list(self.deferred_fields)
+        row["greek_api_available_fields"] = list(self.greek_api_available_fields)
+        row["greek_api_missing_fields"] = list(self.greek_api_missing_fields)
+        row["daily_regime_reason_codes"] = list(self.daily_regime_reason_codes)
+        row["context_regime_reason_codes"] = list(self.context_regime_reason_codes)
+        row["alerts_emitted"] = list(self.alerts_emitted)
+        row["alert_reason_codes"] = list(self.alert_reason_codes)
         return row
 
     def to_flat_dict(self) -> dict[str, Any]:
@@ -109,7 +137,28 @@ class RegimeSnapshot:
             "maxvol": self.maxvol_strike,
             "maxvol_migration": self.maxvol_migration,
             "total_gex_bn": self.total_gex_bn,
+            "total_raw_gex_bn": self.total_raw_gex_bn,
+            "total_dex_bn": self.total_dex_bn,
             "total_vex_bn": self.total_vex_bn,
+            "total_cex_bn": self.total_cex_bn,
+            "greek_api_available_fields": "; ".join(self.greek_api_available_fields),
+            "greek_api_missing_fields": "; ".join(self.greek_api_missing_fields),
+            "greek_api_source_endpoint": self.greek_api_source_endpoint,
+            "greek_api_units": json.dumps(self.greek_api_units, sort_keys=True),
+            "daily_regime_code": self.daily_regime_code,
+            "daily_regime_label": self.daily_regime_label,
+            "daily_regime_reason_codes": "; ".join(self.daily_regime_reason_codes),
+            "da_gex_path_observations": self.da_gex_path_observations,
+            "da_gex_sign_changes": self.da_gex_sign_changes,
+            "da_gex_path_summary": self.da_gex_path_summary,
+            "context_regime_code": self.context_regime_code,
+            "context_regime_label": self.context_regime_label,
+            "context_regime_reason_codes": "; ".join(self.context_regime_reason_codes),
+            "opex_context": self.opex_context,
+            "days_to_opex": self.days_to_opex,
+            "expiration_context": self.expiration_context,
+            "alerts_emitted": "; ".join(self.alerts_emitted),
+            "alert_reason_codes": "; ".join(self.alert_reason_codes),
         }
 
     @classmethod
@@ -122,6 +171,12 @@ class RegimeSnapshot:
         values["deferred_fields"] = tuple(
             values.get("deferred_fields") or DEFERRED_REGIME_FIELDS
         )
+        for key in (
+            "greek_api_available_fields", "greek_api_missing_fields",
+            "daily_regime_reason_codes", "context_regime_reason_codes",
+            "alerts_emitted", "alert_reason_codes",
+        ):
+            values[key] = tuple(values.get(key) or ())
         return cls(**values)
 
 
@@ -132,7 +187,7 @@ class RegimeChangeEvent:
     old_regime: RegimeLabel
     new_regime: RegimeLabel
     trigger: str
-    levels_involved: dict[str, float | None]
+    levels_involved: dict[str, Any]
     severity: RegimeSeverity
     suggested_action: RegimeAction
     affects_open_positions: bool

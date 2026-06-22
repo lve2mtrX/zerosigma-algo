@@ -923,3 +923,29 @@ Implementation status: complete and validated locally. Alert observation is
 journal-first and enabled for the Phase 11D portfolio event stream; delivery is
 globally disabled by default. No dashboard, broker, order-preview, execution,
 automatic promotion, lockbox, or ML/AI decision path was added.
+
+---
+
+## Phase 11F — Greek API parity + Pete R1-R6 regime extension
+
+Branch: `codex/phase-11f-greek-api-parity-regime`.
+
+1. Audit the Dashboard, ZeroSigma API, worker/docs, current algo provider, and
+   Pete/Stone decision source read-only. Separate baked API fields, client-side
+   calculations, aggregate totals, per-strike series, and genuinely unavailable
+   inputs before changing contracts.
+2. Produce a reproducible Greek parity artifact and a sanitized probe that uses
+   existing auth/config, reports field shape rather than payloads, and never
+   exposes credentials.
+3. Wire only verified API fields into structure/regime models with explicit
+   source, units, available-field, and missing-field diagnostics. Never invent
+   unavailable Greeks.
+4. Add chronological, no-lookahead DA-GEX path state for Pete R0-R3 and a
+   conservative deterministic expiration-calendar context for R4-R6.
+5. Emit reason-coded MaxVol, Greek degradation, and daily/context regime alerts
+   through the Phase 11E observation layer without changing strategy, selector,
+   risk, quote validation, or execution behavior.
+6. Carry new research fields into replay/backtest/learning outputs and expose
+   plain-language Simple Mode plus raw Advanced diagnostics.
+7. Validate with focused tests, full suite, sanitized local probes, Ruff, profile
+   validation, and diff checks. Dashboard/API repositories remain read-only.

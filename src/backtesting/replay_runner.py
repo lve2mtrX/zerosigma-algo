@@ -19,7 +19,7 @@ the exit SIMULATION are new (both read-only over saved snapshots).
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,9 @@ from src.backtesting.profile_runtime import (
     threshold_scheme,
 )
 from src.config.strategy_profiles import StrategyProfile, load_profile_file
+from src.regime.daily_path import build_da_gex_path
+from src.regime.events import RegimeEventDebouncer
+from src.regime.snapshot import build_regime_snapshot
 from src.risk.filters import apply_filters
 from src.risk.limits import load_profile
 from src.selector.daily_selector import components_to_str, select_daily_trade
@@ -200,6 +203,86 @@ def _gamma_relationship(spot: Any, primary: Any, secondary: Any) -> str:
     return "spot_between_gamma"
 
 
+def _research_structure(structure, metrics):  # type: ignore[no-untyped-def]
+    totals = metrics.get("totals") or {}
+    missing = tuple(metrics.get("missing_fields") or ())
+    return replace(
+        structure,
+        exposures=replace(
+            structure.exposures,
+            da_gex_signed=totals.get("da_gex"),
+            total_gex_bn=totals.get("raw_gex"),
+            total_raw_gex_bn=totals.get("raw_gex"),
+            total_dex_bn=totals.get("dex"),
+            total_vex_bn=totals.get("vex"),
+            total_cex_bn=totals.get("cex"),
+            greek_api_available_fields=tuple(metrics.get("available_fields") or ()),
+            greek_api_missing_fields=missing,
+            greek_api_source_endpoint=str(metrics.get("source_endpoint") or "backtest_raw_csv"),
+            greek_api_units=dict(metrics.get("units") or {}),
+            greek_api_unavailable_reasons={
+                field: "field_not_present_in_backtest_raw_csv" for field in missing
+            },
+        ),
+    )
+
+
+def research_regime_fields(
+    rows: list[dict[str, Any]],
+    timestamps: list,
+    selected_timestamp,
+    structure,
+    symbol: str,
+) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+    """Research-only replay regime fields; never feeds strategy or selector inputs."""
+    usable_timestamps = [value for value in timestamps if value <= selected_timestamp]
+    da_gex_history = M.da_gex_observations(rows, usable_timestamps)
+    path = build_da_gex_path(da_gex_history)
+    current_metrics = M.greek_metrics_at(rows, selected_timestamp)
+    research_structure = _research_structure(structure, current_metrics)
+
+    previous_regime = None
+    if len(usable_timestamps) >= 2:
+        previous_timestamp = usable_timestamps[-2]
+        previous_metrics = M.greek_metrics_at(rows, previous_timestamp)
+        previous_structure = _research_structure(
+            M.map_structure(rows, previous_timestamp, symbol), previous_metrics
+        )
+        previous_path = build_da_gex_path(da_gex_history[:-1])
+        previous_regime = build_regime_snapshot(
+            previous_structure,
+            timestamp=previous_timestamp,
+            da_gex_path=previous_path,
+        )
+    current_regime = build_regime_snapshot(
+        research_structure,
+        timestamp=selected_timestamp,
+        previous=previous_regime,
+        da_gex_path=path,
+    )
+    event = RegimeEventDebouncer(cooldown_seconds=0).evaluate(
+        previous_regime, current_regime
+    )
+    if event is not None:
+        emitted = [event.trigger]
+        alert_reasons = list(event.reason_codes)
+        if current_regime.daily_regime_code == "R3_WHIPSAW":
+            emitted.append("da_gex_path_whipsaw_active")
+            alert_reasons.append("da_gex_path_flipped_or_whipsawed")
+        current_regime = replace(
+            current_regime,
+            alerts_emitted=tuple(dict.fromkeys(emitted)),
+            alert_reason_codes=tuple(dict.fromkeys(alert_reasons)),
+        )
+    elif current_regime.daily_regime_code == "R3_WHIPSAW":
+        current_regime = replace(
+            current_regime,
+            alerts_emitted=("da_gex_path_whipsaw_active",),
+            alert_reason_codes=("da_gex_path_flipped_or_whipsawed",),
+        )
+    return current_regime.to_flat_dict()
+
+
 def _no_trade_record(
     *,
     date: str,
@@ -268,6 +351,14 @@ def _no_trade_record(
         "missing_price_count": sum(
             int(float(c.get("missing_price_count") or 0)) for c in candidates
         ),
+        "daily_regime_code": base.get("daily_regime_code"),
+        "daily_regime_label": base.get("daily_regime_label"),
+        "context_regime_code": base.get("context_regime_code"),
+        "context_regime_label": base.get("context_regime_label"),
+        "greek_api_available_fields": base.get("greek_api_available_fields"),
+        "greek_api_missing_fields": base.get("greek_api_missing_fields"),
+        "alerts_emitted": base.get("alerts_emitted"),
+        "alert_reason_codes": base.get("alert_reason_codes"),
     }
 
 
@@ -362,7 +453,9 @@ def _evaluate(
     )
 
     gamma = ch.primary_secondary_gamma(structure.exposures, structure.spot)
+    regime_fields = research_regime_fields(rows, timestamps, ts, structure, symbol)
     base = {
+        **regime_fields,
         "symbol": symbol, "date": date, "dte": dte_label, "profile_id": profile.profile_id,
         "preset_kind": settings.preset_kind, "entry_target": settings.entry_target,
         "entry_timestamp": ts.isoformat(), "entry_offset_minutes": sel["offset_minutes"],

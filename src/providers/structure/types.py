@@ -26,7 +26,10 @@ class ExposureContext:
     Strategy modules consult these instead of re-deriving from quote data.
     """
     total_gex_bn:    float | None = None
+    total_raw_gex_bn: float | None = None
+    total_dex_bn:    float | None = None
     total_vex_bn:    float | None = None
+    total_cex_bn:    float | None = None
     gamma_flip:      float | None = None
     call_wall:       float | None = None
     put_wall:        float | None = None
@@ -88,6 +91,20 @@ class ExposureContext:
     # from the prime cockpit cards; it is only shown under Advanced Structure /
     # raw diagnostics when a value is actually present.
     ddoi_pin:        float | None = None
+
+    # Phase 11F Greek/API parity diagnostics. The API's market snapshot carries
+    # aggregate exposure totals plus canonical per-strike chain rows. Raw
+    # lower-tier Greeks stay as per-strike series because summing them would
+    # invent an aggregate with unclear units.
+    greek_api_available_fields: tuple[str, ...] = ()
+    greek_api_missing_fields: tuple[str, ...] = ()
+    greek_api_source_endpoint: str | None = None
+    greek_api_units: dict[str, str] = field(default_factory=dict)
+    greek_api_unavailable_reasons: dict[str, str] = field(default_factory=dict)
+    greek_api_iv_metadata: dict[str, Any] = field(default_factory=dict)
+    per_strike_greek_series: dict[
+        str, dict[str, tuple[float | None, ...]]
+    ] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

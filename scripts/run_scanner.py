@@ -20,11 +20,15 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+
+_DA_GEX_PATH_STATES: dict[str, object] = {}
+_PREVIOUS_REGIME_SNAPSHOTS: dict[str, object] = {}
 
 
 def _quote_age_clock_skew_tolerance_seconds() -> float:
@@ -130,6 +134,8 @@ def main(argv: list[str] | None = None) -> int:
     from src.providers.quotes.tastytrade_provider import TastytradeConfigurationError
     from src.providers.quotes.types import QuoteRequest
     from src.providers.structure.factory import build_structure_provider
+    from src.regime.daily_path import append_da_gex_observation
+    from src.regime.events import RegimeEventDebouncer
     from src.regime.snapshot import build_regime_snapshot
     from src.reporting.decision_log import log_decision, log_decision_to_file
     from src.risk.filters import apply_filters
@@ -559,12 +565,32 @@ def main(argv: list[str] | None = None) -> int:
     latest = latest_dir(output_root)
     ranked_rows: list[dict] = []
     ts = now_et()
+    da_gex_path = append_da_gex_observation(
+        _DA_GEX_PATH_STATES.get(symbol),
+        structure.exposures.da_gex_signed,
+        structure.quote_ts,
+    )
+    _DA_GEX_PATH_STATES[symbol] = da_gex_path
+    previous_regime = _PREVIOUS_REGIME_SNAPSHOTS.get(symbol)
     regime_snapshot = build_regime_snapshot(
         structure,
         timestamp=ts,
         spot=chain.spot,
         quote_quality_status="usable" if chain.quotes else "unusable",
+        previous=previous_regime,
+        da_gex_path=da_gex_path,
     )
+    regime_event = RegimeEventDebouncer(cooldown_seconds=0).evaluate(
+        previous_regime,
+        regime_snapshot,
+    )
+    if regime_event is not None:
+        regime_snapshot = replace(
+            regime_snapshot,
+            alerts_emitted=(regime_event.trigger,),
+            alert_reason_codes=regime_event.reason_codes,
+        )
+    _PREVIOUS_REGIME_SNAPSHOTS[symbol] = regime_snapshot
     regime_fields = regime_snapshot.to_flat_dict()
 
     # ── per-strategy: generate → filter → score → select → build rows ──
@@ -839,6 +865,15 @@ _DEFAULT_RANKED_FIELDS = [
     "corridor_valid", "call_wing_10k", "put_wing_10k", "active_wds",
     "wds_tier", "dominant_wing_side", "maxvol", "maxvol_migration",
     "total_gex_bn", "total_vex_bn",
+    # Phase 11F — Greek parity + research-only Pete R1-R6 observability.
+    "total_raw_gex_bn", "total_dex_bn", "total_cex_bn",
+    "greek_api_available_fields", "greek_api_missing_fields",
+    "greek_api_source_endpoint", "greek_api_units",
+    "daily_regime_code", "daily_regime_label", "daily_regime_reason_codes",
+    "da_gex_path_observations", "da_gex_sign_changes", "da_gex_path_summary",
+    "context_regime_code", "context_regime_label", "context_regime_reason_codes",
+    "opex_context", "days_to_opex", "expiration_context",
+    "alerts_emitted", "alert_reason_codes",
 ]  # used only when no candidate rows exist — keep in sync with _candidate_row() + selector/profile stamping
 
 

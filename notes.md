@@ -3500,3 +3500,53 @@ Phase 11E implementation results:
 - Browser QA confirmed the Alert Center empty state, local-only banner, and
   refresh interaction. Existing unrelated Vega empty-extent warnings remain on
   other pre-rendered chart surfaces; no browser errors came from Alert Center.
+
+---
+
+## 2026-06-22 — Phase 11F implementation plan: Greek parity and R1-R6 regimes
+
+Branch: `codex/phase-11f-greek-api-parity-regime`.
+
+- Start from evidence: trace Dashboard requests and client calculations through
+  ZeroSigma API routes/workers, then compare those exact fields with the algo's
+  structure provider contract and sanitized live/configured responses.
+- Classify every requested Greek as aggregate API data, per-strike API data,
+  dashboard-derived data, already mapped data, newly mappable data, or unavailable.
+- Extend contracts only for verified fields and preserve `None` plus explicit
+  unavailable reasons everywhere else.
+- Implement Pete's DA-GEX daily path as stateful chronological observations with
+  R0 insufficient-data, R1 negative, R2 positive, and R3 unstable/whipsaw outputs.
+- Implement conservative R4-R6 expiration context using deterministic calendar
+  rules, returning unknown when the date context cannot be established safely.
+- Reuse Phase 11E alert journals/backends for Greek and regime observations;
+  Pushover and voice remain disabled by default and alerts never control trades.
+- Keep Dashboard, API, and Stone/Pete sources read-only. No broker, preview,
+  order, automatic trading/promotion, quote-validation relaxation, or ML/AI
+  decision path is in scope.
+
+Phase 11F implementation results:
+
+- Traced the dashboard through `/api/v1/market/snapshot` and
+  `/api/v1/exposure/series` to the API worker's canonical chain rows. The API
+  supplies raw and exposure-weighted lower-tier Greek fields per strike;
+  dashboard-only Black-Scholes and volume-weighted fallbacks remain explicitly
+  classified as client-derived and were not copied into the algo.
+- Added reproducible parity artifacts and a sanitized probe that reports only
+  endpoints, availability, units, and row/shape counts. Configured SPX and SPY
+  probes completed without exposing payload values or credentials.
+- Extended structure/regime diagnostics with verified aggregate and per-strike
+  Greek data, explicit missing reasons, endpoint provenance, and units. No
+  unavailable aggregate theta or raw lower-tier total is synthesized.
+- Added chronological DA-GEX path classification (R0-R3), conservative monthly
+  OpEx context (R4-R6), material MaxVol migration, and Greek-data degradation/
+  field-transition events. Alerts remain observational and local-only by
+  default.
+- Replay/backtest rows now preserve the research diagnostics without feeding
+  them into selector or strategy inputs. Learning outputs include daily regime,
+  context regime, Greek availability, and regime-alert reason groupings.
+- SPX and SPY probes, the alert fixture, a two-day backtest, and a two-day
+  learning smoke completed. The backtest observed an R3 whipsaw and R5 OpEx
+  context; historical rows lacked vomma, speed, and zomma and reported those
+  fields as missing rather than fabricating values.
+- Browser QA confirmed Simple and Advanced Greek/regime surfaces and logged no
+  browser console errors. Final validation is recorded in the Phase 11F report.
