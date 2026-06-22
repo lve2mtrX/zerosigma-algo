@@ -155,4 +155,3 @@ complete. Insufficient live-paper data should remain labeled insufficient.
 | Duplicate alerts | Review cooldown/suppression counts in `alert_quality.csv`; do not disable journaling. |
 | Review has no data | Confirm a portfolio run exists and use `review_portfolio_forward --latest`. |
 | Runner appears stuck | Inspect `heartbeat.json`; stop with `Ctrl+C` in the owning terminal. |
-
