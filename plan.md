@@ -893,3 +893,33 @@ live trading, profile promotion, lockbox automation, or ML/AI decisions.
    preserving compatibility with current review scripts.
 7. Add a deterministic no-network smoke CLI plus focused lifecycle, journal,
    UI, review-compatibility, and safety tests before full validation.
+
+---
+
+## Phase 11E — Stone/Pete alert foundation + algo plan alignment
+
+Branch: `codex/phase-11e-stone-alert-foundation`.
+
+Phase 11E adapts the reusable alert ideas from Pete/Stone into
+`zerosigma-algo`. Pete's Dash UI and Redis/API readers are reference-only and
+must not enter the algo. Alerts observe the existing regime and local-paper
+lifecycle; they do not preview, route, or submit orders.
+
+1. Audit Pete/Stone prompt, notification, voice, popup, feed, engagement,
+   preferences, decision, and risk-gate modules before porting any behavior.
+2. Add deterministic alert models, templates, adapters, routing, cooldown, and
+   append-only journals with stable reason codes and local-only safety stamps.
+3. Add cockpit, disabled-by-default Pushover, and disabled-by-default queued
+   voice backends behind one notification protocol.
+4. Adapt Phase 11D regime and execution-journal events into alerts additively;
+   notification failure must never block the paper lifecycle.
+5. Add an Alert Center to the local algo cockpit. Do not touch the dashboard
+   repository or copy Pete's Dash components.
+6. Add blank/default environment documentation and deterministic fixture smokes.
+7. Keep live trading behind the execution ladder. Hermes/ML remain future
+   research/advisory inputs and never become trading authority in this phase.
+
+Implementation status: complete and validated locally. Alert observation is
+journal-first and enabled for the Phase 11D portfolio event stream; delivery is
+globally disabled by default. No dashboard, broker, order-preview, execution,
+automatic promotion, lockbox, or ML/AI decision path was added.

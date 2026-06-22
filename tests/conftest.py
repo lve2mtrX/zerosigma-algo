@@ -36,3 +36,11 @@ for _var in (
 ):
     os.environ[_var] = ""
 os.environ["TASTY_ENV"] = "certification"
+
+# Phase 11E notification adapters are opt-in. Force test-session delivery off
+# so a developer shell cannot enable Pushover or voice for unrelated tests.
+os.environ["ALERTS_ENABLED"] = "false"
+os.environ["ALERTS_PUSHOVER_ENABLED"] = "false"
+os.environ["ALERTS_VOICE_ENABLED"] = "false"
+os.environ["PUSHOVER_USER_KEY"] = ""
+os.environ["PUSHOVER_API_TOKEN"] = ""

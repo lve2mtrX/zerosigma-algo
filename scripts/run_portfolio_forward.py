@@ -204,6 +204,8 @@ def _load_profiles(profiles_arg: str | None, profiles_file: str | None):
 
 
 def main(argv: list[str] | None = None) -> int:
+    from src.alerts.adapters import paper_journal_to_alert, regime_change_to_alert
+    from src.alerts.router import AlertRouter
     from src.paper import ledger, lifecycle
     from src.paper.models import ExecutionJournalEvent, PaperLifecycleConfig
     from src.regime.events import RegimeEventDebouncer
@@ -304,6 +306,13 @@ def main(argv: list[str] | None = None) -> int:
     regime_events = []
     previous_regimes: dict[str, object] = {}
     regime_debouncer = RegimeEventDebouncer()
+    profile_symbols = {p["profile_id"]: p["symbol"] for p in loaded}
+    alert_router = AlertRouter.from_env(
+        output_root=out_root.parent,
+        mirror_directories=[run_dir / "alerts"],
+    )
+    alert_journal_cursor = 0
+    alert_regime_cursor = 0
     dup_skipped = 0
     blocked = 0
     max_open_seen = 0
@@ -328,6 +337,36 @@ def main(argv: list[str] | None = None) -> int:
             "open_trade_count": len(open_trades), "closed_trade_count": len(closed_trades),
             "total_pnl": summary["total_pnl"], "no_execution": True,
         })
+
+    def _route_new_alerts() -> None:
+        """Adapt newly recorded domain events without influencing the paper loop."""
+        nonlocal alert_journal_cursor, alert_regime_cursor
+        new_regime_events = regime_events[alert_regime_cursor:]
+        new_journal_events = execution_journal[alert_journal_cursor:]
+        alert_regime_cursor = len(regime_events)
+        alert_journal_cursor = len(execution_journal)
+        try:
+            for event in new_regime_events:
+                alert_router.route(regime_change_to_alert(event))
+            for event in new_journal_events:
+                if event.details.get("regime_event"):
+                    continue
+                reasons = " ".join(event.reason_codes).lower()
+                is_alert_worthy = event.action in {
+                    "ENTERED", "EXITED", "CANDIDATE_REJECTED", "ALERT",
+                }
+                is_alert_worthy = is_alert_worthy or (
+                    event.action in {"MARKED", "HELD"}
+                    and any(flag in reasons for flag in ("unavailable", "invalid", "stale"))
+                )
+                if not is_alert_worthy:
+                    continue
+                alert_router.route(paper_journal_to_alert(
+                    event,
+                    symbol=profile_symbols.get(event.profile_id or ""),
+                ))
+        except Exception as exc:
+            log.warning("local alert routing failed safely: %s", type(exc).__name__)
 
     ledger.write_manifest(run_dir, latest_dir, manifest)
     _persist("running")
@@ -665,6 +704,8 @@ def main(argv: list[str] | None = None) -> int:
                     ))
                     still_open.append(trade)
             open_trades = still_open
+
+            _route_new_alerts()
 
             # ── persist this tick ──
             summary = ledger.compute_summary(

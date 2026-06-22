@@ -3459,3 +3459,44 @@ Phase 11D implementation results:
   raw reason codes. Browser verification confirmed the Simple Mode journal and
   regime surfaces with no browser errors; the Advanced toggle interaction timed
   out in the browser connector and remains covered by static/UI tests.
+
+---
+
+## 2026-06-22 — Phase 11E implementation plan: Stone/Pete alert foundation
+
+Branch: `codex/phase-11e-stone-alert-foundation`.
+
+1. Read the audited Stone/Pete cockpit modules as source material and classify
+   each behavior as pure, adaptable, rewrite-required, or rejected.
+2. Port only deterministic prompt/alert concepts into `src/alerts/` and
+   `src/notifications/`; no Dash, Redis, or Pete API reader dependency is
+   allowed in the algo.
+3. Route Phase 11D regime and paper-journal events into local alert journals by
+   default. Network and voice delivery stay explicitly disabled unless safely
+   configured.
+4. Keep credentials runtime-only and redacted. Missing Pushover credentials
+   must degrade to a typed non-delivery result without logging secret values.
+5. Add a local Alert Center with narrative Simple Mode and reason/delivery
+   details in Advanced Mode. The dashboard repository is out of scope.
+6. Preserve the execution ladder: alerts advise operators but cannot preview,
+   place, route, promote, or authorize trades.
+7. Treat Hermes/ML as future advisory and research layers only; no ML/AI trading
+   decision path is added in Phase 11E.
+
+Phase 11E implementation results:
+
+- Added deterministic alert types, templates, Phase 11D adapters, a preference-
+  aware cooldown router, and append-only event/delivery JSONL journals.
+- Added a local cockpit feed, opt-in secret-safe Pushover adapter, and opt-in
+  bounded voice queue. Actual TTS playback remains deferred.
+- The portfolio runner now observes only meaningful regime/paper events and
+  mirrors alert journals into each portfolio run without affecting lifecycle
+  decisions or allowing notification failures to escape the alert boundary.
+- Added the Streamlit Alert Center with plain-English Simple Mode and Advanced
+  reason, suppression, metadata, and backend-delivery details.
+- Deterministic regime-change and paper-exit smokes passed with local cockpit
+  delivery and no network backends. Full validation: 944 tests passed, Ruff
+  passed, 14/14 profiles valid, and `git diff --check` passed.
+- Browser QA confirmed the Alert Center empty state, local-only banner, and
+  refresh interaction. Existing unrelated Vega empty-extent warnings remain on
+  other pre-rendered chart surfaces; no browser errors came from Alert Center.

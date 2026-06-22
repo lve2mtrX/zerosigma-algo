@@ -26,6 +26,7 @@ import streamlit as st
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from src.alerts import journal as alert_journal  # noqa: E402
 from src.app import cockpit_helpers as ch  # noqa: E402
 from src.app import control_ui  # noqa: E402
 from src.app import operator_mode as om  # noqa: E402
@@ -1857,6 +1858,80 @@ def render_forward_runner() -> None:
                 )
 
 
+def render_alert_center() -> None:
+    """Render the local append-only alert feed; this never performs an action."""
+    st.markdown("**Alert Center**")
+    st.markdown(
+        ui.pill("LOCAL ALERTING ONLY - NO BROKER ACTION", "green"),
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Regime and local paper alerts are observational. Pushover and voice remain "
+        "disabled unless explicitly configured."
+    )
+    events = alert_journal.load_latest_alerts(OUTPUT_ROOT)
+    deliveries = alert_journal.load_latest_deliveries(OUTPUT_ROOT)
+    delivery_by_event: dict[str, list[dict]] = {}
+    for delivery in deliveries:
+        delivery_by_event.setdefault(str(delivery.get("event_id") or ""), []).append(delivery)
+
+    if not events:
+        st.info("No local alerts recorded yet. Alerts will appear after regime or paper events.")
+        return
+
+    def _simple_status(event: dict) -> str:
+        if event.get("suppressed"):
+            return "Suppressed by cooldown"
+        results = delivery_by_event.get(str(event.get("event_id") or ""), [])
+        if any(result.get("delivered") for result in results):
+            return "Delivered locally"
+        if any(result.get("reason") == "delivery_disabled_alert_journal_only" for result in results):
+            return "Journal only"
+        return "Recorded"
+
+    latest_events = events[-50:]
+    rows = [
+        {
+            "Time": event.get("timestamp"),
+            "Severity": str(event.get("severity") or "Info").title(),
+            "Alert": event.get("message") or event.get("title"),
+            "Source": str(event.get("source") or "System").replace("_", " ").title(),
+            "Symbol": event.get("symbol") or "-",
+            "Strategy": event.get("profile_id") or "-",
+            "Position": event.get("trade_id") or "-",
+            "Suggested action": str(event.get("suggested_action") or "Review").replace(
+                "_", " "
+            ).title(),
+            "Status": _simple_status(event),
+        }
+        for event in latest_events
+    ]
+    st.dataframe(rows, width="stretch", hide_index=True)
+
+    if not simple_mode:
+        with st.expander("Alert reason codes, delivery, and metadata", expanded=False):
+            st.dataframe(
+                [
+                    {
+                        "event_id": event.get("event_id"),
+                        "reason_codes": "; ".join(event.get("reason_codes") or []),
+                        "suppressed": event.get("suppressed"),
+                        "suppression_reason": event.get("suppression_reason"),
+                        "cooldown_remaining_seconds": event.get(
+                            "cooldown_remaining_seconds"
+                        ),
+                        "metadata": json.dumps(event.get("metadata") or {}, sort_keys=True),
+                    }
+                    for event in latest_events
+                ],
+                width="stretch",
+                hide_index=True,
+            )
+            if deliveries:
+                st.markdown("**Backend delivery results**")
+                st.dataframe(deliveries[-100:], width="stretch", hide_index=True)
+
+
 def render_portfolio() -> None:
     st.subheader("💼 Zσ Paper Portfolio")
     st.markdown(ui.pill("LOCAL PAPER ONLY — NO BROKER ORDER SENT", "green"),
@@ -1865,6 +1940,7 @@ def render_portfolio() -> None:
         "Open/closed paper trades + P&L from your strategy test runs (TP / SL / EOD "
         "exits across profiles). No broker orders, no order preview, no live execution."
     )
+    render_alert_center()
     _pf_man = portfolio_ledger.load_manifest("latest")
     if not _pf_man:
         st.info(
