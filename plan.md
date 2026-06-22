@@ -949,3 +949,24 @@ Branch: `codex/phase-11f-greek-api-parity-regime`.
    plain-language Simple Mode plus raw Advanced diagnostics.
 7. Validate with focused tests, full suite, sanitized local probes, Ruff, profile
    validation, and diff checks. Dashboard/API repositories remain read-only.
+
+---
+
+## Phase 11G — RTH live-paper soak + alert/regime review
+
+Branch: `codex/phase-11g-rth-paper-soak-review`.
+
+1. Document a repeatable premarket, RTH start/status, EOD review, stop, cleanup,
+   and troubleshooting workflow for the existing portfolio-forward paper system.
+2. Add a sanitized readiness CLI that checks configured providers, Greek and
+   regime availability, quote readiness, local alert settings, paper lifecycle
+   configuration, and writable output paths without exposing credentials.
+3. Add read-only review helpers for alerts, regime transitions, Greek
+   availability, and paper trades using existing journals and output artifacts.
+4. Generate Markdown, JSON, and CSV review artifacts with explicit insufficient-
+   data conclusions rather than inferred success.
+5. Add a local cockpit RTH Review surface with plain-language Simple Mode and
+   artifact tables, downloads, and reason codes in Advanced Mode.
+6. Add deterministic no-network readiness/review fixtures and focused tests.
+7. Preserve all strategy, selector, risk, quote-validation, execution, and
+   notification behavior. This phase observes and reports only.

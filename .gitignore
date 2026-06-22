@@ -50,6 +50,7 @@ outputs/backtests/*
 outputs/research/*
 outputs/forward_readiness/*
 outputs/readiness/*
+outputs/reviews/*
 outputs/alerts/*
 outputs/alerts_smoke/*
 !outputs/latest/.gitkeep
