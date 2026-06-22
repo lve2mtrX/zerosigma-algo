@@ -3550,3 +3550,48 @@ Phase 11F implementation results:
   fields as missing rather than fabricating values.
 - Browser QA confirmed Simple and Advanced Greek/regime surfaces and logged no
   browser console errors. Final validation is recorded in the Phase 11F report.
+
+---
+
+## 2026-06-22 — Phase 11G implementation plan: RTH paper soak review
+
+Branch: `codex/phase-11g-rth-paper-soak-review`.
+
+- Build the runbook around the existing ZeroSigma structure provider, Tasty
+  quote diagnostics, portfolio-forward paper runner, paper journal, and alert
+  journals; do not create a second execution path.
+- Keep readiness output sanitized and fail closed when Greek, expiry/root,
+  quote, lifecycle, or output-path checks are blocked.
+- Review only recorded events and chronological regime fields. Do not recompute
+  transitions with future observations and do not send notifications while
+  reviewing.
+- Emit deterministic review artifacts for alerts, daily/context regimes,
+  MaxVol and Greek quality, and paper entries/holds/exits.
+- Add a fixture that demonstrates one complete paper lifecycle plus a regime
+  transition, MaxVol migration, Greek degradation, and suppressed duplicate.
+- Expose a concise local RTH Review in Simple Mode and raw tables/reason codes in
+  Advanced Mode. Dashboard and API repositories remain read-only.
+- Preserve strategy, selector, risk, quote validation, broker, order-preview,
+  live-execution, automatic-promotion, lockbox, and ML/AI boundaries.
+
+Phase 11G implementation results:
+
+- Added an RTH operator runbook with sanitized preflight probes, exact foreground
+  portfolio commands, read-only status/reconciliation, `Ctrl+C` shutdown, EOD
+  artifact review, and fail-closed troubleshooting guidance.
+- Added a readiness CLI that composes existing ZeroSigma Greek, Tasty quote,
+  profile, OpEx, alert-preference, paper-lifecycle, and output-path checks. It
+  reports only configuration presence/status and never credential values.
+- Added read-only alert, regime, Greek, and paper-trade review helpers plus a CLI
+  that writes deterministic Markdown, JSON, and four CSV review artifacts.
+- The no-network fixture records one R1-to-R3 and R4-to-R5 transition, one
+  material MaxVol move, one Greek degradation, one entry/hold/TP lifecycle, and
+  one cooldown-suppressed duplicate alert.
+- The exact live readiness smoke ran after RTH. ZeroSigma and all 19 requested
+  Greek metrics were available, but startup correctly remained blocked because
+  the single returned Tasty quote failed the unchanged absolute-spread rule and
+  required strikes were missing.
+- Added Simple and Advanced RTH Review surfaces to the local Paper Portfolio.
+  Browser QA verified summary values, mode switching, downloads, and all four
+  review tables with no browser errors. Existing unrelated Vega empty-extent
+  warnings remain on older chart surfaces; screenshot capture timed out.

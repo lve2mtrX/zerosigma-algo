@@ -59,6 +59,7 @@ from src.reporting.config_change_log import (  # noqa: E402
     log_session_snapshot,
 )
 from src.reporting.eod import generate_eod_summary  # noqa: E402
+from src.reviews import rth_soak as soak_review  # noqa: E402
 from src.risk.filters import apply_filters  # noqa: E402
 from src.risk.limits import (  # noqa: E402
     load_profile,
@@ -1976,6 +1977,88 @@ def render_alert_center() -> None:
                 st.dataframe(deliveries[-100:], width="stretch", hide_index=True)
 
 
+def render_rth_review() -> None:
+    """Render saved readiness and read-only soak-review artifacts."""
+    st.markdown("**RTH Review**")
+    readiness_path = OUTPUT_ROOT / "readiness" / "latest" / "rth_soak_readiness.json"
+    readiness: dict = {}
+    if readiness_path.is_file():
+        try:
+            readiness = json.loads(readiness_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            readiness = {}
+    review = soak_review.load_latest_rth_soak_review(OUTPUT_ROOT)
+    if not readiness and not review.get("available"):
+        st.info(
+            "No RTH soak review yet. Run the readiness diagnostic, then generate a "
+            "read-only review after a local-paper session."
+        )
+        return
+
+    alerts = review.get("alert_summary") or {}
+    paper = review.get("paper_summary") or {}
+    regimes = review.get("regime_summary") or {}
+    greeks = review.get("greek_summary") or {}
+    status = readiness.get("status") or "Not checked"
+    cols = st.columns(6)
+    cols[0].metric("Readiness", str(status).title())
+    cols[1].metric("Last soak", review.get("run_id") or "No run")
+    cols[2].metric("Alerts", alerts.get("alert_count", 0))
+    cols[3].metric("Paper trades", paper.get("paper_trade_count", 0))
+    cols[4].metric(
+        "Latest regime",
+        om.friendly_enum_label(regimes.get("latest_daily_regime") or "Unavailable"),
+    )
+    cols[5].metric("Greek data", greeks.get("latest_status") or readiness.get(
+        "greeks", {}
+    ).get("status", "No data"))
+    context = regimes.get("latest_context_regime")
+    if context:
+        st.caption(f"Expiration context: {om.friendly_enum_label(context)}")
+    next_action = review.get("next_action")
+    if next_action:
+        st.info(next_action)
+    elif readiness.get("blockers"):
+        st.warning("Resolve readiness blockers before starting an RTH local-paper soak.")
+
+    if not simple_mode:
+        latest_dir = OUTPUT_ROOT / "reviews" / "latest"
+        with st.expander("Soak review artifacts and raw reason codes", expanded=False):
+            st.caption(
+                "Downloads are existing local review files. This section does not run a "
+                "strategy or send notifications."
+            )
+            files = (
+                "rth_soak_review.md", "rth_soak_review.json", "alert_quality.csv",
+                "regime_transition_review.csv", "paper_trade_review.csv",
+                "greek_availability_review.csv",
+            )
+            download_cols = st.columns(3)
+            for index, name in enumerate(files):
+                path = latest_dir / name
+                if path.is_file():
+                    download_cols[index % 3].download_button(
+                        label=f"Download {name}",
+                        data=path.read_bytes(),
+                        file_name=name,
+                        mime="text/csv" if name.endswith(".csv") else "application/json"
+                        if name.endswith(".json") else "text/markdown",
+                        key=f"soak_download_{name}",
+                    )
+            for title, key in (
+                ("Alert quality", "alert_quality"),
+                ("Regime transitions", "regime_transition_review"),
+                ("Greek availability", "greek_availability_review"),
+                ("Paper trades", "paper_trade_review"),
+            ):
+                rows = review.get(key) or []
+                st.markdown(f"**{title}**")
+                if rows:
+                    st.dataframe(rows, width="stretch", hide_index=True)
+                else:
+                    st.caption("No rows recorded for this review.")
+
+
 def render_portfolio() -> None:
     st.subheader("💼 Zσ Paper Portfolio")
     st.markdown(ui.pill("LOCAL PAPER ONLY — NO BROKER ORDER SENT", "green"),
@@ -1985,6 +2068,9 @@ def render_portfolio() -> None:
         "exits across profiles). No broker orders, no order preview, no live execution."
     )
     render_alert_center()
+    st.divider()
+    render_rth_review()
+    st.divider()
     _pf_man = portfolio_ledger.load_manifest("latest")
     if not _pf_man:
         st.info(
