@@ -15,6 +15,7 @@ controller (a background `run_forward` monitor) — no brokerage anywhere.
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 import uuid
@@ -1858,7 +1859,7 @@ def render_forward_runner() -> None:
 
 def render_portfolio() -> None:
     st.subheader("💼 Zσ Paper Portfolio")
-    st.markdown(ui.pill("LOCAL PAPER ACCOUNTING ONLY — NO BROKER EXECUTION", "green"),
+    st.markdown(ui.pill("LOCAL PAPER ONLY — NO BROKER ORDER SENT", "green"),
                 unsafe_allow_html=True)
     st.caption(
         "Open/closed paper trades + P&L from your strategy test runs (TP / SL / EOD "
@@ -1892,10 +1893,34 @@ def render_portfolio() -> None:
         _pc2[3].metric("Blocked", _pf_summ.get("blocked_by_limits_count", 0))
 
         _pf_cols = ("paper_trade_id", "profile_id", "side", "short_strike", "long_strike",
-                    "entry_credit", "current_mark", "unrealized_pnl", "realized_pnl",
-                    "exit_reason", "ticks_held")
+                    "archetype", "entry_credit", "entry_debit", "current_mark",
+                    "unrealized_pnl", "realized_pnl", "risk_quality_label",
+                    "latest_decision", "exit_reason", "ticks_held")
         _open_rows = portfolio_ledger.load_open_trades("latest")
         _closed_rows = portfolio_ledger.load_closed_trades("latest")
+        _journal_rows = portfolio_ledger.load_execution_journal("latest")
+        _mark_rows = portfolio_ledger.load_paper_marks("latest")
+        _regime_events = portfolio_ledger.load_regime_events("latest")
+
+        def _regime_read(raw: object) -> tuple[str, str]:
+            try:
+                data = json.loads(str(raw or "{}"))
+            except (TypeError, ValueError):
+                data = {}
+            return (
+                str(data.get("final_regime_label") or "Unavailable").replace("_", " ").title(),
+                str(data.get("plain_english_summary") or "Regime context unavailable."),
+            )
+
+        def _legs_read(raw: object) -> str:
+            try:
+                legs = json.loads(str(raw or "[]"))
+            except (TypeError, ValueError):
+                legs = []
+            return " / ".join(
+                f"{leg.get('action')} {leg.get('right')} {leg.get('strike')}"
+                for leg in legs
+            ) or "Unavailable"
         _pf_profile_ids = set(_pf_man.get("profiles") or [])
         _pf_profile_ids.update(str(r.get("profile_id")) for r in (_open_rows + _closed_rows)
                                if r.get("profile_id"))
@@ -1907,8 +1932,47 @@ def render_portfolio() -> None:
                     st.caption(om.strategy_one_line(_p))
         st.markdown("**Open paper trades & unrealized P&L**")
         if _open_rows:
-            st.dataframe([{k: r.get(k) for k in _pf_cols} for r in _open_rows],
-                         use_container_width=True, hide_index=True)
+            if simple_mode:
+                _open_simple = []
+                for _row in _open_rows:
+                    _entry_regime, _entry_summary = _regime_read(_row.get("entry_regime_json"))
+                    _current_regime, _current_summary = _regime_read(
+                        _row.get("current_regime_json")
+                    )
+                    _open_simple.append({
+                        "Position": _row.get("paper_trade_id"),
+                        "Strategy": str(_row.get("archetype") or _row.get("side") or "").replace(
+                            "_", " "
+                        ).title(),
+                        "Legs": _legs_read(_row.get("legs_json")),
+                        "Entry": _row.get("entry_credit") or _row.get("entry_debit"),
+                        "Current mark": _row.get("current_mark"),
+                        "Unrealized P&L": _row.get("unrealized_pnl"),
+                        "Risk quality": _row.get("risk_quality_label") or "Unavailable",
+                        "Entry regime": _entry_regime,
+                        "Current regime": _current_regime,
+                        "Decision": str(_row.get("latest_decision") or "HOLD").replace(
+                            "_", " "
+                        ).title(),
+                        "Reason": _row.get("latest_explanation") or _current_summary or _entry_summary,
+                    })
+                st.dataframe(_open_simple, use_container_width=True, hide_index=True)
+            else:
+                st.dataframe([{k: r.get(k) for k in _pf_cols} for r in _open_rows],
+                             use_container_width=True, hide_index=True)
+                with st.expander("Paper position reason codes and thresholds", expanded=False):
+                    st.dataframe([
+                        {
+                            "paper_trade_id": row.get("paper_trade_id"),
+                            "tp_rule": row.get("tp_rule"),
+                            "sl_rule": row.get("sl_rule"),
+                            "exit_rule": row.get("exit_rule"),
+                            "entry_reason_codes": row.get("entry_reason_codes"),
+                            "latest_reason_codes": row.get("latest_reason_codes"),
+                            "thesis": row.get("thesis"),
+                        }
+                        for row in _open_rows
+                    ], use_container_width=True, hide_index=True)
         else:
             st.caption("No open paper trades. Start a portfolio forward run or wait for a selected signal.")
         if _closed_rows:
@@ -1931,6 +1995,63 @@ def render_portfolio() -> None:
                  for e in _pf_events[-25:]],
                 use_container_width=True, hide_index=True,
             )
+        st.markdown("**Execution journal**")
+        if _journal_rows:
+            _journal_display = [
+                {
+                    "Timestamp": event.get("timestamp"),
+                    "Action": str(event.get("action") or "").replace("_", " ").title(),
+                    "Position": event.get("paper_trade_id"),
+                    "Explanation": event.get("plain_english_explanation"),
+                    "P&L impact": event.get("pnl_impact"),
+                    **({"Reason codes": "; ".join(event.get("reason_codes") or [])}
+                       if not simple_mode else {}),
+                }
+                for event in _journal_rows[-50:]
+            ]
+            st.dataframe(_journal_display, use_container_width=True, hide_index=True)
+        else:
+            st.caption("Journal entries will appear after a local paper position is evaluated.")
+
+        _rejected = [row for row in _journal_rows if row.get("action") == "CANDIDATE_REJECTED"]
+        if _rejected:
+            st.markdown("**Rejected candidates**")
+            st.dataframe([
+                {
+                    "Timestamp": row.get("timestamp"),
+                    "Profile": row.get("profile_id"),
+                    "Explanation": row.get("plain_english_explanation"),
+                    **({"Reason codes": "; ".join(row.get("reason_codes") or [])}
+                       if not simple_mode else {}),
+                }
+                for row in _rejected[-25:]
+            ], use_container_width=True, hide_index=True)
+
+        st.markdown("**Regime change events**")
+        if _regime_events:
+            st.dataframe([
+                {
+                    "Timestamp": event.get("timestamp"),
+                    "Change": (
+                        f"{str(event.get('old_regime') or '').replace('_', ' ').title()} to "
+                        f"{str(event.get('new_regime') or '').replace('_', ' ').title()}"
+                    ),
+                    "Severity": event.get("severity"),
+                    "Suggested action": str(event.get("suggested_action") or "").replace(
+                        "_", " "
+                    ).title(),
+                    "Alert": event.get("plain_english_alert"),
+                    **({"Reason codes": "; ".join(event.get("reason_codes") or [])}
+                       if not simple_mode else {}),
+                }
+                for event in _regime_events[-25:]
+            ], use_container_width=True, hide_index=True)
+        else:
+            st.caption("No meaningful regime changes were recorded for the latest paper run.")
+
+        if _mark_rows and not simple_mode:
+            with st.expander("Paper mark details", expanded=False):
+                st.dataframe(_mark_rows[-50:], use_container_width=True, hide_index=True)
         _pf_rec = portfolio_ledger.load_reconciliation("latest")
         if _pf_rec:
             if _pf_rec.get("ok"):

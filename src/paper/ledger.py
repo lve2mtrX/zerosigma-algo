@@ -19,14 +19,22 @@ from __future__ import annotations
 
 import csv
 import json
+from dataclasses import fields
 from pathlib import Path
 
-from src.paper.models import EXECUTION_MODE, PaperTrade
+from src.paper.models import (
+    EXECUTION_MODE,
+    ExecutionJournalEvent,
+    PaperMark,
+    PaperTrade,
+)
+from src.regime.types import RegimeChangeEvent
 from src.utils.time import now_et
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 PAPER_TRADE_FIELDS: list[str] = PaperTrade.field_names()
+PAPER_MARK_FIELDS: list[str] = [field.name for field in fields(PaperMark)]
 
 
 # ── paths ────────────────────────────────────────────────────────────────────
@@ -48,6 +56,11 @@ def portfolio_paths(run_dir: Path) -> dict[str, Path]:
         "open_csv": run_dir / "paper_trades_open.csv",
         "closed_csv": run_dir / "paper_trades_closed.csv",
         "events": run_dir / "paper_trade_events.jsonl",
+        "execution_journal": run_dir / "paper_execution_journal.jsonl",
+        "execution_journal_md": run_dir / "paper_execution_journal.md",
+        "marks": run_dir / "paper_marks.csv",
+        "regime_events": run_dir / "paper_regime_events.jsonl",
+        "latest_open_positions": run_dir / "latest_open_positions.json",
         "summary": run_dir / "portfolio_summary.json",
         "reconciliation": run_dir / "reconciliation_report.json",
         "scanner": run_dir / "scanner",
@@ -56,7 +69,7 @@ def portfolio_paths(run_dir: Path) -> dict[str, Path]:
 
 # ── low-level writers ────────────────────────────────────────────────────────
 
-def _write_json(path: Path, record: dict) -> None:
+def _write_json(path: Path, record: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
         json.dump(record, fh, indent=2, default=str)
@@ -66,6 +79,13 @@ def _append_jsonl(path: Path, record: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, default=str) + "\n")
+
+
+def _write_jsonl(path: Path, records: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for record in records:
+            fh.write(json.dumps(record, default=str) + "\n")
 
 
 def _write_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
@@ -105,6 +125,67 @@ def write_closed_trades(run_dir: Path, latest_dir: Path, closed_trades: list[Pap
     rows = [t.to_row() for t in closed_trades]
     _write_csv(run_dir / "paper_trades_closed.csv", rows, PAPER_TRADE_FIELDS)
     _write_csv(latest_dir / "paper_trades_closed.csv", rows, PAPER_TRADE_FIELDS)
+
+
+def write_execution_journal(
+    run_dir: Path,
+    latest_dir: Path,
+    events: list[ExecutionJournalEvent],
+) -> None:
+    rows = [event.to_dict() for event in events]
+    _write_jsonl(run_dir / "paper_execution_journal.jsonl", rows)
+    _write_jsonl(latest_dir / "paper_execution_journal.jsonl", rows)
+    lines = [
+        "# Local Paper Execution Journal",
+        "",
+        "LOCAL PAPER ONLY - NO BROKER ORDER SENT.",
+        "",
+        "| Timestamp | Action | Trade | Reason codes | Explanation | P&L impact |",
+        "|---|---|---|---|---|---:|",
+    ]
+    for event in events:
+        explanation = event.plain_english_explanation.replace("|", "/")
+        reasons = "; ".join(event.reason_codes).replace("|", "/")
+        pnl = "" if event.pnl_impact is None else f"{event.pnl_impact:.2f}"
+        lines.append(
+            f"| {event.timestamp} | {event.action} | {event.paper_trade_id or ''} | "
+            f"{reasons} | {explanation} | {pnl} |"
+        )
+    text = "\n".join(lines) + "\n"
+    for directory in (run_dir, latest_dir):
+        path = directory / "paper_execution_journal.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+def write_paper_marks(
+    run_dir: Path,
+    latest_dir: Path,
+    marks: list[PaperMark],
+) -> None:
+    rows = [mark.to_csv_row() for mark in marks]
+    _write_csv(run_dir / "paper_marks.csv", rows, PAPER_MARK_FIELDS)
+    _write_csv(latest_dir / "paper_marks.csv", rows, PAPER_MARK_FIELDS)
+
+
+def write_regime_events(
+    run_dir: Path,
+    latest_dir: Path,
+    events: list[RegimeChangeEvent],
+) -> None:
+    rows = [event.to_dict() for event in events]
+    _write_jsonl(run_dir / "paper_regime_events.jsonl", rows)
+    _write_jsonl(latest_dir / "paper_regime_events.jsonl", rows)
+
+
+def write_latest_open_positions(
+    run_dir: Path,
+    latest_dir: Path,
+    open_trades: list[PaperTrade],
+) -> None:
+    rows = [trade.to_row() for trade in open_trades]
+    _write_json(run_dir / "latest_open_positions.json", rows)
+    _write_json(latest_dir / "latest_open_positions.json", rows)
 
 
 def append_event(run_dir: Path, event: dict) -> None:
@@ -271,6 +352,38 @@ def load_closed_trades(run_ref: str, root: Path | str | None = None) -> list[dic
 def load_events(run_ref: str, root: Path | str | None = None) -> list[dict]:
     rd = resolve_portfolio_run_dir(run_ref, root)
     return _read_jsonl(rd / "paper_trade_events.jsonl") if rd else []
+
+
+def load_execution_journal(run_ref: str, root: Path | str | None = None) -> list[dict]:
+    rd = resolve_portfolio_run_dir(run_ref, root)
+    return _read_jsonl(rd / "paper_execution_journal.jsonl") if rd else []
+
+
+def load_paper_marks(run_ref: str, root: Path | str | None = None) -> list[dict]:
+    rd = resolve_portfolio_run_dir(run_ref, root)
+    return _read_csv(rd / "paper_marks.csv") if rd else []
+
+
+def load_regime_events(run_ref: str, root: Path | str | None = None) -> list[dict]:
+    rd = resolve_portfolio_run_dir(run_ref, root)
+    return _read_jsonl(rd / "paper_regime_events.jsonl") if rd else []
+
+
+def load_latest_open_positions(
+    run_ref: str,
+    root: Path | str | None = None,
+) -> list[dict]:
+    rd = resolve_portfolio_run_dir(run_ref, root)
+    if rd is None:
+        return []
+    path = rd / "latest_open_positions.json"
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
 
 
 def load_reconciliation(run_ref: str, root: Path | str | None = None) -> dict | None:

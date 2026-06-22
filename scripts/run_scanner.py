@@ -130,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     from src.providers.quotes.tastytrade_provider import TastytradeConfigurationError
     from src.providers.quotes.types import QuoteRequest
     from src.providers.structure.factory import build_structure_provider
+    from src.regime.snapshot import build_regime_snapshot
     from src.reporting.decision_log import log_decision, log_decision_to_file
     from src.risk.filters import apply_filters
     from src.risk.limits import load_profile
@@ -558,6 +559,13 @@ def main(argv: list[str] | None = None) -> int:
     latest = latest_dir(output_root)
     ranked_rows: list[dict] = []
     ts = now_et()
+    regime_snapshot = build_regime_snapshot(
+        structure,
+        timestamp=ts,
+        spot=chain.spot,
+        quote_quality_status="usable" if chain.quotes else "unusable",
+    )
+    regime_fields = regime_snapshot.to_flat_dict()
 
     # ── per-strategy: generate → filter → score → select → build rows ──
     # Phase 5: the daily selector runs ONCE per tick over the UNION of all
@@ -596,6 +604,7 @@ def main(argv: list[str] | None = None) -> int:
                 strict_target_dte=strict_target_dte,
                 strict_target_dte_passed=strict_target_dte_passed,
             )
+            row.update(regime_fields)
             ranked_rows.append(row)
             row_candidates.append(c)
 
@@ -612,6 +621,7 @@ def main(argv: list[str] | None = None) -> int:
             "call_floor_2k":      structure.exposures.call_floor_2k,
             "call_floor_5k":      structure.exposures.call_floor_5k,
             "gamma_regime":       structure.exposures.gamma_regime,
+            "regime_snapshot":    regime_snapshot.to_dict(),
             "structure_missing_fields": list(structure_missing),
             "structure_subscription_active": (structure.raw or {}).get("subscription_active"),
             # Phase 2.6 — quote alignment audit fields
@@ -821,6 +831,14 @@ _DEFAULT_RANKED_FIELDS = [
     # ── Phase 6 — run-profile provenance columns, APPENDED at the TAIL ──
     "profile_id", "profile_name", "profile_version", "profile_path",
     "profile_loaded", "profile_hash", "config_source_summary",
+    # Phase 11D — regime observability only; selector behavior is unchanged.
+    "regime_snapshot_json", "regime_label", "regime_confidence",
+    "regime_quality_label", "regime_reason_codes", "regime_summary",
+    "spot", "gamma_regime", "da_gex_signed", "gamma_flip",
+    "distance_to_gamma_flip", "primary_gamma", "secondary_gamma",
+    "corridor_valid", "call_wing_10k", "put_wing_10k", "active_wds",
+    "wds_tier", "dominant_wing_side", "maxvol", "maxvol_migration",
+    "total_gex_bn", "total_vex_bn",
 ]  # used only when no candidate rows exist — keep in sync with _candidate_row() + selector/profile stamping
 
 

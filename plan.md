@@ -866,3 +866,30 @@ adding order preview, broker execution, automatic promotion, or live trading.
 5. Add readable Strategy Engine / Risk Quality and Optuna Research UI sections.
 6. Cover the new models, gates, evaluator, objective, outputs, CLI, and safety
    boundaries with focused tests before full repository validation.
+
+---
+
+## Phase 11D — Regime snapshot + local paper execution journal
+
+Branch: `codex/phase-11d-regime-paper-journal`.
+
+Phase 11D extends the existing local-paper lifecycle with explainable regime
+context, chain-derived fake fills and marks, deterministic thesis-aware exits,
+and a reason-coded journal. It does not add broker preview, broker execution,
+live trading, profile promotion, lockbox automation, or ML/AI decisions.
+
+1. Audit and reuse `src/paper/`, the portfolio-forward runner, existing ledgers,
+   review scripts, and cockpit paper surfaces instead of creating a second
+   lifecycle.
+2. Add a pure, existing-data-only `RegimeSnapshot` and debounced
+   `RegimeChangeEvent` model with conservative labels and stable reason codes.
+3. Extend paper models for tickets, marks, and execution journal events across
+   credit spreads and long calls/puts.
+4. Price all local fills and marks from current chain mids, with deterministic
+   optional slippage and no future data or broker identifiers.
+5. Add strategy-aware TP, SL, EOD, quote-failure, and regime/thesis exit
+   evaluation that distinguishes HOLD, ALERT_ONLY, EXIT, and BLOCK_NEW_TRADES.
+6. Wire the extensions into the existing forward/paper output and UI paths,
+   preserving compatibility with current review scripts.
+7. Add a deterministic no-network smoke CLI plus focused lifecycle, journal,
+   UI, review-compatibility, and safety tests before full validation.

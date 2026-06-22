@@ -1,7 +1,7 @@
-"""Phase 9B — local paper-trade lifecycle data models.
+"""Local paper-trade lifecycle data models.
 
-LOCAL PAPER ACCOUNTING ONLY. These dataclasses describe a *simulated* credit
-spread and the lifecycle configuration that governs it. Nothing here places,
+LOCAL PAPER ACCOUNTING ONLY. These dataclasses describe simulated positions and
+the lifecycle configuration that governs them. Nothing here places,
 previews, submits, or routes an order — there is no brokerage anywhere in this
 module. Every portfolio ledger stamps ``no_execution=True`` and
 ``execution_mode="local_paper_lifecycle_only"``.
@@ -19,14 +19,14 @@ its math, never re-derive it):
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Literal
 
 # Audit markers so a grep can prove there is no execution surface here.
 NO_EXECUTION = True
 EXECUTION_MODE = "local_paper_lifecycle_only"
 
-Side = Literal["CALL_CREDIT", "PUT_CREDIT"]
+Side = Literal["CALL_CREDIT", "PUT_CREDIT", "LONG_CALL", "LONG_PUT"]
 TradeStatus = Literal["open", "closed", "duplicate_skipped", "error"]
 ExitReason = Literal[
     "take_profit",
@@ -34,6 +34,9 @@ ExitReason = Literal[
     "eod_exit",
     "manual_mark_closed",
     "quote_unavailable_no_exit",
+    "quote_invalid",
+    "quote_failure_limit",
+    "regime_thesis_invalidated",
     "error",
 ]
 EventType = Literal["open", "update", "close", "duplicate_skipped", "blocked_by_limits"]
@@ -41,7 +44,7 @@ EventType = Literal["open", "update", "close", "duplicate_skipped", "blocked_by_
 
 @dataclass
 class PaperTrade:
-    """One simulated credit spread and its running lifecycle state.
+    """One simulated position and its running lifecycle state.
 
     All fields default so the record can be built incrementally and serialized
     to CSV/JSONL via :meth:`to_row`. ``trade_identity`` is an internal dedup /
@@ -89,6 +92,31 @@ class PaperTrade:
     notes: str | None = None
     # internal (dedup / reconciliation) — persisted, not in the spec field list
     trade_identity: str | None = None
+    # Phase 11D extensions. Appended for backward-compatible CSV readers.
+    source_candidate_id: str | None = None
+    archetype: str = "CALL_CREDIT_SPREAD"
+    legs_json: str | None = None
+    entry_price_type: str = "credit"
+    entry_debit: float | None = None
+    risk_reward: float | None = None
+    risk_quality_label: str | None = None
+    entry_regime_json: str | None = None
+    current_regime_json: str | None = None
+    entry_reason_codes: str | None = None
+    latest_reason_codes: str | None = None
+    exit_reason_codes: str | None = None
+    thesis: str | None = None
+    target_mark: float | None = None
+    stop_mark: float | None = None
+    invalidation_level: float | None = None
+    current_quote_timestamp: str | None = None
+    missing_quote_marks: int = 0
+    credit_kept_pct: float | None = None
+    distance_to_short_strike: float | None = None
+    latest_decision: str = "HOLD"
+    latest_explanation: str | None = None
+    local_paper_only: bool = True
+    no_broker_order_sent: bool = True
 
     def to_row(self) -> dict[str, Any]:
         return asdict(self)
@@ -111,14 +139,17 @@ class PaperTrade:
 
 
 # field-name sets used for tolerant coercion when reading ledger rows back
-_INT_FIELDS = frozenset({"target_dte", "contracts", "ticks_held"})
+_INT_FIELDS = frozenset({"target_dte", "contracts", "ticks_held", "missing_quote_marks"})
 _FLOAT_FIELDS = frozenset({
     "short_strike", "long_strike", "spread_width", "entry_credit", "entry_bid",
     "entry_ask", "entry_mid", "current_mark", "current_bid", "current_ask",
     "unrealized_pnl", "realized_pnl", "max_profit", "max_loss",
     "planned_stop_risk_dollars", "theoretical_max_loss_dollars",
-    "exit_credit_or_debit", "mae", "mfe",
+    "exit_credit_or_debit", "mae", "mfe", "entry_debit", "risk_reward",
+    "target_mark", "stop_mark", "invalidation_level", "credit_kept_pct",
+    "distance_to_short_strike",
 })
+_BOOL_FIELDS = frozenset({"local_paper_only", "no_broker_order_sent"})
 
 
 def _coerce(key: str, value: Any) -> Any:
@@ -136,7 +167,105 @@ def _coerce(key: str, value: Any) -> Any:
             return float(value)
         except (TypeError, ValueError):
             return None
+    if key in _BOOL_FIELDS:
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
     return value
+
+
+@dataclass(frozen=True)
+class PaperTradeTicket:
+    """Immutable local-only entry ticket built from an accepted candidate."""
+
+    ticket_id: str
+    source_candidate_id: str
+    profile_id: str
+    profile_hash: str
+    symbol: str
+    archetype: str
+    contracts: int
+    dte: int
+    expiry: str
+    legs: tuple[dict[str, Any], ...]
+    entry_credit: float | None
+    entry_debit: float | None
+    max_profit: float | None
+    max_loss: float | None
+    risk_reward: float | None
+    risk_quality_label: str
+    regime_snapshot_at_entry: dict[str, Any] | None
+    entry_reason_codes: tuple[str, ...]
+    plain_english_thesis: str
+    target_mark: float | None = None
+    stop_mark: float | None = None
+    invalidation_level: float | None = None
+    local_paper_only: bool = True
+    no_broker_order_sent: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        row = asdict(self)
+        row["legs"] = list(self.legs)
+        row["entry_reason_codes"] = list(self.entry_reason_codes)
+        return row
+
+
+@dataclass(frozen=True)
+class PaperMark:
+    timestamp: str
+    paper_trade_id: str
+    current_leg_quote_values: tuple[dict[str, Any], ...]
+    current_mark: float | None
+    unrealized_pnl: float | None
+    credit_kept_pct: float | None
+    distance_to_short_strike: float | None
+    current_regime_snapshot: dict[str, Any] | None
+    exit_checks: dict[str, bool]
+    decision: str
+    reason_codes: tuple[str, ...]
+    plain_english_reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        row = asdict(self)
+        row["current_leg_quote_values"] = list(self.current_leg_quote_values)
+        row["reason_codes"] = list(self.reason_codes)
+        return row
+
+    def to_csv_row(self) -> dict[str, Any]:
+        import json
+
+        row = self.to_dict()
+        row["current_leg_quote_values"] = json.dumps(
+            row["current_leg_quote_values"], sort_keys=True
+        )
+        row["current_regime_snapshot"] = json.dumps(
+            row["current_regime_snapshot"], sort_keys=True
+        )
+        row["exit_checks"] = json.dumps(row["exit_checks"], sort_keys=True)
+        row["reason_codes"] = "; ".join(self.reason_codes)
+        return row
+
+
+@dataclass(frozen=True)
+class ExecutionJournalEvent:
+    timestamp: str
+    action: str
+    paper_trade_id: str | None
+    profile_id: str | None
+    quote_values_used: dict[str, Any]
+    regime_snapshot_summary: str | None
+    risk_quality_summary: str | None
+    reason_codes: tuple[str, ...]
+    plain_english_explanation: str
+    pnl_impact: float | None
+    local_paper_only: bool = True
+    no_broker_order_sent: bool = True
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        row = asdict(self)
+        row["reason_codes"] = list(self.reason_codes)
+        return row
 
 
 # ── lifecycle configuration ──────────────────────────────────────────────────
@@ -193,6 +322,10 @@ class PaperLifecycleConfig:
     max_open_trades_total: int = 5
     max_open_trades_per_profile: int = 1
     position_reconciliation_mode: str = "local_only"
+    max_quote_age_seconds: float = 120.0
+    max_missing_quote_marks: int = 3
+    regime_exit_enabled: bool = True
+    slippage_points: float = 0.0
 
     @classmethod
     def from_env(cls) -> PaperLifecycleConfig:
@@ -210,6 +343,10 @@ class PaperLifecycleConfig:
             max_open_trades_per_profile=_env_int("PAPER_MAX_OPEN_TRADES_PER_PROFILE", 1),
             position_reconciliation_mode=_env_str(
                 "PAPER_POSITION_RECONCILIATION_MODE", "local_only"),
+            max_quote_age_seconds=_env_float("PAPER_MAX_QUOTE_AGE_SECONDS", 120.0),
+            max_missing_quote_marks=_env_int("PAPER_MAX_MISSING_QUOTE_MARKS", 3),
+            regime_exit_enabled=_env_bool("PAPER_REGIME_EXIT_ENABLED", True),
+            slippage_points=_env_float("PAPER_SLIPPAGE_POINTS", 0.0),
         )
 
     @classmethod

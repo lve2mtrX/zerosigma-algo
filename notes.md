@@ -3403,3 +3403,59 @@ Phase 11C implementation results:
 - Final validation: 914 tests passed, Ruff passed, 14/14 profiles validated, and
   `git diff --check` passed. No broker/order/live execution, `RegimeSnapshot`,
   paper exits, lockbox automation, or ML/AI decision path was added.
+
+---
+
+## 2026-06-22 — Phase 11D implementation plan: regime and paper journal
+
+Branch: `codex/phase-11d-regime-paper-journal`.
+
+1. Inspect the current paper models, lifecycle, ledgers, portfolio-forward
+   runner, review readers, and UI before adding or moving code.
+2. Build `RegimeSnapshot` only from fields the repository already supplies;
+   unavailable charm, vanna, VIX, DOM, news, and skew inputs remain explicitly
+   unavailable rather than synthesized.
+3. Add debounced regime events and extend existing paper objects with local-only
+   tickets, chain marks, thesis-aware decisions, and reason-coded journal events.
+4. Keep pricing deterministic from current quote mids. Never create broker order
+   IDs, previews, submissions, or any other representation of real execution.
+5. Reuse the current TP/SL/EOD and portfolio-forward machinery, adding quote and
+   regime invalidation behavior only where the existing ownership boundaries
+   support it.
+6. Preserve current ledger/review formats while adding journal, mark, regime,
+   open-position, and closed-trade outputs under existing paper/forward roots.
+7. Add a fixture-backed CLI smoke and tests for both credit spreads and long
+   premium, including output compatibility and the no-broker safety boundary.
+
+Phase 11D implementation results:
+
+- Reused the Phase 9B `PaperTrade`, lifecycle, ledger, portfolio-forward runner,
+  read-only review CLI, reconciliation, and Paper Portfolio UI. No parallel
+  paper engine or second output root was introduced.
+- Added pure `RegimeSnapshot` classification for Absorption, Acceleration,
+  Transition, Compression, No Edge, and Unknown. Rules use only current
+  ZeroSigma structure, quote quality, optional spot history, and an optional
+  prior snapshot. Charm, vanna, VIX, IV surface, DOM, news, and per-strike VEX
+  skew remain explicitly deferred.
+- Added debounced `RegimeChangeEvent` records with stable triggers, severity,
+  suggested action, affected-position status, reason codes, and readable alerts.
+- Extended paper records with candidate provenance, archetype, legs, debit or
+  credit entry, risk quality, entry/current regime, thesis, decisions, reason
+  codes, and explicit local-only/no-order-sent safety flags.
+- Added chain-mid ticket/fill and mark math for credit spreads and long calls/
+  puts. Optional slippage defaults to zero and remains deterministic.
+- Added deterministic TP, SL, EOD, invalid/stale quote, consecutive missing
+  quote, and archetype-specific regime/thesis decisions. Supportive acceleration
+  holds long premium; hostile directional acceleration can exit the opposing
+  archetype; weaker but non-decisive evidence remains Alert Only.
+- Extended the existing portfolio ledger with execution JSONL/Markdown, marks
+  CSV, regime-event JSONL, and latest-open-position JSON while preserving the
+  current open/closed/event/reconciliation readers.
+- The exact fixture smoke entered a 1-contract SPX call credit spread at 1.00,
+  marked 0.70 and held at +$30, then marked 0.40 and exited at take profit for
+  +$60. The local reconciliation report had no issues.
+- Paper Portfolio Simple Mode now shows readable position/regime/decision/
+  journal summaries. Advanced source paths expose thresholds, mark details, and
+  raw reason codes. Browser verification confirmed the Simple Mode journal and
+  regime surfaces with no browser errors; the Advanced toggle interaction timed
+  out in the browser connector and remains covered by static/UI tests.

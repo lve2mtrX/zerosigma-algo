@@ -71,6 +71,18 @@ PHASE_6_APPENDED = (
     "profile_loaded", "profile_hash", "config_source_summary",
 )
 
+# Phase 11D APPENDED at the tail for regime observability. These fields do not
+# participate in candidate scoring or selector math.
+PHASE_11D_APPENDED = (
+    "regime_snapshot_json", "regime_label", "regime_confidence",
+    "regime_quality_label", "regime_reason_codes", "regime_summary",
+    "spot", "gamma_regime", "da_gex_signed", "gamma_flip",
+    "distance_to_gamma_flip", "primary_gamma", "secondary_gamma",
+    "corridor_valid", "call_wing_10k", "put_wing_10k", "active_wds",
+    "wds_tier", "dominant_wing_side", "maxvol", "maxvol_migration",
+    "total_gex_bn", "total_vex_bn",
+)
+
 
 def test_default_ranked_fields_keeps_phase_le_4_tail_intact():
     """Every Phase ≤4 column appears in _DEFAULT_RANKED_FIELDS BEFORE the
@@ -234,7 +246,8 @@ def test_existing_phase_le_4_column_indices_preserved():
     # (Phase 4.2 tacked six more columns at the tail; allow BOTH tuples.)
     qrr = fields.index("quote_rejection_reason")
     allowed = (set(PHASE_4P1_APPENDED) | set(PHASE_4P2_APPENDED)
-               | set(PHASE_5_APPENDED) | set(PHASE_6_APPENDED))
+               | set(PHASE_5_APPENDED) | set(PHASE_6_APPENDED)
+               | set(PHASE_11D_APPENDED))
     for col in fields[qrr + 1:]:
         assert col in allowed, (
             f"unexpected column {col!r} appended after quote_rejection_reason"
@@ -253,4 +266,12 @@ def test_phase6_columns_appended_at_tail_after_phase5():
     first_phase6_idx = min(fields.index(c) for c in PHASE_6_APPENDED)
     assert last_phase5_idx < first_phase6_idx, (
         "Phase 6 columns must APPEND after every Phase 5 column"
+    )
+
+
+def test_phase11d_regime_columns_append_after_phase6():
+    fields = list(rs._DEFAULT_RANKED_FIELDS)
+    assert set(PHASE_11D_APPENDED) <= set(fields)
+    assert max(fields.index(column) for column in PHASE_6_APPENDED) < min(
+        fields.index(column) for column in PHASE_11D_APPENDED
     )
