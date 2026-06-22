@@ -2454,58 +2454,97 @@ def render_learning_review() -> None:
             str(row.get("bucket")),
         ),
     )[:8]
+    filters = latest.get("filter_impact_analysis") or []
+    best_filters = sorted(
+        filters,
+        key=lambda row: (
+            -_number(row, "expectancy_delta_dollars"),
+            -_number(row, "trades_kept", 0),
+            str(row.get("filter")),
+        ),
+    )
+    worst_filters = list(reversed(best_filters))
+    interactions = sorted(
+        latest.get("feature_interaction_matrix") or [],
+        key=lambda row: (
+            -abs(_number(row, "total_pnl_dollars", 0)),
+            -_number(row, "trade_count", 0),
+            str(row.get("feature")),
+        ),
+    )
     tabs = st.tabs([
-        "Best / Worst Buckets",
-        "No-Trade Blockers",
-        "Strategy Hypotheses",
-        "Recommended Grids",
-        "Assumption Audit",
+        "What is making money?",
+        "What is losing money?",
+        "Best filters by impact",
+        "Worst filters / false positives",
+        "Strongest feature interactions",
+        "Call-only expansion results",
+        "Dynamic repair results",
+        "Robustness scorecard",
+        "Recommended next test",
+        "Warnings",
     ])
     with tabs[0]:
-        columns = st.columns(2)
-        columns[0].markdown("**Best supported buckets**")
-        columns[0].dataframe(best, width="stretch", hide_index=True)
-        columns[1].markdown("**Worst supported buckets**")
-        columns[1].dataframe(worst, width="stretch", hide_index=True)
-        with st.expander("Feature performance summary", expanded=False):
-            st.dataframe(summary, width="stretch", hide_index=True)
+        st.dataframe(latest.get("win_driver_matrix") or best, width="stretch", hide_index=True)
     with tabs[1]:
-        blockers = latest["no_trade_blocker_summary"]
-        if blockers:
-            st.dataframe(blockers, width="stretch", hide_index=True)
-        else:
-            st.caption("No skipped/no-trade blockers were recorded.")
+        st.dataframe(latest.get("loss_driver_matrix") or worst, width="stretch", hide_index=True)
     with tabs[2]:
-        hypotheses = latest["hypotheses"]
-        if hypotheses:
-            display = [{
-                "Hypothesis": row.get("hypothesis_id"),
-                "Idea": row.get("idea"),
-                "Evidence": row.get("evidence"),
-                "Stage": row.get("research_stage"),
-                "Low Sample": row.get("low_sample_warning"),
-            } for row in hypotheses]
-            st.dataframe(display, width="stretch", hide_index=True)
-        else:
-            st.caption("No hypotheses were generated.")
+        st.dataframe(best_filters[:15], width="stretch", hide_index=True)
     with tabs[3]:
+        st.dataframe(worst_filters[:15], width="stretch", hide_index=True)
+    with tabs[4]:
+        st.dataframe(interactions[:30], width="stretch", hide_index=True)
+    with tabs[5]:
+        expansion = latest.get("call_only_expansion_results") or []
+        robustness = latest.get("call_only_robustness_results") or []
+        if expansion or robustness:
+            st.markdown("**Expansion grid**")
+            st.dataframe(expansion, width="stretch", hide_index=True)
+            st.markdown("**Stricter robustness grid**")
+            st.dataframe(robustness, width="stretch", hide_index=True)
+        else:
+            st.caption("Run the Phase 11B call-only optimization smokes to populate this review.")
+    with tabs[6]:
+        dynamic = latest.get("dynamic_repair_results") or []
+        if dynamic:
+            st.dataframe(dynamic, width="stretch", hide_index=True)
+        else:
+            st.caption("Run the Phase 11B dynamic-repair smoke to populate this review.")
+    with tabs[7]:
+        scorecard = latest.get("strategy_robustness_scorecard") or []
+        if scorecard:
+            st.dataframe(scorecard, width="stretch", hide_index=True)
+        else:
+            st.caption("No robustness scorecard is available.")
+    with tabs[8]:
         st.info(
-            "Recommended next grid: `learned_hypotheses`. It includes the named "
-            "call/dynamic benchmarks and bounded evidence-driven research variants."
+            "Recommended sequence: run the bounded call-only expansion, confirm the strongest "
+            "family in the stricter robustness grid, then treat dynamic repair as research only."
         )
         st.code(
             "python -m scripts.backtest_optimize --symbol SPX --dte 0 --all-data "
-            "--grid learned_hypotheses --starting-balance 10000 --contracts 1 "
-            "--max-combinations 48 --run-label learned_grid_smoke",
+            "--grid learned_call_only_expansion --starting-balance 10000 --contracts 1 "
+            "--max-combinations 96 --run-label call_only_expansion_spx",
             language="bash",
         )
-        st.dataframe(latest["learned_parameter_sets"], width="stretch", hide_index=True)
-    with tabs[4]:
-        if latest.get("audit"):
-            with st.expander("Current replay assumptions versus exploratory assumptions", expanded=False):
-                st.markdown(latest["audit"])
+        if latest.get("phase11b_smoke_summary"):
+            st.markdown(latest["phase11b_smoke_summary"])
+    with tabs[9]:
+        warning_rows = [
+            row for row in latest.get("strategy_robustness_scorecard") or []
+            if row.get("warnings")
+        ]
+        if warning_rows:
+            st.dataframe(warning_rows, width="stretch", hide_index=True)
         else:
-            st.caption("No assumption audit is available.")
+            st.caption(
+                "No generated warnings. Continue to review low sample, one-day concentration, "
+                "month concentration, side concentration, possible overfit, and filtered-too-hard risk."
+            )
+        with st.expander("No-trade blockers and replay assumptions", expanded=False):
+            st.dataframe(latest["no_trade_blocker_summary"], width="stretch", hide_index=True)
+            if latest.get("audit"):
+                st.markdown(latest["audit"])
 
 
 def render_optimization_lab() -> None:
@@ -2529,7 +2568,9 @@ def render_optimization_lab() -> None:
         "Grid selection",
         [
             "core_morning", "core_eod", "dynamic_selector_experiments",
-            "controls_baseline", "learned_hypotheses", "custom_selected_profiles",
+            "controls_baseline", "learned_hypotheses", "learned_call_only_expansion",
+            "learned_call_only_robustness", "learned_dynamic_repair",
+            "custom_selected_profiles",
         ],
         key="opt_grid",
     )

@@ -13,6 +13,7 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 from src.backtesting import mappers as M
@@ -49,6 +50,22 @@ _PERFORMANCE_DIMENSIONS = (
     ("sl_mode", "sl_mode"),
     ("gamma_regime", "gamma_regime"),
     ("gamma_relationship", "gamma_relationship"),
+    ("tp_sl_config", "tp_sl_config"),
+)
+
+_INTERACTIONS = (
+    ("side_x_distance", "side", "distance_bucket"),
+    ("side_x_credit", "side", "credit_bucket"),
+    ("side_x_wds", "side", "wds_tier"),
+    ("side_x_corridor", "side", "corridor_valid"),
+    ("threshold_x_distance", "threshold", "distance_bucket"),
+    ("threshold_x_credit", "threshold", "credit_bucket"),
+    ("entry_x_side", "entry_time_bucket", "side"),
+    ("entry_x_threshold", "entry_time_bucket", "threshold"),
+    ("tp_sl_x_distance", "tp_sl_config", "distance_bucket"),
+    ("tp_sl_x_credit", "tp_sl_config", "credit_bucket"),
+    ("corridor_x_wds", "corridor_valid", "wds_tier"),
+    ("profile_family_x_exit", "profile_family", "exit_reason"),
 )
 
 _BENCHMARK_PROFILES = (
@@ -80,8 +97,17 @@ class LearningResult:
     no_trade_blockers: list[dict[str, Any]]
     hypotheses: list[dict[str, Any]]
     learned_parameter_sets: list[dict[str, Any]]
+    profitability_attribution: list[dict[str, Any]]
+    feature_interactions: list[dict[str, Any]]
+    win_drivers: list[dict[str, Any]]
+    loss_drivers: list[dict[str, Any]]
+    filter_impacts: list[dict[str, Any]]
+    robustness_scorecard: list[dict[str, Any]]
     audit_markdown: str
     hypotheses_markdown: str
+    profitability_markdown: str
+    filter_impact_markdown: str
+    robustness_markdown: str
 
 
 def _f(value: Any) -> float | None:
@@ -215,6 +241,10 @@ def _feature_row(row: dict[str, Any], *, outcome_row: dict[str, Any] | None = No
             else "unavailable"
         ),
         "month": date[:7] if len(date) >= 7 else "Unavailable",
+        "tp_sl_config": (
+            f"{outcome_row.get('tp_mode') or 'Unknown TP'} / "
+            f"{outcome_row.get('sl_mode') or 'Unknown SL'}"
+        ),
     })
     for key, value in _selector_components(row.get("selector_score_components")).items():
         if isinstance(value, (str, int, float, bool)) or value is None:
@@ -285,6 +315,8 @@ def performance_summary(
     trade_groups = _group(trades, feature_key)
     candidate_groups = _group(candidates, feature_key)
     rows: list[dict[str, Any]] = []
+    total_trades = len(trades)
+    total_pnl = sum(_f(row.get("pnl_dollars")) or 0.0 for row in trades)
     for bucket in sorted(set(trade_groups) | set(candidate_groups)):
         bucket_trades = trade_groups.get(bucket, [])
         metric = reports.metrics(
@@ -292,6 +324,10 @@ def performance_summary(
             starting_balance=starting_balance,
             contracts=contracts,
         )
+        pnls = [_f(row.get("pnl_dollars")) for row in bucket_trades]
+        pnls = [value for value in pnls if value is not None]
+        wins = [value for value in pnls if value > 0]
+        losses = [value for value in pnls if value < 0]
         rows.append({
             "feature": dimension,
             "bucket": bucket,
@@ -300,9 +336,20 @@ def performance_summary(
             "win_rate": metric["win_rate"],
             "total_pnl_dollars": metric["total_pnl_dollars"],
             "expectancy_dollars": metric["expectancy_dollars"],
+            "median_pnl_dollars": round(median(pnls), 2) if pnls else None,
+            "average_win_dollars": round(sum(wins) / len(wins), 2) if wins else None,
+            "average_loss_dollars": round(sum(losses) / len(losses), 2) if losses else None,
             "profit_factor": metric["profit_factor"],
+            "max_loss_dollars": round(min(pnls), 2) if pnls else None,
             "max_drawdown_dollars": metric["max_drawdown_dollars"],
             "max_drawdown_pct": metric["max_drawdown_pct"],
+            "percent_of_total_trades": (
+                round(len(bucket_trades) / total_trades * 100.0, 4) if total_trades else 0.0
+            ),
+            "percent_of_total_pnl": (
+                round(float(metric["total_pnl_dollars"]) / total_pnl * 100.0, 4)
+                if total_pnl else None
+            ),
             "avg_credit_points": metric["avg_credit_points"],
             "avg_distance_to_short": metric["avg_distance_to_short"],
             "positive_expectancy": (
@@ -312,6 +359,218 @@ def performance_summary(
             "low_sample_warning": metric["total_trades"] < MIN_EVIDENCE_TRADES,
         })
     return rows
+
+
+def feature_interaction_matrix(
+    trades: list[dict[str, Any]],
+    *,
+    starting_balance: float,
+    contracts: int,
+) -> list[dict[str, Any]]:
+    """Bounded two-feature profitability attribution."""
+    rows: list[dict[str, Any]] = []
+    for name, left, right in _INTERACTIONS:
+        enriched = [
+            {**trade, "_interaction": f"{trade.get(left, 'Unavailable')} × {trade.get(right, 'Unavailable')}"}
+            for trade in trades
+        ]
+        rows.extend(performance_summary(
+            enriched,
+            enriched,
+            dimension=name,
+            feature_key="_interaction",
+            starting_balance=starting_balance,
+            contracts=contracts,
+        ))
+    return rows
+
+
+def driver_matrices(
+    attribution: list[dict[str, Any]],
+    interactions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    supported = [
+        row for row in [*attribution, *interactions]
+        if int(_f(row.get("trade_count")) or 0) >= MIN_EVIDENCE_TRADES
+    ]
+    wins = sorted(
+        [row for row in supported if (_f(row.get("total_pnl_dollars")) or 0) > 0],
+        key=lambda row: (
+            -(_f(row.get("total_pnl_dollars")) or 0),
+            -(_f(row.get("expectancy_dollars")) or 0),
+            str(row.get("feature")), str(row.get("bucket")),
+        ),
+    )
+    losses = sorted(
+        [row for row in supported if (_f(row.get("total_pnl_dollars")) or 0) < 0],
+        key=lambda row: (
+            _f(row.get("total_pnl_dollars")) or 0,
+            _f(row.get("expectancy_dollars")) or 0,
+            str(row.get("feature")), str(row.get("bucket")),
+        ),
+    )
+    return (
+        [{"driver_rank": index, "driver_type": "win", **row} for index, row in enumerate(wins[:30], 1)],
+        [{"driver_rank": index, "driver_type": "loss", **row} for index, row in enumerate(losses[:30], 1)],
+    )
+
+
+def filter_impact_analysis(
+    trades: list[dict[str, Any]],
+    *,
+    starting_balance: float,
+    contracts: int,
+) -> list[dict[str, Any]]:
+    """Counterfactual post-trade filter comparison; never changes replay history."""
+    specs = (
+        ("exclude_put_credit", lambda row: row.get("side") != "PUT_CREDIT"),
+        ("only_call_credit", lambda row: row.get("side") == "CALL_CREDIT"),
+        ("distance_at_least_25", lambda row: (_f(row.get("distance_to_short")) or -1) >= 25),
+        ("distance_at_least_20", lambda row: (_f(row.get("distance_to_short")) or -1) >= 20),
+        ("exclude_distance_10_24_99", lambda row: row.get("distance_bucket") != "10-24.99"),
+        ("credit_at_least_1_00", lambda row: (_f(row.get("credit")) or -1) >= 1.00),
+        ("credit_at_least_0_75", lambda row: (_f(row.get("credit")) or -1) >= 0.75),
+        ("wds_tier_1_2_where_available", lambda row: str(row.get("wds_tier")) in {"1", "2", "1.0", "2.0", "Unavailable"}),
+        ("require_corridor_valid", lambda row: row.get("corridor_valid") is True),
+        ("exclude_no_corridor", lambda row: row.get("corridor_valid") is not False),
+        ("only_morning", lambda row: row.get("entry_time_bucket") == "Morning"),
+        ("only_eod", lambda row: row.get("entry_time_bucket") == "EOD"),
+        ("tp75_only", lambda row: row.get("tp_mode") == "TP75"),
+        ("no_tp_only", lambda row: row.get("tp_mode") == "NO_TP"),
+        ("sl150_only", lambda row: row.get("sl_mode") == "SL150"),
+        ("sl200_only", lambda row: row.get("sl_mode") == "SL200"),
+        ("exclude_sl_exits", lambda row: row.get("exit_reason") != "SL"),
+    )
+    before = reports.metrics(trades, starting_balance=starting_balance, contracts=contracts)
+    output: list[dict[str, Any]] = []
+    for name, predicate in specs:
+        kept = [row for row in trades if predicate(row)]
+        removed = [row for row in trades if not predicate(row)]
+        after = reports.metrics(kept, starting_balance=starting_balance, contracts=contracts)
+        removed_metrics = reports.metrics(
+            removed, starting_balance=starting_balance, contracts=contracts
+        )
+        low_sample = len(kept) < 10
+        exp_delta = (_f(after.get("expectancy_dollars")) or 0) - (
+            _f(before.get("expectancy_dollars")) or 0
+        )
+        dd_delta = (_f(before.get("max_drawdown_pct")) or 0) - (
+            _f(after.get("max_drawdown_pct")) or 0
+        )
+        recommendation = (
+            "needs more data" if low_sample
+            else "keep" if exp_delta > 0 and dd_delta >= 0
+            else "reject" if exp_delta < 0 and dd_delta <= 0
+            else "needs more data"
+        )
+        output.append({
+            "filter": name,
+            "trades_kept": len(kept),
+            "trades_removed": len(removed),
+            "pnl_kept_dollars": after["total_pnl_dollars"],
+            "pnl_removed_dollars": removed_metrics["total_pnl_dollars"],
+            "expectancy_before_dollars": before["expectancy_dollars"],
+            "expectancy_after_dollars": after["expectancy_dollars"],
+            "expectancy_delta_dollars": round(exp_delta, 2),
+            "drawdown_before_pct": before["max_drawdown_pct"],
+            "drawdown_after_pct": after["max_drawdown_pct"],
+            "drawdown_improvement_pct_points": round(dd_delta, 4),
+            "win_rate_before": before["win_rate"],
+            "win_rate_after": after["win_rate"],
+            "profit_factor_before": before["profit_factor"],
+            "profit_factor_after": after["profit_factor"],
+            "sample_too_small": low_sample,
+            "recommendation": recommendation,
+            "research_only_warning": "Post-trade counterfactual; validate prospectively.",
+        })
+    return output
+
+
+def strategy_robustness_scorecard(
+    trades: list[dict[str, Any]],
+    *,
+    starting_balance: float,
+    contracts: int,
+) -> list[dict[str, Any]]:
+    """Profile-level research scorecard; split/slippage review remains required."""
+    rows: list[dict[str, Any]] = []
+    for profile_id, profile_trades in sorted(_group(trades, "profile_id").items()):
+        metric = reports.metrics(
+            profile_trades, starting_balance=starting_balance, contracts=contracts
+        )
+        by_month = _group(profile_trades, "month")
+        by_date = _group(profile_trades, "date")
+        by_side = _group(profile_trades, "side")
+        gross_abs = sum(abs(_f(row.get("pnl_dollars")) or 0) for row in profile_trades)
+        month_concentration = max(
+            (abs(sum(_f(row.get("pnl_dollars")) or 0 for row in values)) for values in by_month.values()),
+            default=0.0,
+        ) / gross_abs if gross_abs else 0.0
+        day_concentration = max(
+            (abs(sum(_f(row.get("pnl_dollars")) or 0 for row in values)) for values in by_date.values()),
+            default=0.0,
+        ) / gross_abs if gross_abs else 0.0
+        side_concentration = max((len(values) for values in by_side.values()), default=0) / len(
+            profile_trades
+        ) if profile_trades else 0.0
+        kind = _profile_family(profile_trades[0]) if profile_trades else "research"
+        warnings: list[str] = []
+        if len(profile_trades) < 20:
+            warnings.append("low_trade_count")
+        if month_concentration > 0.35:
+            warnings.append("month_concentration")
+        if day_concentration > 0.20:
+            warnings.append("one_day_concentration")
+        if side_concentration > 0.85 and kind == "dynamic":
+            warnings.append("side_concentration")
+        if (_f(metric.get("max_drawdown_pct")) or 0) > 15:
+            warnings.append("high_drawdown")
+        if kind == "control":
+            status = "Benchmark Only"
+        elif len(profile_trades) < 20:
+            status = "Needs More Data"
+        elif (_f(metric.get("expectancy_dollars")) or 0) <= 0:
+            status = "Reject"
+        elif warnings or (_f(metric.get("profit_factor")) or 0) < 1.1:
+            status = "Fragile / Overfit Risk"
+        else:
+            status = "Research Candidate"
+        rows.append({
+            "profile_id": profile_id,
+            "profile_family": kind,
+            "status": status,
+            "trade_count": len(profile_trades),
+            "expectancy_dollars": metric["expectancy_dollars"],
+            "profit_factor": metric["profit_factor"],
+            "win_rate": metric["win_rate"],
+            "total_pnl_dollars": metric["total_pnl_dollars"],
+            "max_drawdown_pct": metric["max_drawdown_pct"],
+            "side_concentration": round(side_concentration, 4),
+            "month_concentration": round(month_concentration, 4),
+            "one_day_pnl_concentration": round(day_concentration, 4),
+            "validation_expectancy": "requires optimization split review",
+            "holdout_expectancy": "requires optimization split review",
+            "split_consistency": "requires 60/20/20, 50/25/25, 70/15/15 review",
+            "slippage_robustness": "requires stress review",
+            "tp_sl_sensitivity": "requires bounded grid comparison",
+            "credit_distance_sensitivity": "requires bounded grid comparison",
+            "warnings": "; ".join(warnings),
+            "automatic_promotion": False,
+        })
+    return rows
+
+
+def _top_markdown(title: str, rows: list[dict[str, Any]], *, limit: int = 10) -> str:
+    lines = [f"# {title}", "", "Research attribution only; validate prospectively.", ""]
+    for row in rows[:limit]:
+        lines.append(
+            f"- **{row.get('feature') or row.get('filter')} · "
+            f"{row.get('bucket') or row.get('recommendation')}**: "
+            f"{row.get('trade_count', row.get('trades_kept', 0))} trades, "
+            f"${_f(row.get('expectancy_dollars', row.get('expectancy_after_dollars'))) or 0:,.2f} "
+            f"expectancy, ${_f(row.get('total_pnl_dollars', row.get('pnl_kept_dollars'))) or 0:,.2f} P&L."
+        )
+    return "\n".join(lines) + "\n"
 
 
 def build_performance_tables(
@@ -663,6 +922,17 @@ def run_learning(result: BacktestResult, config: LearningConfig | None = None) -
     )
     blockers = no_trade_blocker_summary(no_trades)
     hypotheses, learned_sets = generate_hypotheses(tables, blockers)
+    attribution = tables["feature_performance_summary"]
+    interactions = feature_interaction_matrix(
+        trades, starting_balance=config.starting_balance, contracts=config.contracts
+    )
+    win_drivers, loss_drivers = driver_matrices(attribution, interactions)
+    filter_impacts = filter_impact_analysis(
+        trades, starting_balance=config.starting_balance, contracts=config.contracts
+    )
+    robustness = strategy_robustness_scorecard(
+        trades, starting_balance=config.starting_balance, contracts=config.contracts
+    )
     run_config = {
         **asdict(config),
         "learning": True,
@@ -685,8 +955,37 @@ def run_learning(result: BacktestResult, config: LearningConfig | None = None) -
         no_trade_blockers=blockers,
         hypotheses=hypotheses,
         learned_parameter_sets=learned_sets,
+        profitability_attribution=attribution,
+        feature_interactions=interactions,
+        win_drivers=win_drivers,
+        loss_drivers=loss_drivers,
+        filter_impacts=filter_impacts,
+        robustness_scorecard=robustness,
         audit_markdown=build_assumption_audit(result),
         hypotheses_markdown=_hypotheses_markdown(hypotheses),
+        profitability_markdown=_top_markdown(
+            "Profitability Attribution Summary", win_drivers
+        ),
+        filter_impact_markdown=_top_markdown(
+            "Filter Impact Analysis",
+            sorted(
+                filter_impacts,
+                key=lambda row: -(_f(row.get("expectancy_delta_dollars")) or 0),
+            ),
+        ),
+        robustness_markdown=_top_markdown(
+            "Strategy Robustness Scorecard",
+            [
+                {
+                    "feature": row["profile_id"],
+                    "bucket": row["status"],
+                    "trade_count": row["trade_count"],
+                    "expectancy_dollars": row["expectancy_dollars"],
+                    "total_pnl_dollars": row["total_pnl_dollars"],
+                }
+                for row in robustness
+            ],
+        ),
     )
 
 
@@ -738,6 +1037,12 @@ def write_learning_reports(result: LearningResult, out_dirs: list[Path]) -> list
         "by_month": (result.performance_tables["month"], ()),
         "by_profile_family": (result.performance_tables["profile_family"], ()),
         "no_trade_blocker_summary": (result.no_trade_blockers, ()),
+        "profitability_attribution_summary": (result.profitability_attribution, ()),
+        "feature_interaction_matrix": (result.feature_interactions, ()),
+        "win_driver_matrix": (result.win_drivers, ()),
+        "loss_driver_matrix": (result.loss_drivers, ()),
+        "filter_impact_analysis": (result.filter_impacts, ()),
+        "strategy_robustness_scorecard": (result.robustness_scorecard, ()),
     }
     payload = {
         "hypotheses": result.hypotheses,
@@ -758,6 +1063,15 @@ def write_learning_reports(result: LearningResult, out_dirs: list[Path]) -> list
         )
         (directory / "generated_strategy_hypotheses.json").write_text(
             json.dumps(payload, indent=2, default=str), encoding="utf-8"
+        )
+        (directory / "profitability_attribution_summary.md").write_text(
+            result.profitability_markdown, encoding="utf-8"
+        )
+        (directory / "filter_impact_analysis.md").write_text(
+            result.filter_impact_markdown, encoding="utf-8"
+        )
+        (directory / "strategy_robustness_scorecard.md").write_text(
+            result.robustness_markdown, encoding="utf-8"
         )
         (directory / "run_config.json").write_text(
             json.dumps(result.run_config, indent=2, default=str), encoding="utf-8"

@@ -124,6 +124,60 @@ GRID_SPECS: dict[str, dict[str, Any]] = {
         "dimensions": {},
         "source": "outputs/research/latest/generated_strategy_hypotheses.json",
     },
+    "learned_call_only_expansion": {
+        "base_profile_ids": ["morning_5k_call_tp75_control"],
+        "max_variants": 96,
+        "dimensions": {
+            "entry_target": ["11:00"],
+            "threshold": ["5k", "2k"],
+            "side_policy": ["call_only"],
+            "selector": ["score_best_valid"],
+            "take_profit": [None, 0.50, 0.75],
+            "stop_loss": [1.50, 2.00],
+            "corridor_gate": ["off", "active_required"],
+            "wds_gate": ["off", "tier_1_2_preferred", "tier_1_2"],
+            "min_credit": [0.75, 1.00, 1.25],
+            "distance_rule": ["min_20", "min_25", "min_30"],
+            "put_gate": ["off"],
+        },
+    },
+    "learned_call_only_robustness": {
+        "base_profile_ids": ["morning_5k_call_tp75_control"],
+        "max_variants": 48,
+        "dimensions": {
+            "entry_target": ["11:00"],
+            "threshold": ["5k"],
+            "side_policy": ["call_only"],
+            "selector": ["score_best_valid"],
+            "take_profit": [None, 0.75],
+            "stop_loss": [1.50, 2.00],
+            "corridor_gate": ["off", "active_required"],
+            "wds_gate": ["tier_1_2_preferred", "tier_1_2"],
+            "min_credit": [1.00, 1.25],
+            "distance_rule": ["min_25", "min_30"],
+            "put_gate": ["off"],
+        },
+    },
+    "learned_dynamic_repair": {
+        "base_profile_ids": ["morning_5k_dynamic_tp75"],
+        "max_variants": 48,
+        "dimensions": {
+            "entry_target": ["11:00"],
+            "threshold": ["5k"],
+            "side_policy": ["dynamic_both"],
+            "selector": ["balanced_structure_premium_valid"],
+            "take_profit": [None, 0.75],
+            "stop_loss": [1.50, 2.00],
+            "corridor_gate": ["off"],
+            "wds_gate": ["off"],
+            "min_credit": [None, 1.00],
+            "distance_rule": ["none"],
+            "put_gate": [
+                "active_corridor", "wds_tier_1_2", "distance_25",
+                "credit_1_distance_25", "positive_gamma", "corridor_wds",
+            ],
+        },
+    },
 }
 
 DEFERRED_PARAMETERS = {
@@ -181,6 +235,7 @@ class OptimizationResult:
     rejected_candidates: list[dict[str, Any]]
     robustness_summary: list[dict[str, Any]]
     overfit_warnings: list[dict[str, Any]]
+    strategy_robustness_scorecard: list[dict[str, Any]]
     narrative: str
 
 
@@ -222,6 +277,57 @@ def _threshold_value(label: str) -> float:
     return {"1k": 1000.0, "2k": 2000.0, "5k": 5000.0, "10k": 10000.0}[label]
 
 
+def _research_profile_name(
+    base: StrategyProfile,
+    parameters: dict[str, Any],
+    grid_name: str,
+    phash: str,
+) -> str:
+    if parameters.get("research_benchmark"):
+        return f"Benchmark: {base.profile_name} [{phash[:8]}]"
+    family = {
+        "learned_call_only_expansion": "Call-Only Expansion",
+        "learned_call_only_robustness": "Call-Only Robustness",
+        "learned_dynamic_repair": "Dynamic Repair",
+    }.get(grid_name, f"Research {base.profile_name}")
+    credit = parameters.get("min_credit")
+    distance = str(parameters.get("distance_rule") or "base").replace("min_", "")
+    put_gate = str(parameters.get("put_gate") or "off").replace("_", " ")
+    detail = (
+        f"{parameters.get('threshold', 'base').upper()} · "
+        f"credit {credit if credit is not None else 'base'} · "
+        f"distance {distance}"
+    )
+    if grid_name == "learned_dynamic_repair":
+        detail = f"put gate {put_gate} · TP {parameters.get('take_profit')} · SL {parameters.get('stop_loss')}"
+    return f"{family}: {detail} [{phash[:8]}]"
+
+
+def _research_profile_explanation(grid_name: str, parameters: dict[str, Any]) -> str:
+    return (
+        f"Generated in-memory {grid_name.replace('_', ' ')} research profile. "
+        f"Parameters: {json.dumps(parameters, sort_keys=True, default=str)}. "
+        "Backtest-only; no execution or automatic promotion."
+    )
+
+
+def _benchmark_parameters() -> dict[str, Any]:
+    return {
+        "entry_target": "base",
+        "threshold": "base",
+        "side_policy": "base",
+        "selector": "base",
+        "take_profit": "base",
+        "stop_loss": "base",
+        "corridor_gate": "off",
+        "wds_gate": "off",
+        "min_credit": "base",
+        "distance_rule": "base",
+        "put_gate": "off",
+        "research_benchmark": True,
+    }
+
+
 def _generated_profile(
     base: StrategyProfile,
     parameters: dict[str, Any],
@@ -234,9 +340,9 @@ def _generated_profile(
     raw = base.to_dict()
     raw.update({
         "profile_id": f"opt_{base.profile_id[:28]}_{phash[:10]}",
-        "profile_name": f"Research {base.profile_name} [{phash[:8]}]",
+        "profile_name": _research_profile_name(base, parameters, grid_name, phash),
         "enabled": False,
-        "notes": "Generated in-memory Phase 10G research profile. No execution.",
+        "notes": _research_profile_explanation(grid_name, parameters),
         "research_only": True,
         "generated_profile_id": f"opt_{phash[:12]}",
         "base_profile_id": base.profile_id,
@@ -246,6 +352,7 @@ def _generated_profile(
         "research_grid_name": grid_name,
         "research_corridor_gate": parameters["corridor_gate"],
         "research_wds_gate": parameters["wds_gate"],
+        "research_put_gate": parameters.get("put_gate", "off"),
         "profile_path": None,
     })
     entry = parameters["entry_target"]
@@ -283,7 +390,12 @@ def _generated_profile(
         raw["min_selector_credit"] = min_credit
     distance = parameters["distance_rule"]
     if distance != "base":
-        raw["min_selector_distance_from_spot"] = 10.0 if distance == "avoid_too_close" else None
+        raw["min_selector_distance_from_spot"] = {
+            "avoid_too_close": 10.0,
+            "min_20": 20.0,
+            "min_25": 25.0,
+            "min_30": 30.0,
+        }.get(distance)
         raw["max_selector_distance_from_spot"] = 50.0 if distance == "avoid_too_far" else None
     profile = StrategyProfile.from_dict(raw)
     return GeneratedProfile(
@@ -353,7 +465,20 @@ def build_parameter_grid(
         for values in itertools.product(*(dimensions[key] for key in keys))
     ]
     pairs = [(base_id, combo) for base_id in bases for combo in combos]
-    selected = [pairs[index] for index in _spread_indices(len(pairs), max_combinations)]
+    maximum = max_combinations if max_combinations > 0 else int(spec.get("max_variants") or len(pairs))
+    phase11b_grid = grid_name in {
+        "learned_call_only_expansion",
+        "learned_call_only_robustness",
+        "learned_dynamic_repair",
+    }
+    benchmark_pairs: list[tuple[str, dict[str, Any]]] = []
+    if phase11b_grid and maximum > 1:
+        benchmark_pairs = [("morning_5k_call_tp75_control", _benchmark_parameters())]
+    remaining = max(0, maximum - len(benchmark_pairs))
+    selected = [
+        *benchmark_pairs,
+        *(pairs[index] for index in _spread_indices(len(pairs), remaining)),
+    ]
     generated: list[GeneratedProfile] = []
     for index, (base_id, parameters) in enumerate(selected, start=1):
         loaded = load_profile_file(base_id)
@@ -442,7 +567,20 @@ def _split_result_row(
         starting_balance=config.starting_balance,
         contracts=config.contracts,
     )
+    gross_abs = sum(abs(_f(row.get("pnl_dollars"))) for row in trades)
+    side_counts: dict[str, int] = {}
+    month_pnl: dict[str, float] = {}
+    day_pnl: dict[str, float] = {}
+    for row in trades:
+        side = str(row.get("side") or "Unavailable")
+        side_counts[side] = side_counts.get(side, 0) + 1
+        date = str(row.get("date") or "")
+        month = date[:7] if len(date) >= 7 else "Unavailable"
+        pnl = _f(row.get("pnl_dollars"))
+        month_pnl[month] = month_pnl.get(month, 0.0) + pnl
+        day_pnl[date] = day_pnl.get(date, 0.0) + pnl
     learned = generated.parameters.get("hypothesis_id") is not None
+    grid_name = str(generated.profile.research_grid_name or "")
     profile_kind = (
         (
             "control"
@@ -450,7 +588,8 @@ def _split_result_row(
             else "benchmark"
         )
         if generated.parameters.get("research_benchmark")
-        else "research" if learned
+        else "research"
+        if learned or grid_name.startswith("learned_")
         else generated.profile.preset_kind or "research"
     )
     return {
@@ -466,6 +605,17 @@ def _split_result_row(
         "split_start": dates[0],
         "split_end": dates[-1],
         "candidates": len(candidates),
+        "side_concentration": (
+            round(max(side_counts.values(), default=0) / len(trades), 4) if trades else 0.0
+        ),
+        "month_concentration": (
+            round(max((abs(value) for value in month_pnl.values()), default=0.0) / gross_abs, 4)
+            if gross_abs else 0.0
+        ),
+        "one_day_pnl_concentration": (
+            round(max((abs(value) for value in day_pnl.values()), default=0.0) / gross_abs, 4)
+            if gross_abs else 0.0
+        ),
         **metric,
     }
 
@@ -531,6 +681,11 @@ def robust_score(row: dict[str, Any]) -> float:
 
 def _promotion(row: dict[str, Any], warnings: list[dict[str, Any]]) -> tuple[str, str]:
     profile_kind = str(row.get("profile_kind") or "").lower()
+    phase11b_research = str(row.get("research_grid_name") or "") in {
+        "learned_call_only_expansion",
+        "learned_call_only_robustness",
+        "learned_dynamic_repair",
+    }
     if profile_kind == "control":
         return (
             "Benchmark Control",
@@ -556,6 +711,11 @@ def _promotion(row: dict[str, Any], warnings: list[dict[str, Any]]) -> tuple[str
         holdout_exp >= MATERIAL_HOLDOUT_EXPECTANCY_FLOOR
         and validation_dd <= MAX_PROMOTION_DRAWDOWN_PCT
     ):
+        if phase11b_research:
+            return (
+                "Research Candidate",
+                "Phase 11B candidate passed initial checks but cannot be promoted automatically.",
+            )
         return (
             "Forward Paper Candidate",
             "Positive validation, sane holdout, sufficient trades, and controlled drawdown.",
@@ -599,6 +759,149 @@ def _narrative(
         + f" No profile cleared forward-paper promotion rules. The best benchmark remains "
         f"{benchmark}; benchmark status is not production approval."
     )
+
+
+def _research_scorecard(
+    rankings: list[dict[str, Any]],
+    parameter_grid: list[dict[str, Any]],
+    sensitivity: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    params = {str(row.get("profile_id")): row for row in parameter_grid}
+    sensitivity = sensitivity or {}
+    output: list[dict[str, Any]] = []
+    for row in rankings:
+        profile_id = str(row.get("profile_id"))
+        kind = str(row.get("profile_kind") or "research").lower()
+        warnings: list[str] = []
+        if _f(row.get("validation_total_trades")) < MIN_VALIDATION_TRADES:
+            warnings.append("low_validation_trade_count")
+        if _f(row.get("holdout_total_trades")) < MIN_HOLDOUT_TRADES:
+            warnings.append("low_holdout_trade_count")
+        if _f(row.get("validation_expectancy_dollars")) > 0 > _f(row.get("holdout_expectancy_dollars")):
+            warnings.append("validation_positive_holdout_negative")
+        for prefix in ("validation", "holdout"):
+            if _f(row.get(f"{prefix}_month_concentration")) > 0.35:
+                warnings.append(f"{prefix}_month_concentration")
+            if _f(row.get(f"{prefix}_one_day_pnl_concentration")) > 0.20:
+                warnings.append(f"{prefix}_one_day_concentration")
+            if _f(row.get(f"{prefix}_side_concentration")) > 0.90 and kind == "research":
+                warnings.append(f"{prefix}_side_concentration")
+        extra = sensitivity.get(profile_id, {})
+        if int(_f(extra.get("positive_validation_holdout_splits")) or 0) < 2:
+            warnings.append("split_instability")
+        if (_f(extra.get("slippage_haircut_expectancy_dollars")) or 0) <= 0:
+            warnings.append("slippage_haircut_negative")
+        if kind in {"control", "benchmark"}:
+            status = "Benchmark Only"
+        elif _f(row.get("validation_expectancy_dollars")) <= 0 or _f(row.get("holdout_expectancy_dollars")) < -5:
+            status = "Reject"
+        elif (
+            _f(row.get("validation_total_trades")) < MIN_VALIDATION_TRADES
+            or _f(row.get("holdout_total_trades")) < MIN_HOLDOUT_TRADES
+        ):
+            status = "Needs More Data"
+        elif warnings or _f(row.get("validation_profit_factor")) < 1.1:
+            status = "Fragile / Overfit Risk"
+        else:
+            status = "Research Candidate"
+        output.append({
+            "rank": row.get("rank"),
+            "profile_id": profile_id,
+            "base_profile_id": row.get("base_profile_id"),
+            "parameter_hash": row.get("parameter_hash"),
+            "status": status,
+            "validation_expectancy_dollars": row.get("validation_expectancy_dollars"),
+            "holdout_expectancy_dollars": row.get("holdout_expectancy_dollars"),
+            "validation_trades": row.get("validation_total_trades"),
+            "holdout_trades": row.get("holdout_total_trades"),
+            "validation_profit_factor": row.get("validation_profit_factor"),
+            "holdout_profit_factor": row.get("holdout_profit_factor"),
+            "validation_max_drawdown_pct": row.get("validation_max_drawdown_pct"),
+            "holdout_max_drawdown_pct": row.get("holdout_max_drawdown_pct"),
+            "validation_win_rate": row.get("validation_win_rate"),
+            "holdout_win_rate": row.get("holdout_win_rate"),
+            "validation_side_concentration": row.get("validation_side_concentration"),
+            "validation_month_concentration": row.get("validation_month_concentration"),
+            "validation_one_day_pnl_concentration": row.get("validation_one_day_pnl_concentration"),
+            "holdout_side_concentration": row.get("holdout_side_concentration"),
+            "holdout_month_concentration": row.get("holdout_month_concentration"),
+            "holdout_one_day_pnl_concentration": row.get("holdout_one_day_pnl_concentration"),
+            "tp_sl_sensitivity_group": (
+                f"tp={params.get(profile_id, {}).get('take_profit')}|"
+                f"sl={params.get(profile_id, {}).get('stop_loss')}"
+            ),
+            "credit_distance_sensitivity_group": (
+                f"credit={params.get(profile_id, {}).get('min_credit')}|"
+                f"distance={params.get(profile_id, {}).get('distance_rule')}"
+            ),
+            **extra,
+            "warnings": "; ".join(dict.fromkeys(warnings)),
+            "automatic_forward_paper_promotion": False,
+        })
+    return output
+
+
+def _robustness_sensitivity(
+    result: BacktestResult,
+    generated: list[GeneratedProfile],
+    dates: list[str],
+    config: OptimizationConfig,
+) -> dict[str, dict[str, Any]]:
+    """Evaluate alternate chronological splits and a fixed fill haircut from one replay."""
+    output: dict[str, dict[str, Any]] = {}
+    for item in generated:
+        split_rows: dict[str, dict[str, Any]] = {}
+        positive = 0
+        for train_pct, validation_pct, holdout_pct in ((60, 20, 20), (50, 25, 25), (70, 15, 15)):
+            label = f"{train_pct}_{validation_pct}_{holdout_pct}"
+            split = chronological_split(
+                dates,
+                train_pct=train_pct,
+                validation_pct=validation_pct,
+                holdout_pct=holdout_pct,
+            )
+            validation = _split_result_row(
+                result, item, f"{label}_validation", split["validation"], config
+            )
+            holdout = _split_result_row(
+                result, item, f"{label}_holdout", split["holdout"], config
+            )
+            split_rows[f"{label}_validation_expectancy_dollars"] = validation[
+                "expectancy_dollars"
+            ]
+            split_rows[f"{label}_holdout_expectancy_dollars"] = holdout[
+                "expectancy_dollars"
+            ]
+            if (
+                (_f(validation.get("expectancy_dollars")) or 0) > 0
+                and (_f(holdout.get("expectancy_dollars")) or 0) >= 0
+            ):
+                positive += 1
+        trades = [
+            row for row in result.trades if row.get("profile_id") == item.profile.profile_id
+        ]
+        haircut = 10.0 * config.contracts
+        stressed = [
+            {**row, "pnl_dollars": round((_f(row.get("pnl_dollars")) or 0) - haircut, 2)}
+            for row in trades
+        ]
+        stressed_metrics = reports.metrics(
+            stressed,
+            starting_balance=config.starting_balance,
+            contracts=config.contracts,
+        )
+        output[item.profile.profile_id] = {
+            **split_rows,
+            "positive_validation_holdout_splits": positive,
+            "split_consistency": f"{positive}/3 alternate splits positive in validation and holdout",
+            "slippage_haircut_dollars_per_trade": haircut,
+            "slippage_haircut_expectancy_dollars": stressed_metrics["expectancy_dollars"],
+            "slippage_haircut_total_pnl_dollars": stressed_metrics["total_pnl_dollars"],
+            "slippage_haircut_robustness": (
+                "positive" if (_f(stressed_metrics["expectancy_dollars"]) or 0) > 0 else "negative"
+            ),
+        }
+    return output
 
 
 def run_optimization(config: OptimizationConfig, *, optimizer_run_id: str | None = None) -> OptimizationResult:
@@ -647,8 +950,10 @@ def run_optimization(config: OptimizationConfig, *, optimizer_run_id: str | None
         holdout = by_split["holdout"][index]
         row = {
             "profile_id": item.profile.profile_id,
+            "profile_name": item.profile.profile_name,
             "generated_profile_id": item.profile.generated_profile_id,
             "base_profile_id": item.profile.base_profile_id,
+            "research_grid_name": item.profile.research_grid_name,
             "parameter_set_id": item.profile.parameter_set_id,
             "parameter_hash": item.parameter_hash,
             "profile_kind": by_split["train"][index]["profile_kind"],
@@ -692,6 +997,9 @@ def run_optimization(config: OptimizationConfig, *, optimizer_run_id: str | None
             "parameter_hash": item.parameter_hash,
             "optimizer_run_id": run_id,
             "research_only": True,
+            "profile_name": item.profile.profile_name,
+            "explanation": item.profile.notes,
+            "research_grid_name": item.profile.research_grid_name,
             "synopsis": item.synopsis,
             **item.parameters,
         }
@@ -730,6 +1038,8 @@ def run_optimization(config: OptimizationConfig, *, optimizer_run_id: str | None
         "holdout_used_for_ranking": False,
     }
     narrative = _narrative(config, rankings, split)
+    sensitivity = _robustness_sensitivity(result, generated, dates, config)
+    scorecard = _research_scorecard(rankings, parameter_grid, sensitivity)
     return OptimizationResult(
         run_config=run_config,
         parameter_grid=parameter_grid,
@@ -746,6 +1056,7 @@ def run_optimization(config: OptimizationConfig, *, optimizer_run_id: str | None
         ],
         robustness_summary=rankings,
         overfit_warnings=all_warnings,
+        strategy_robustness_scorecard=scorecard,
         narrative=narrative,
     )
 
@@ -799,6 +1110,7 @@ def write_optimization_reports(result: OptimizationResult, out_dirs: list[Path])
         "rejected_candidates": result.rejected_candidates,
         "robustness_summary": result.robustness_summary,
         "overfit_warnings": result.overfit_warnings,
+        "strategy_robustness_scorecard": result.strategy_robustness_scorecard,
     }
     for directory in out_dirs:
         directory.mkdir(parents=True, exist_ok=True)
@@ -816,5 +1128,16 @@ def write_optimization_reports(result: OptimizationResult, out_dirs: list[Path])
         (directory / "narrative_summary.md").write_text(
             "# Optimization Research Summary\n\n" + result.narrative + "\n",
             encoding="utf-8",
+        )
+        lines = ["# Strategy Robustness Scorecard", "", "Research-only; no automatic promotion.", ""]
+        for row in result.strategy_robustness_scorecard[:20]:
+            lines.append(
+                f"- **{row['profile_id']}**: {row['status']} · validation "
+                f"${_f(row.get('validation_expectancy_dollars')):,.2f} expectancy · holdout "
+                f"${_f(row.get('holdout_expectancy_dollars')):,.2f} expectancy · "
+                f"{row.get('warnings') or 'no generated warning'}"
+            )
+        (directory / "strategy_robustness_scorecard.md").write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
         )
     return out_dirs

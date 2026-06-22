@@ -128,6 +128,7 @@ class StrategyProfile:
     research_grid_name: str | None = None
     research_corridor_gate: str | None = None  # "off" | "active_required"
     research_wds_gate: str | None = None       # "off" | "tier_1_2"
+    research_put_gate: str | None = None       # replay-only dynamic put eligibility gate
 
     # ── runtime provenance (NOT persisted in the YAML body) ──
     profile_path: str | None = field(default=None)
@@ -208,7 +209,7 @@ _OPT_STR_FIELDS = (
     "stop_loss_mode", "take_profit_mode", "dynamic_exit_policy",
     "generated_profile_id", "base_profile_id", "parameter_set_id",
     "optimizer_run_id", "parameter_hash", "research_grid_name",
-    "research_corridor_gate", "research_wds_gate",
+    "research_corridor_gate", "research_wds_gate", "research_put_gate",
 )
 
 
@@ -396,6 +397,7 @@ def template_profile_dict(profile_id: str) -> dict[str, Any]:
         "research_grid_name": None,
         "research_corridor_gate": None,
         "research_wds_gate": None,
+        "research_put_gate": None,
     }
 
 

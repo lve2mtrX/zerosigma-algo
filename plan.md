@@ -823,3 +823,25 @@ behavior, selector math, risk math, quote validation, or execution boundaries.
    exposing raw JSON in Simple Mode.
 7. Compare the learned grid with the current named controls and dynamic
    profiles. Treat all results as research evidence, not production approval.
+
+---
+
+## Phase 11B — Profitability attribution + learned strategy tightening
+
+Branch: `codex/phase-11b-profitability-attribution`.
+
+Phase 11B deepens the research-only learning layer so profitability and failure
+drivers are understandable before any strategy can move beyond research.
+
+1. Attribute P&L to single features and bounded feature interactions, including
+   median outcomes, contribution shares, drawdown, and sample warnings.
+2. Add deterministic counterfactual filter-impact analysis without changing
+   replay history or live behavior.
+3. Add bounded call-only expansion, call-only robustness, and dynamic-repair
+   optimization grids.
+4. Add a research robustness scorecard covering split results, drawdown,
+   concentration, sensitivity, and overfit warnings. No automatic promotion.
+5. Expand the Backtests Learning Review into readable money/loss/filter/
+   interaction/grid/robustness sections.
+6. Run the learning pass and all three new grid smokes, then write a deterministic
+   Phase 11B smoke summary under ignored research outputs.

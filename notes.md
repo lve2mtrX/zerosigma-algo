@@ -3291,3 +3291,59 @@ Phase 11A implementation results:
 - Added a Backtests Learning Review with supported/worst buckets, no-trade
   blockers, hypotheses, recommended grids, and the assumption audit. Browser
   validation confirmed the rendered section and no console errors.
+
+---
+
+## 2026-06-08 — Phase 11B implementation plan: profitability attribution
+
+Branch: `codex/phase-11b-profitability-attribution`.
+
+1. Extend Phase 11A feature evidence with P&L contribution, medians, win/loss
+   drivers, and bounded feature-interaction attribution.
+2. Add deterministic what-if filter analysis as a research comparison only; do
+   not rewrite replay outcomes or loosen live gates.
+3. Expand the strongest Morning 5K call-only family with bounded credit,
+   distance, TP/SL, corridor, and WDS combinations.
+4. Add a stricter call-only robustness grid and a dynamic-repair grid that only
+   applies research-only put-side gates.
+5. Build a research robustness scorecard with concentration and sensitivity
+   warnings; statuses remain Research Candidate / Needs More Data / Fragile /
+   Reject / Benchmark Only.
+6. Upgrade Learning Review and run all required smokes. No automatic profile
+   promotion, no broker/order paths, and no live behavior changes.
+
+Phase 11B implementation results:
+
+- The refreshed 2026-06-21 all-data learning pass analyzed 163 selected trades,
+  1,074 candidates, and 461 no-trade rows. Put Credit remained the main drag at
+  -$1,097.50 across 104 trades; Call Credit was +$240.00 across 59 trades.
+- The strongest supported positive interactions included Call Credit with an
+  active corridor (+$947.50), Call Credit with $1.00-$1.49 credit (+$985.00),
+  and the 25-49.99 distance bucket (+$702.50). The largest loss interaction was
+  Put Credit at 10-24.99 distance (-$2,060.00).
+- Counterfactual filter analysis identified distance >=25 / excluding the
+  10-24.99 distance bucket as the strongest actionable structural filter; the
+  kept set produced +$1,067.50 and $15.93 expectancy. The apparent benefit from
+  excluding SL exits is explicitly labeled post-trade and cannot be used as a
+  prospective entry rule.
+- The 96-variant call-only expansion produced no robust candidate. Its highest
+  validation-ranked variant had only 2 validation and 2 holdout trades, negative
+  holdout expectancy, and failed all three alternate split checks.
+- The 48-variant call-only robustness grid was filtered too hard; the unchanged
+  Morning 5K Call TP75 control remained the benchmark at +$530.00 combined P&L,
+  positive under 2/3 split schemes and the fixed fill haircut.
+- Dynamic repair produced one robustness-scorecard Research Candidate:
+  require Put Credit distance >=25 with no TP / SL150. It had 19 validation and
+  15 holdout trades, $20.66 validation expectancy, $13.00 holdout expectancy,
+  +$1,135.00 combined P&L, positive results in 3/3 alternate splits, and $8.61
+  expectancy after the fixed fill haircut. This is research evidence only, not
+  promotion.
+- The highest validation-ranked active-corridor dynamic repair had $67.21
+  validation expectancy but -$51.07 holdout expectancy and was rejected by the
+  robustness scorecard for split instability.
+- The Learning Review now exposes readable money/loss/filter/interaction/grid/
+  robustness tabs. Browser validation confirmed all ten Phase 11B sections
+  render from `outputs/research/latest`.
+- Validation after implementation: 904 tests passed, Ruff passed, 14/14 profiles
+  valid, and `git diff --check` passed. Required four all-data smokes completed
+  and `outputs/research/latest/phase11b_smoke_summary.md` was written.

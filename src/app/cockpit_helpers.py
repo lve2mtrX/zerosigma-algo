@@ -1654,8 +1654,21 @@ def read_backtest_learning(results_dir: Any) -> dict[str, Any]:
         "by_corridor": [],
         "hypotheses": [],
         "learned_parameter_sets": [],
+        "profitability_attribution_summary": [],
+        "feature_interaction_matrix": [],
+        "win_driver_matrix": [],
+        "loss_driver_matrix": [],
+        "filter_impact_analysis": [],
+        "strategy_robustness_scorecard": [],
+        "call_only_expansion_results": [],
+        "call_only_robustness_results": [],
+        "dynamic_repair_results": [],
         "audit": "",
         "hypotheses_markdown": "",
+        "profitability_markdown": "",
+        "filter_impact_markdown": "",
+        "robustness_markdown": "",
+        "phase11b_smoke_summary": "",
     }
     try:
         directory = Path(results_dir)
@@ -1669,6 +1682,10 @@ def read_backtest_learning(results_dir: Any) -> dict[str, Any]:
     for key in (
         "feature_performance_summary", "no_trade_blocker_summary", "by_side",
         "by_threshold", "by_entry_window", "by_wds_tier", "by_corridor",
+        "profitability_attribution_summary", "feature_interaction_matrix",
+        "win_driver_matrix", "loss_driver_matrix", "filter_impact_analysis",
+        "strategy_robustness_scorecard", "call_only_expansion_results",
+        "call_only_robustness_results", "dynamic_repair_results",
     ):
         out[key] = _read_csv_rows(directory / f"{key}.csv")
     config_path = directory / "run_config.json"
@@ -1688,6 +1705,26 @@ def read_backtest_learning(results_dir: Any) -> dict[str, Any]:
             "hypotheses_markdown",
             "generated_strategy_hypotheses.md",
             "# Generated Strategy Hypotheses",
+        ),
+        (
+            "profitability_markdown",
+            "profitability_attribution_summary.md",
+            "# Profitability Attribution Summary",
+        ),
+        (
+            "filter_impact_markdown",
+            "filter_impact_analysis.md",
+            "# Filter Impact Analysis",
+        ),
+        (
+            "robustness_markdown",
+            "strategy_robustness_scorecard.md",
+            "# Strategy Robustness Scorecard",
+        ),
+        (
+            "phase11b_smoke_summary",
+            "phase11b_smoke_summary.md",
+            "# Phase 11B Smoke Summary",
         ),
     ):
         path = directory / filename

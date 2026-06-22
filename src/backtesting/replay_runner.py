@@ -336,7 +336,22 @@ def _evaluate(
         )
         readinesses.append(rd)
         selector_row = _selector_row(c, rd)
-        if research_gate_reasons:
+        candidate_research_gate_reasons = list(research_gate_reasons)
+        put_gate = str(getattr(profile, "research_put_gate", None) or "off")
+        if bool(getattr(profile, "research_only", False)) and c.side == "PUT_CREDIT":
+            distance = abs(float(c.distance_from_spot or 0.0))
+            credit = float(c.credit or 0.0)
+            if put_gate in {"active_corridor", "corridor_wds"} and wd.get("corridor_valid") is not True:
+                candidate_research_gate_reasons.append("research_put_active_corridor_required")
+            if put_gate in {"wds_tier_1_2", "corridor_wds"} and wd.get("dominant_wing_tier") not in (1, 2):
+                candidate_research_gate_reasons.append("research_put_wds_tier_1_2_required")
+            if put_gate in {"distance_25", "credit_1_distance_25"} and distance < 25.0:
+                candidate_research_gate_reasons.append("research_put_distance_25_required")
+            if put_gate == "credit_1_distance_25" and credit < 1.0:
+                candidate_research_gate_reasons.append("research_put_credit_1_required")
+            if put_gate == "positive_gamma" and str(structure.exposures.gamma_regime).lower() != "positive":
+                candidate_research_gate_reasons.append("research_put_positive_gamma_required")
+        if candidate_research_gate_reasons:
             selector_row["selector_eligible_base"] = False
             selector_row["candidate_passes_trade_filters"] = False
         rows_for_selector.append(selector_row)
@@ -375,6 +390,7 @@ def _evaluate(
         "research_grid_name": getattr(profile, "research_grid_name", None),
         "research_corridor_gate": getattr(profile, "research_corridor_gate", None),
         "research_wds_gate": getattr(profile, "research_wds_gate", None),
+        "research_put_gate": getattr(profile, "research_put_gate", None),
         "research_gate_passed": not research_gate_reasons,
         "research_gate_reason": "; ".join(research_gate_reasons),
     }
