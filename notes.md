@@ -3347,3 +3347,59 @@ Phase 11B implementation results:
 - Validation after implementation: 904 tests passed, Ruff passed, 14/14 profiles
   valid, and `git diff --check` passed. Required four all-data smokes completed
   and `outputs/research/latest/phase11b_smoke_summary.md` was written.
+
+---
+
+## 2026-06-21 — Phase 11C implementation plan: strategy engine and Optuna
+
+Branch: `codex/phase-11c-strategy-engine-risk-optuna`.
+
+1. Create a standalone `src/strategy_engine/` domain layer whose candidate and
+   leg models support credit spreads and long premium without depending on the
+   existing vertical-wing strategy implementation.
+2. Keep risk quality deterministic and explainable: compute payoff, credit/debit
+   exposure, stop risk, quote quality, EOD-exception eligibility, and regime
+   compatibility with stable reason codes.
+3. Treat regime compatibility as a lightweight bridge over fields already
+   available in replay. Do not implement a full RegimeSnapshot in this phase.
+4. Enrich research feature outputs downstream; do not mutate saved profiles,
+   existing selector behavior, quote validation, or live/paper lifecycle logic.
+5. Add Optuna under the research optional dependency. The CLI must fail clearly
+   when unavailable and must never write profiles or contact broker/live APIs.
+6. Reuse deterministic chronological replay for trial evaluation and penalize
+   low samples, drawdown, concentration, weak risk/reward, and poor credit as a
+   percentage of spread width.
+7. Add readable UI review surfaces and focused safety tests. No execution,
+   order preview, lockbox, ML decisions, or automatic promotion.
+
+Phase 11C implementation results:
+
+- Added an archetype-neutral strategy engine with leg/candidate models for call
+  and put credit spreads plus research-ready long calls and puts. Debit-spread
+  archetypes are named placeholders only.
+- Added deterministic payoff and risk-quality evaluation. A $0.15 credit on a
+  $5-wide spread is rejected under the standard gate; a $1.50 credit with a
+  controlled stop can pass as Good. The narrow EOD exception requires 15 or
+  fewer minutes, at least 25 points of distance, usable quotes, and a
+  non-hostile regime.
+- Added a lightweight compatibility adapter over existing replay fields. It
+  reports compatible, incompatible, or unknown and is explicitly not a full
+  `RegimeSnapshot`.
+- Enriched learning outputs with archetype, credit-percent-of-width,
+  credit-to-stop, risk-quality, EOD-exception, and regime-compatibility views.
+  This is downstream research attribution and does not change replay selection.
+- Added an optional Optuna research CLI and deterministic adaptive-batch search
+  over SPX 0DTE research variants. Its objective penalizes low samples,
+  drawdown, concentration, split instability, fill sensitivity, and weak risk
+  quality; it does not rank on raw total P&L alone.
+- The 100-trial smoke completed in 666.7 seconds. One trial had positive
+  validation and holdout expectancy, but none cleared the 10/5 trade-count
+  floor. The nominal best trial was Call Only / 2K / $0.50 minimum credit /
+  40-point minimum distance / TP75 / SL100 / corridor required, with only one
+  validation and one holdout trade, so its status is Needs More Data.
+- Added Strategy Engine / Risk Quality and Optuna Research review sections to
+  Backtests. They expose readable tables and warnings without raw profile writes
+  or automatic promotion.
+- Final validation: 914 tests passed, Ruff passed, 14/14 profiles validated, and
+  `git diff --check` passed. No broker/order/live execution, `RegimeSnapshot`,
+  paper exits, lockbox automation, or ML/AI decision path was added.

@@ -392,9 +392,12 @@ def _generated_profile(
     if distance != "base":
         raw["min_selector_distance_from_spot"] = {
             "avoid_too_close": 10.0,
+            "min_15": 15.0,
             "min_20": 20.0,
             "min_25": 25.0,
             "min_30": 30.0,
+            "min_35": 35.0,
+            "min_40": 40.0,
         }.get(distance)
         raw["max_selector_distance_from_spot"] = 50.0 if distance == "avoid_too_far" else None
     profile = StrategyProfile.from_dict(raw)

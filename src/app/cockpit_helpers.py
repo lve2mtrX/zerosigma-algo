@@ -1663,6 +1663,13 @@ def read_backtest_learning(results_dir: Any) -> dict[str, Any]:
         "call_only_expansion_results": [],
         "call_only_robustness_results": [],
         "dynamic_repair_results": [],
+        "by_archetype": [],
+        "by_risk_quality": [],
+        "by_credit_pct_of_width": [],
+        "by_credit_to_stop_risk": [],
+        "by_eod_exception": [],
+        "by_regime_compatibility": [],
+        "risk_quality_rejection_summary": [],
         "audit": "",
         "hypotheses_markdown": "",
         "profitability_markdown": "",
@@ -1686,6 +1693,9 @@ def read_backtest_learning(results_dir: Any) -> dict[str, Any]:
         "win_driver_matrix", "loss_driver_matrix", "filter_impact_analysis",
         "strategy_robustness_scorecard", "call_only_expansion_results",
         "call_only_robustness_results", "dynamic_repair_results",
+        "by_archetype", "by_risk_quality", "by_credit_pct_of_width",
+        "by_credit_to_stop_risk", "by_eod_exception",
+        "by_regime_compatibility", "risk_quality_rejection_summary",
     ):
         out[key] = _read_csv_rows(directory / f"{key}.csv")
     config_path = directory / "run_config.json"
@@ -1726,6 +1736,42 @@ def read_backtest_learning(results_dir: Any) -> dict[str, Any]:
             "phase11b_smoke_summary.md",
             "# Phase 11B Smoke Summary",
         ),
+    ):
+        path = directory / filename
+        if path.is_file():
+            try:
+                out[key] = path.read_text(encoding="utf-8").replace(heading, "").strip()
+            except OSError:
+                out[key] = ""
+    out["available"] = True
+    return out
+
+
+def read_optuna_research(results_dir: Any) -> dict[str, Any]:
+    """Read research-only Optuna outputs without exposing raw config JSON."""
+    out: dict[str, Any] = {
+        "available": False,
+        "reason": "",
+        "results_dir": str(results_dir),
+        "trials": [],
+        "param_importance": [],
+        "best_trials": "",
+        "robustness_summary": "",
+    }
+    try:
+        directory = Path(results_dir)
+    except (TypeError, ValueError):
+        out["reason"] = "No Optuna research directory configured."
+        return out
+    trials_path = directory / "optuna_trials.csv"
+    if not trials_path.is_file():
+        out["reason"] = "No Optuna research run yet."
+        return out
+    out["trials"] = _read_csv_rows(trials_path)
+    out["param_importance"] = _read_csv_rows(directory / "optuna_param_importance.csv")
+    for key, filename, heading in (
+        ("best_trials", "optuna_best_trials.md", "# Optuna Best Trials"),
+        ("robustness_summary", "optuna_robustness_summary.md", "# Optuna Robustness Summary"),
     ):
         path = directory / filename
         if path.is_file():

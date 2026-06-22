@@ -32,6 +32,9 @@ dev = [
     "ruff>=0.3",
     "mypy>=1.8",
 ]
+research = [
+    "optuna>=4.0",
+]
 
 [project.scripts]
 zs-scanner = "scripts.run_scanner:main"

@@ -845,3 +845,24 @@ drivers are understandable before any strategy can move beyond research.
    interaction/grid/robustness sections.
 6. Run the learning pass and all three new grid smokes, then write a deterministic
    Phase 11B smoke summary under ignored research outputs.
+
+---
+
+## Phase 11C — Strategy engine core + risk quality + Optuna research
+
+Branch: `codex/phase-11c-strategy-engine-risk-optuna`.
+
+Phase 11C adds research infrastructure for multiple strategy archetypes without
+adding order preview, broker execution, automatic promotion, or live trading.
+
+1. Add archetype-neutral strategy legs and candidates for credit spreads, long
+   calls/puts, and future debit-spread placeholders.
+2. Add deterministic payoff, quote-quality, risk-quality, and regime-
+   compatibility evaluation with explicit reason codes and explanations.
+3. Integrate available risk-quality fields into downstream backtest learning
+   tables without changing existing strategy/profile behavior.
+4. Add an optional Optuna research optimizer that reuses historical replay,
+   ranks robustness rather than raw P&L, and writes only ignored research output.
+5. Add readable Strategy Engine / Risk Quality and Optuna Research UI sections.
+6. Cover the new models, gates, evaluator, objective, outputs, CLI, and safety
+   boundaries with focused tests before full repository validation.

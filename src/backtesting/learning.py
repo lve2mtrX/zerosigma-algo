@@ -19,6 +19,7 @@ from typing import Any
 from src.backtesting import mappers as M
 from src.backtesting import reports
 from src.backtesting.replay_runner import BacktestResult
+from src.strategy_engine.evaluator import evaluate_backtest_row
 
 MIN_EVIDENCE_TRADES = 5
 MAX_LEARNED_PARAMETER_SETS = 24
@@ -29,10 +30,15 @@ _COMMON_FEATURES = (
     "active_wds", "raw_wds", "wds_tier", "dominant_wing_side", "gamma_regime",
     "gamma_relationship", "primary_gamma", "secondary_gamma",
     "spot_relation_primary_gamma", "spot_relation_secondary_gamma",
-    "credit", "credit_bucket", "max_risk", "reward_risk", "distance_to_short",
+    "credit", "credit_bucket", "max_risk", "max_risk_dollars", "reward_risk", "distance_to_short",
     "distance_bucket", "score", "selector_score", "selector_score_components",
     "tp_mode", "sl_mode", "exit_reason", "hold_minutes", "pnl_dollars",
-    "outcome", "month",
+    "outcome", "month", "archetype", "credit_pct_of_width",
+    "credit_pct_of_width_bucket", "stop_loss_dollar_risk",
+    "credit_to_stop_risk", "credit_to_stop_risk_bucket",
+    "eod_exception_candidate", "risk_quality_label", "risk_quality_status",
+    "risk_quality_reason_codes", "regime_compatibility_label",
+    "regime_compatibility_reason_codes",
 )
 
 _PERFORMANCE_DIMENSIONS = (
@@ -51,6 +57,12 @@ _PERFORMANCE_DIMENSIONS = (
     ("gamma_regime", "gamma_regime"),
     ("gamma_relationship", "gamma_relationship"),
     ("tp_sl_config", "tp_sl_config"),
+    ("archetype", "archetype"),
+    ("risk_quality", "risk_quality_label"),
+    ("credit_pct_of_width", "credit_pct_of_width_bucket"),
+    ("credit_to_stop_risk", "credit_to_stop_risk_bucket"),
+    ("eod_exception", "eod_exception_candidate"),
+    ("regime_compatibility", "regime_compatibility_label"),
 )
 
 _INTERACTIONS = (
@@ -95,6 +107,7 @@ class LearningResult:
     no_trade_features: list[dict[str, Any]]
     performance_tables: dict[str, list[dict[str, Any]]]
     no_trade_blockers: list[dict[str, Any]]
+    risk_quality_rejections: list[dict[str, Any]]
     hypotheses: list[dict[str, Any]]
     learned_parameter_sets: list[dict[str, Any]]
     profitability_attribution: list[dict[str, Any]]
@@ -161,6 +174,32 @@ def distance_bucket(value: Any) -> str:
     return "50+"
 
 
+def credit_pct_of_width_bucket(value: Any) -> str:
+    ratio = _f(value)
+    if ratio is None:
+        return "Unavailable"
+    if ratio < 0.10:
+        return "<10%"
+    if ratio < 0.20:
+        return "10-19.99%"
+    if ratio < 0.30:
+        return "20-29.99%"
+    return "30%+"
+
+
+def credit_to_stop_risk_bucket(value: Any) -> str:
+    ratio = _f(value)
+    if ratio is None:
+        return "Unavailable"
+    if ratio < 0.50:
+        return "<0.50"
+    if ratio < 1.00:
+        return "0.50-0.99"
+    if ratio < 1.50:
+        return "1.00-1.49"
+    return "1.50+"
+
+
 def entry_time_bucket(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -219,6 +258,10 @@ def _feature_row(row: dict[str, Any], *, outcome_row: dict[str, Any] | None = No
     distance = _f(row.get("distance_from_spot_to_short"))
     pnl = _f(outcome_row.get("pnl_dollars"))
     date = str(row.get("date") or "")
+    risk_fields = evaluate_backtest_row({**row, **{
+        key: outcome_row.get(key, row.get(key))
+        for key in ("contracts", "tp_mode", "sl_mode", "historical_expectancy")
+    }})
     out.update({
         "profile_kind": row.get("preset_kind") or row.get("profile_kind"),
         "profile_family": _profile_family(row),
@@ -245,7 +288,14 @@ def _feature_row(row: dict[str, Any], *, outcome_row: dict[str, Any] | None = No
             f"{outcome_row.get('tp_mode') or 'Unknown TP'} / "
             f"{outcome_row.get('sl_mode') or 'Unknown SL'}"
         ),
+        **risk_fields,
     })
+    out["credit_pct_of_width_bucket"] = credit_pct_of_width_bucket(
+        out.get("credit_pct_of_width")
+    )
+    out["credit_to_stop_risk_bucket"] = credit_to_stop_risk_bucket(
+        out.get("credit_to_stop_risk")
+    )
     for key, value in _selector_components(row.get("selector_score_components")).items():
         if isinstance(value, (str, int, float, bool)) or value is None:
             out[f"selector_component_{key}"] = value
@@ -631,6 +681,28 @@ def no_trade_blocker_summary(no_trades: list[dict[str, Any]]) -> list[dict[str, 
     return rows
 
 
+def risk_quality_rejection_summary(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[str, dict[str, int]] = {}
+    for row in candidates:
+        status = str(row.get("risk_quality_status") or "unknown")
+        reasons = [
+            reason.strip()
+            for reason in str(row.get("risk_quality_reason_codes") or "").split(";")
+            if reason.strip()
+        ]
+        for reason in reasons:
+            item = counts.setdefault(reason, {"candidate_count": 0, "reject_count": 0, "warn_count": 0})
+            item["candidate_count"] += 1
+            item["reject_count"] += int(status == "reject")
+            item["warn_count"] += int(status == "warn")
+    return [
+        {"risk_quality_reason_code": reason, **values}
+        for reason, values in sorted(
+            counts.items(), key=lambda item: (-item[1]["reject_count"], -item[1]["candidate_count"], item[0])
+        )
+    ]
+
+
 def _best(tables: dict[str, list[dict[str, Any]]], key: str) -> dict[str, Any]:
     rows = tables.get(key, [])
     if not rows:
@@ -921,6 +993,7 @@ def run_learning(result: BacktestResult, config: LearningConfig | None = None) -
         contracts=config.contracts,
     )
     blockers = no_trade_blocker_summary(no_trades)
+    risk_rejections = risk_quality_rejection_summary(candidates)
     hypotheses, learned_sets = generate_hypotheses(tables, blockers)
     attribution = tables["feature_performance_summary"]
     interactions = feature_interaction_matrix(
@@ -953,6 +1026,7 @@ def run_learning(result: BacktestResult, config: LearningConfig | None = None) -
         no_trade_features=no_trades,
         performance_tables=tables,
         no_trade_blockers=blockers,
+        risk_quality_rejections=risk_rejections,
         hypotheses=hypotheses,
         learned_parameter_sets=learned_sets,
         profitability_attribution=attribution,
@@ -1036,7 +1110,14 @@ def write_learning_reports(result: LearningResult, out_dirs: list[Path]) -> list
         "by_exit_reason": (result.performance_tables["exit_reason"], ()),
         "by_month": (result.performance_tables["month"], ()),
         "by_profile_family": (result.performance_tables["profile_family"], ()),
+        "by_archetype": (result.performance_tables["archetype"], ()),
+        "by_risk_quality": (result.performance_tables["risk_quality"], ()),
+        "by_credit_pct_of_width": (result.performance_tables["credit_pct_of_width"], ()),
+        "by_credit_to_stop_risk": (result.performance_tables["credit_to_stop_risk"], ()),
+        "by_eod_exception": (result.performance_tables["eod_exception"], ()),
+        "by_regime_compatibility": (result.performance_tables["regime_compatibility"], ()),
         "no_trade_blocker_summary": (result.no_trade_blockers, ()),
+        "risk_quality_rejection_summary": (result.risk_quality_rejections, ()),
         "profitability_attribution_summary": (result.profitability_attribution, ()),
         "feature_interaction_matrix": (result.feature_interactions, ()),
         "win_driver_matrix": (result.win_drivers, ()),

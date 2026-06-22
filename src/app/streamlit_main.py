@@ -2546,6 +2546,88 @@ def render_learning_review() -> None:
             if latest.get("audit"):
                 st.markdown(latest["audit"])
 
+    st.divider()
+    st.markdown("#### Strategy Engine / Risk Quality")
+    st.caption(
+        "Research evaluation across credit spreads and long-premium archetypes. "
+        "This does not alter live selectors, profiles, quote validation, or execution behavior."
+    )
+    st.info(
+        "A $0.15 credit on a $5-wide spread is rejected as too cheap for its maximum risk. "
+        "A low-credit EOD exception is warning-only and requires 15 minutes or less, "
+        "sufficient distance, usable quotes, non-hostile regime context, and prospective evidence."
+    )
+    risk_tabs = st.tabs([
+        "Risk-quality labels",
+        "Credit / stop risk",
+        "Rejection reasons",
+        "Archetypes / regime",
+    ])
+    with risk_tabs[0]:
+        risk_rows = latest.get("by_risk_quality") or []
+        if risk_rows:
+            st.dataframe(risk_rows, width="stretch", hide_index=True)
+        else:
+            st.caption("Run the learning CLI to generate risk-quality attribution.")
+    with risk_tabs[1]:
+        cols = st.columns(2)
+        cols[0].markdown("**Credit as % of width**")
+        cols[0].dataframe(
+            latest.get("by_credit_pct_of_width") or [], width="stretch", hide_index=True
+        )
+        cols[1].markdown("**Credit to stop risk**")
+        cols[1].dataframe(
+            latest.get("by_credit_to_stop_risk") or [], width="stretch", hide_index=True
+        )
+    with risk_tabs[2]:
+        st.dataframe(
+            latest.get("risk_quality_rejection_summary") or [],
+            width="stretch",
+            hide_index=True,
+        )
+    with risk_tabs[3]:
+        st.dataframe(latest.get("by_archetype") or [], width="stretch", hide_index=True)
+        st.dataframe(
+            latest.get("by_regime_compatibility") or [], width="stretch", hide_index=True
+        )
+        st.caption(
+            "Long Call and Long Put payoff/risk models are available; historical replay "
+            "generation for those archetypes remains deferred."
+        )
+
+    from src.backtesting import optuna_optimizer as _OO
+
+    st.divider()
+    st.markdown("#### Optuna Research")
+    st.warning(
+        "Optuna is research-only and overfit-prone. Results never write profiles, "
+        "promote strategies, preview orders, or execute trades."
+    )
+    st.code(
+        "python -m scripts.backtest_optuna --symbol SPX --dte 0 --trials 100 "
+        "--timeout-seconds 900 --starting-balance 10000 --contracts 1 "
+        "--run-label optuna_spx_0dte_smoke",
+        language="bash",
+    )
+    optuna_latest = ch.read_optuna_research(_OO.optuna_latest_dir())
+    st.caption(f"Reading: `{optuna_latest['results_dir']}`")
+    if not optuna_latest["available"]:
+        st.info(optuna_latest["reason"])
+    else:
+        if optuna_latest.get("robustness_summary"):
+            st.markdown(optuna_latest["robustness_summary"])
+        optuna_tabs = st.tabs(["Best trials", "Parameter importance"])
+        with optuna_tabs[0]:
+            st.dataframe(
+                (optuna_latest.get("trials") or [])[:20], width="stretch", hide_index=True
+            )
+        with optuna_tabs[1]:
+            importance = optuna_latest.get("param_importance") or []
+            if importance:
+                st.dataframe(importance, width="stretch", hide_index=True)
+            else:
+                st.caption("Parameter importance needs more completed, varying trials.")
+
 
 def render_optimization_lab() -> None:
     """Phase 10G research-only optimization controls and latest results."""
