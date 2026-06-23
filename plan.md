@@ -74,7 +74,12 @@ letters.
 | **10H — optimization robustness review + candidate freezing** | RESEARCH REVIEW ONLY — run expanded deterministic grids, compare chronological split sensitivity, benchmark candidates against named controls/original profiles on identical dates, and freeze a disabled research-only profile only when repeatable robustness criteria pass. No strategy/selector/risk/quote-validation math changes and no execution/order paths. | ✅ |
 | **10I — live paper readiness + Tasty RTH reliability + candidate stress review** | OPERATIONAL READINESS ONLY — prioritize reliable Tasty/RTH diagnostics, consistent Live Cockpit/Run Strategy quote status, strict Start Paper Test gating, near-miss candidate stress review, and a small forward-paper readiness report. Hermes/ML/research-library automation deferred. No strategy/selector/risk math changes, quote-validation loosening, broker execution, or order preview. | ✅ |
 | **10J — operator readiness polish + morning paper-test runbook** | OPERATOR UX / RUNBOOKS ONLY — add an exact morning startup checklist, friendly blocker next-actions, RTH diagnostic commands, this week's forward-paper benchmark cards, EOD review checklist/runbooks, and a sanitized latest-readiness snapshot. No strategy/selector/risk math changes, quote-validation loosening, broker execution, order preview, Hermes, or ML. | 🚧 active |
-| **11 — Tastytrade execution readiness / live execution** *(deferred)* | The execution ladder — `manual_confirm` (cockpit shows the order ticket; human clicks Send in the broker UI) → `broker_paper` → `live_tiny` → `live`, gated by explicit mode escalation behind the Phase 3 safety gate. **Deferred** until the monitoring + paper-lifecycle + backtest tracks (9A/9B/10) are exercised. | ⏳ deferred |
+| **11A-11G — algo engine / regime / paper journal / alerts / Greek parity / RTH soak readiness** | RESEARCH + OBSERVABILITY ONLY — NO strategy/selector/risk/quote-validation math change, broker execution, order preview, automatic promotion, lockbox automation, or ML decision authority. Backtest-learning, profitability attribution, strategy engine + risk quality + Optuna, regime snapshots + reason-coded paper journal, Stone/Pete alert foundation, Greek API parity + Pete R0-R6 regime, and RTH live-paper soak *readiness* (preflight/readiness CLI, read-only review helpers, cockpit RTH Review). See detail sections below. | ✅ |
+| **11H — offline command layer + notification/voice dry-run + profile readiness + execution/ML roadmap** | OFFLINE / OBSERVABILITY / PLANNING ONLY — NO strategy/selector/risk/quote-validation math change, broker execution, broker paper orders, order preview, automatic promotion, lockbox automation, or ML decision authority. After-hours-capable using deterministic fixtures, existing journals/backtest/research outputs, and mock/sandbox providers. Hardens notification/voice dry-run, produces Pushover/voice preview artifacts, reviews severity routing + cooldown/suppression, builds a multi-profile readiness matrix, names tomorrow's RTH soak benchmark profiles, prepares backtest/research comparison, scaffolds Hermes/ML advisory-only architecture, and adds an operator roadmap/status surface. Makes **no live-RTH claims**. | 🚧 next |
+| **11I — first RTH soak review + fixes** *(proposed)* | REVIEW + FIXES ONLY — starts **only after a real RTH local-paper soak is captured**. Reviews live-paper artifacts, fixes readiness/review/reporting issues found in real RTH evidence. **No new strategy logic unless RTH evidence demands it.** No broker execution or order preview. | ⏳ proposed (needs real RTH capture) |
+| **11J — repeated RTH paper validation + promotion gates** *(proposed)* | VALIDATION + GATING ONLY — defines how many clean RTH sessions, paper trades, and quote-valid days are required before anything is eligible for execution-ladder work. Promotion criteria are explicit, auditable, and human-confirmed. No strategy/selector/risk math change, broker execution, or order preview. | ⏳ proposed |
+| **12 — Execution Ladder (12A-12E)** *(deferred; gated)* | EXECUTION READINESS — gated, staged, human-confirmed. 12A order-ticket schema + manual-confirm preview surface (no submit) → 12B broker dry-run / order-preview adapter (no route) → 12C broker paper / simulated broker adapter (no live) → 12D live tiny mode (one-contract max, hard caps, human confirmation) → 12E controlled live mode (only after Phase 11J promotion criteria). Every phase requires: kill switch, max daily loss, max open trades, position reconciliation, quote freshness, order-ticket audit trail, human confirmation for early live phases, and **no ML authority over execution**. See detail section below. | ⏳ deferred |
+| **Hermes / ML — research / advisory only** *(roadmap)* | RESEARCH / ADVISORY ONLY — NO automatic profile writes, NO live selection authority, NO execution authority. Feature-store schema, labels, model cards, Optuna experiment registry, historical replay dataset manifests, and an advisory confidence score. Outputs are read-only research inputs a human may consider; they never become trading authority. See detail section below. | ⏳ roadmap |
 
 Each phase is **shippable on its own**. We never depend on a later phase to
 use an earlier one.
@@ -970,3 +975,235 @@ Branch: `codex/phase-11g-rth-paper-soak-review`.
 6. Add deterministic no-network readiness/review fixtures and focused tests.
 7. Preserve all strategy, selector, risk, quote-validation, execution, and
    notification behavior. This phase observes and reports only.
+
+---
+
+## Phase 11H — Offline command layer + notification/voice dry-run + profile readiness + execution/ML roadmap
+
+Status: PLANNED (next). No branch yet. After-hours-capable.
+
+Phase 11G shipped RTH soak *readiness* tooling, but no real RTH session has
+been captured — the only live readiness smoke ran after hours and correctly
+stayed blocked. Phase 11H is the work we can do honestly tonight: everything
+here runs offline against deterministic fixtures, existing journals, existing
+backtest/research outputs, and mock/sandbox providers. Nothing in this phase
+observes a live RTH market, and nothing in this phase may claim it did.
+
+1. Harden the offline command layer. Make the existing readiness, review, and
+   portfolio-forward entry points runnable end-to-end with no network using
+   recorded fixtures and existing artifacts, so an operator can rehearse the
+   full premarket/EOD flow after hours and get deterministic output.
+2. Notification and voice dry-run hardening. Exercise the Phase 11E alert stack
+   in a delivery-disabled dry-run mode that renders every template, severity,
+   cooldown, and suppression decision to local preview artifacts instead of
+   sending. Pushover and voice remain disabled by default.
+3. Produce Pushover and voice preview artifacts. Write deterministic
+   rendered-message artifacts (text + metadata) for each alert reason code and
+   severity so message wording, routing, and throttling can be reviewed without
+   any external delivery.
+4. Review severity routing plus cooldown/suppression. Add a read-only audit that
+   replays recorded alert events through the routing/cooldown/debounce logic and
+   reports the resulting fire/suppress decisions with reason codes.
+5. Build a multi-profile readiness matrix. Compose the Phase 11G readiness
+   checks across all candidate profiles into one matrix (provider/Greek/regime/
+   quote/alert/lifecycle/output status per profile) with explicit
+   insufficient-data cells rather than inferred readiness.
+6. Identify tomorrow's RTH soak benchmark profiles. From the readiness matrix
+   and existing backtest/forward-paper research, name the specific profiles to
+   run in the next real RTH soak, with the rationale, expected behavior, and the
+   evidence still missing. This is a recommendation for a human, not a
+   promotion.
+7. Prepare backtest/research comparison. Stage the comparison inputs (existing
+   replay/backtest/forward outputs) so that once a real RTH soak exists, live
+   behavior can be lined up against research expectations without rebuilding the
+   pipeline.
+8. Scaffold the Hermes/ML advisory-only architecture. Create the directory,
+   schema stubs, and interface boundaries described in the Hermes / ML roadmap
+   section below — types and contracts only, advisory-only, with no model
+   training, no profile writes, and no selection or execution authority.
+9. Add an operator roadmap/status surface. Add a cockpit/CLI surface that shows
+   phase status, the readiness matrix, named benchmark profiles, and the
+   outstanding RTH-evidence gaps in plain language, so the operator can see what
+   is proven versus pending.
+
+Safety boundaries (load-bearing — boring on purpose):
+
+- No live-RTH claims. Every artifact this phase produces is stamped offline /
+  fixture / dry-run and states plainly that it does not constitute live-RTH
+  evidence.
+- Notification delivery stays globally disabled by default; dry-run renders to
+  local artifacts only. No Pushover send, no audible voice in CI/fixtures.
+- No changes to strategy, selector, risk, or quote-validation math. No change to
+  quote-validation thresholds.
+- No broker execution, broker paper orders, or order preview.
+- No automatic promotion and no lockbox automation.
+- Hermes/ML is scaffolding only: no decision, selection, profile-write, or
+  execution authority.
+- Dashboard, ZeroSigma API, and worker repositories remain read-only.
+
+---
+
+## Phase 11I — First RTH soak review + fixes (proposed)
+
+Status: PROPOSED. Does not start until a real RTH local-paper soak is captured.
+
+Phase 11I is intentionally empty of pre-written conclusions. It begins only
+once an actual regular-trading-hours local-paper soak has been recorded with the
+Phase 11G/11H tooling. Its job is to look at the first real evidence and fix
+what reality breaks.
+
+1. Confirm a real RTH soak exists. Verify that captured artifacts come from a
+   genuine RTH session (live quotes that passed validation, real regime
+   transitions, real lifecycle events) and not from an after-hours or fixture
+   run. If the evidence is not real RTH, this phase does not start.
+2. Review live-paper artifacts. Walk the captured alerts, regime transitions,
+   Greek availability, quote behavior, and paper-trade lifecycle against what
+   the readiness tooling predicted.
+3. Fix readiness, review, and reporting issues. Correct defects exposed by real
+   RTH data — false readiness passes, missing or misclassified events, reporting
+   gaps, insufficient-data handling that was wrong under live conditions.
+4. Record the gap between expectation and reality. Document where offline
+   fixtures and dry-runs diverged from live behavior so future fixtures are more
+   honest.
+
+Safety boundaries (load-bearing):
+
+- No new strategy logic unless the real RTH evidence specifically demands it,
+  and then only the minimum the evidence requires, called out explicitly.
+- No broker execution, broker paper orders, or order preview.
+- No automatic promotion and no lockbox automation.
+- No ML decision, selection, profile-write, or execution authority.
+- Strategy, selector, risk, and quote-validation math unchanged absent explicit
+  RTH-evidence justification.
+
+---
+
+## Phase 11J — Repeated RTH paper validation + promotion gates (proposed)
+
+Status: PROPOSED. Defines the bar that must be cleared before execution work.
+
+Phase 11J answers one question precisely: how much clean real-world evidence is
+required before anything is allowed to move toward the execution ladder. The
+gates are explicit, auditable, and human-confirmed. The numbers below are
+proposed defaults to be ratified before this phase begins; they are deliberately
+conservative.
+
+1. Define the clean-session bar. A minimum number of distinct RTH paper sessions
+   that complete without readiness failures or tooling errors (proposed: at
+   least 10 clean RTH sessions).
+2. Define the paper-trade bar. A minimum number of reason-coded paper trades
+   through the full entry/manage/exit lifecycle with sane outcomes (proposed: at
+   least 30 paper trades across varied regimes).
+3. Define the quote-quality bar. A minimum number of quote-valid days where live
+   quotes passed the unchanged validation rules for the required strikes
+   (proposed: at least 10 quote-valid RTH days).
+4. Define per-profile promotion criteria. State, per profile, the combination of
+   the above plus regime coverage required before that profile is *eligible* for
+   execution-ladder consideration. Eligibility is not promotion.
+5. Make the gate auditable and human-confirmed. Produce a deterministic
+   promotion-readiness report; a human must explicitly confirm the gate is met.
+   No automatic promotion.
+
+Safety boundaries (load-bearing):
+
+- Meeting the gate makes a profile *eligible* for Phase 12 work only. It never
+  auto-enables execution, never changes selection, and never writes profiles.
+- No automatic promotion and no lockbox automation.
+- No strategy/selector/risk/quote-validation math change.
+- No broker execution, broker paper orders, or order preview in this phase.
+- No ML authority over the gate; ML output, if any, is advisory context only.
+
+---
+
+## Phase 12 — Execution Ladder (deferred; gated)
+
+Status: DEFERRED. Begins only after Phase 11J promotion criteria are met and
+human-confirmed. Each sub-phase is shippable on its own and never auto-advances
+to the next.
+
+The execution ladder is where real money eventually becomes possible, so the
+safety controls here are load-bearing and must exist in every sub-phase from the
+very first. Escalation between sub-phases is a deliberate, human-confirmed
+decision, never an automatic consequence of metrics.
+
+Required safety controls (present in every sub-phase, 12A onward):
+
+- Kill switch — a single, obvious, always-available stop that halts all order
+  activity immediately.
+- Max daily loss — a hard daily loss limit that blocks further activity when
+  breached.
+- Max open trades — a hard cap on concurrent open positions.
+- Position reconciliation — positions are reconciled against the broker/source
+  of truth before and during any order activity; divergence fails closed.
+- Quote freshness — no order activity on stale quotes; the unchanged
+  quote-validation rules gate every ticket.
+- Order-ticket audit trail — every ticket (preview or live) is written to an
+  append-only audit log with reason codes.
+- Human confirmation — required for all early live phases; the system never
+  submits a live order without an explicit human action.
+- No ML authority over execution — ML is never in the order path; it may only
+  provide advisory context a human reads.
+
+Sub-phases:
+
+1. 12A — Order-ticket schema + manual-confirm preview surface. Define the
+   deterministic order-ticket schema and render it in a cockpit preview. The
+   operator sees the exact intended order; the system does **not** submit. Human
+   places any order manually in the broker UI.
+2. 12B — Broker dry-run / order-preview adapter. Add a broker adapter that
+   validates and previews an order against the broker's dry-run/preview
+   endpoint. **No route, no submit** — preview only.
+3. 12C — Broker paper / simulated broker adapter. Route tickets to a broker
+   paper or simulated-broker environment. **No live orders.** Exercises the full
+   submit/ack/fill/reconcile path against non-live infrastructure.
+4. 12D — Live tiny mode. The first live orders, strictly bounded: one-contract
+   maximum, hard caps enforced, and explicit human confirmation on every order.
+   The smallest possible real footprint to validate the live path.
+5. 12E — Controlled live mode. Broader live operation, enabled only after the
+   Phase 11J promotion criteria are met and confirmed, with all controls above
+   continuously enforced.
+
+Safety boundaries (load-bearing):
+
+- No sub-phase auto-advances; every escalation is human-confirmed.
+- The eight required controls above exist from 12A; later phases add capability,
+  never remove a control.
+- No ML decision, selection, profile-write, or execution authority at any point
+  in the ladder.
+- No lockbox automation; secret/credential handling stays manual and reviewed.
+- Dashboard, ZeroSigma API, and worker repositories remain read-only.
+
+---
+
+## Hermes / ML roadmap (research / advisory only)
+
+Status: ROADMAP. Advisory and research only. Scaffolding may begin in Phase 11H.
+
+Hermes/ML is permanently fenced off from authority in this system. It exists to
+help a human think, never to act. Everything below is research infrastructure
+and advisory output; none of it may select trades, write profiles, or touch
+execution.
+
+1. Feature-store schema. Define a versioned, documented schema for research
+   features derived from existing regime/Greek/lifecycle/backtest data, with
+   explicit source, units, and availability per field.
+2. Labels. Define label definitions and how outcomes are derived from the
+   reason-coded paper/backtest journals, with no lookahead.
+3. Model cards. Every model has a card stating purpose, inputs, training data,
+   known limits, and the explicit statement that it has no trading authority.
+4. Optuna experiment registry. A reproducible registry of experiments,
+   parameters, and results, separate from any live profile.
+5. Historical replay dataset manifests. Versioned manifests describing the exact
+   datasets used for replay/training so any result is reproducible.
+6. Advisory confidence score. An advisory-only score a human may consider. It is
+   surfaced as context, clearly labeled advisory, and is never an input to
+   selection or execution.
+
+Safety boundaries (load-bearing):
+
+- No automatic profile writes.
+- No live selection authority.
+- No execution authority — Hermes/ML is never in the order path.
+- All outputs are read-only research/advisory inputs, clearly labeled as such.
+- Research datasets and experiments stay isolated from live profiles and the
+  execution ladder.

@@ -3595,3 +3595,61 @@ Phase 11G implementation results:
   Browser QA verified summary values, mode switching, downloads, and all four
   review tables with no browser errors. Existing unrelated Vega empty-extent
   warnings remain on older chart surfaces; screenshot capture timed out.
+
+## 2026-06-22 — Phase 11H planning + execution/ML roadmap (after-hours, pre-RTH-evidence)
+
+Planning-only entry. No code changed — `plan.md` and `notes.md` only.
+
+Why now, and why this is honest after-hours work: Phase 11G shipped RTH
+soak *readiness* tooling, but no real regular-trading-hours session has been
+captured. The only live readiness smoke ran after hours and correctly stayed
+blocked (single Tasty quote failed the unchanged absolute-spread rule; required
+strikes missing). So we cannot pretend after-hours validation proves live RTH
+behavior. Instead we planned the next phase around work that is genuinely doable
+tonight using deterministic fixtures, existing journals, existing
+backtest/research outputs, and mock/sandbox providers — and we explicitly gated
+everything that needs real RTH evidence behind later phases.
+
+What was added to `plan.md`:
+
+- §2 roadmap table: replaced the single coarse "11 — execution readiness
+  (deferred)" row (now outdated, since 11A-11G shipped as detail sections) with
+  accurate rows — 11A-11G done, 11H next, 11I/11J proposed, 12 deferred,
+  Hermes/ML roadmap.
+- Phase 11H — offline command layer + notification/voice dry-run + profile
+  readiness + execution/ML roadmap. After-hours-capable: offline command-layer
+  hardening, notification/voice dry-run with Pushover/voice preview artifacts,
+  severity routing + cooldown/suppression review, a multi-profile readiness
+  matrix, named benchmark profiles for tomorrow's RTH soak, backtest/research
+  comparison prep, Hermes/ML advisory-only scaffold, and an operator
+  roadmap/status surface. Makes no live-RTH claims.
+- Phase 11I (proposed) — first RTH soak review + fixes. Starts only after a real
+  RTH local-paper soak is captured; reviews live-paper artifacts and fixes
+  readiness/review/reporting issues. No new strategy logic unless RTH evidence
+  demands it.
+- Phase 11J (proposed) — repeated RTH paper validation + promotion gates.
+  Explicit, human-confirmed bar before any execution-ladder work (proposed
+  conservative defaults: at least 10 clean RTH sessions, at least 30 reason-coded
+  paper trades across varied regimes, at least 10 quote-valid RTH days, plus
+  per-profile criteria). Eligibility is not promotion; no automatic promotion.
+- Phase 12 — Execution Ladder (deferred; gated). 12A order-ticket schema +
+  manual-confirm preview (no submit), 12B broker dry-run/preview adapter (no
+  route), 12C broker paper / simulated adapter (no live), 12D live tiny mode
+  (one-contract max, hard caps, human confirmation), 12E controlled live (only
+  after 11J). Eight load-bearing controls required from 12A onward: kill switch,
+  max daily loss, max open trades, position reconciliation, quote freshness,
+  order-ticket audit trail, human confirmation for early live, and no ML
+  authority over execution.
+- Hermes / ML roadmap (research/advisory only). Feature-store schema, labels,
+  model cards, Optuna experiment registry, replay dataset manifests, advisory
+  confidence score. No automatic profile writes, no live selection authority, no
+  execution authority — outputs are read-only research/advisory inputs a human
+  may consider.
+
+Safety boundaries are deliberately boring and load-bearing, and were encoded
+into every new section: no live-RTH claims this phase; notification delivery
+stays disabled by default (dry-run renders to local artifacts only); no changes
+to strategy, selector, risk, or quote-validation math/thresholds; no broker
+execution, broker paper orders, or order preview; no automatic promotion or
+lockbox automation; Hermes/ML never gets selection, profile-write, or execution
+authority; Dashboard/API/worker repositories remain read-only.
