@@ -980,7 +980,8 @@ Branch: `codex/phase-11g-rth-paper-soak-review`.
 
 ## Phase 11H — Offline command layer + notification/voice dry-run + profile readiness + execution/ML roadmap
 
-Status: PLANNED (next). No branch yet. After-hours-capable.
+Status: ACTIVE. Phase 11H-A offline foundation implemented; later Phase 11H
+slices remain deferred. After-hours-capable.
 
 Phase 11G shipped RTH soak *readiness* tooling, but no real RTH session has
 been captured — the only live readiness smoke ran after hours and correctly
@@ -1040,6 +1041,36 @@ Safety boundaries (load-bearing — boring on purpose):
 - Hermes/ML is scaffolding only: no decision, selection, profile-write, or
   execution authority.
 - Dashboard, ZeroSigma API, and worker repositories remain read-only.
+
+### Phase 11H-A — Offline command layer foundation
+
+Implemented on `codex/phase-11h-offline-command-layer`:
+
+- Added an offline operator status artifact that separates ready-now local work,
+  tasks blocked on real RTH evidence, deferred Phase 12 execution work, and
+  deferred Hermes/ML advisory work.
+- Added a multi-profile readiness matrix over saved profile YAML and existing
+  comparison, backtest, paper, readiness, and soak files. Every row includes its
+  evidence status and blocker codes; fixture and after-hours files are never
+  accepted as real RTH evidence.
+- Named `morning_5k_call_tp75_control` and
+  `morning_2k_call_no_tp_control` as the primary and secondary next-soak
+  benchmarks based on the saved all-data comparison. These labels are human
+  research recommendations, not profile promotion or approval.
+- Added deterministic notification and voice dry-run previews with local
+  Markdown/JSON/CSV output. Suppression and backend-enabled state are shown,
+  while delivery attempts, voice queueing, playback, and network calls remain
+  absent.
+- Added display-only cockpit sections for Operator Status / Roadmap, Profile
+  Readiness Matrix, and Notification / Voice Dry-Run Preview. No start, stop,
+  send, promotion, order, or execution control was added.
+- Writes timestamped copies under `outputs/reviews/runs/` and refreshes the
+  matching files under `outputs/reviews/latest/`. Generated outputs remain
+  ignored by Git.
+
+Deferred from later Phase 11H slices: broader offline rehearsal orchestration,
+all-template severity catalogs, comparison-input staging, and Hermes/ML schema
+scaffolding. No live-RTH claim is made by Phase 11H-A.
 
 ---
 

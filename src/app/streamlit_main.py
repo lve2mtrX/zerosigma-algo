@@ -59,6 +59,8 @@ from src.reporting.config_change_log import (  # noqa: E402
     log_session_snapshot,
 )
 from src.reporting.eod import generate_eod_summary  # noqa: E402
+from src.reviews import notification_dry_run as notification_review  # noqa: E402
+from src.reviews import operator_command as operator_review  # noqa: E402
 from src.reviews import rth_soak as soak_review  # noqa: E402
 from src.risk.filters import apply_filters  # noqa: E402
 from src.risk.limits import (  # noqa: E402
@@ -2059,6 +2061,137 @@ def render_rth_review() -> None:
                     st.caption("No rows recorded for this review.")
 
 
+def render_offline_command_layer() -> None:
+    """Display saved Phase 11H-A artifacts without invoking any command or backend."""
+    command = operator_review.load_latest_operator_command(OUTPUT_ROOT)
+    notification = notification_review.load_latest_notification_dry_run(OUTPUT_ROOT)
+    st.markdown("**Operator Status / Roadmap**")
+    st.caption(
+        "Offline local-file review only. This surface does not prove live-RTH behavior, "
+        "start a runner, send a notification, or promote a profile."
+    )
+    if not command.get("available"):
+        st.info(
+            "No Phase 11H-A operator artifact yet. Generate it offline with "
+            "`python -m scripts.review_profile_readiness`."
+        )
+    else:
+        status = command.get("operator_status") or {}
+        matrix = command.get("profile_matrix") or {}
+        summary = status.get("profile_matrix_summary") or {}
+        benchmark_ids = matrix.get("benchmark_profile_ids") or []
+        cols = st.columns(4)
+        cols[0].metric("Phase", "11H-A")
+        cols[1].metric("Evidence", "Offline only")
+        cols[2].metric("Profiles reviewed", summary.get("profile_count", 0))
+        cols[3].metric("Next-soak benchmarks", len(benchmark_ids))
+        st.info(status.get("next_rth_action") or "A real RTH readiness pass is still required.")
+        if simple_mode:
+            offline_tasks = status.get("offline_ready_tasks") or []
+            blocked_tasks = status.get("blocked_on_rth_tasks") or []
+            st.markdown("**Ready offline**")
+            st.markdown("\n".join(f"- {item}" for item in offline_tasks) or "- No tasks recorded.")
+            st.markdown("**Waiting for real RTH**")
+            st.markdown("\n".join(f"- {item}" for item in blocked_tasks) or "- No tasks recorded.")
+        else:
+            with st.expander("Raw roadmap, deferrals, and safety boundaries", expanded=False):
+                for label, key in (
+                    ("Offline-ready", "offline_ready_tasks"),
+                    ("Blocked on RTH", "blocked_on_rth_tasks"),
+                    ("Deferred execution", "deferred_execution_tasks"),
+                    ("Deferred Hermes / ML", "deferred_hermes_ml_tasks"),
+                    ("Safety boundaries", "safety_boundaries"),
+                ):
+                    st.markdown(f"**{label}**")
+                    st.markdown(
+                        "\n".join(f"- {item}" for item in status.get(key) or [])
+                        or "- No items recorded."
+                    )
+
+        st.markdown("**Profile Readiness Matrix**")
+        matrix_rows = matrix.get("rows") or []
+        if matrix_rows:
+            if simple_mode:
+                displayed = [
+                    {
+                        "Profile": row.get("profile_name"),
+                        "Category": str(row.get("profile_category") or "").title(),
+                        "DTE": row.get("target_dte"),
+                        "Side policy": str(row.get("side_policy") or "").title(),
+                        "Backtest": row.get("backtest_status"),
+                        "Paper evidence": row.get("forward_paper_status"),
+                        "RTH status": str(row.get("rth_soak_eligibility") or "")
+                        .replace("_", " ").title(),
+                        "Benchmark": row.get("benchmark_label"),
+                    }
+                    for row in matrix_rows
+                ]
+            else:
+                displayed = [
+                    {
+                        "profile_id": row.get("profile_id"),
+                        "category": row.get("profile_category"),
+                        "symbol": row.get("symbol"),
+                        "dte": row.get("target_dte"),
+                        "side_policy": row.get("side_policy"),
+                        "selector": row.get("selector_mode"),
+                        "tp": row.get("tp_metadata"),
+                        "sl": row.get("sl_metadata"),
+                        "providers": (
+                            f"{row.get('structure_provider')} / {row.get('quote_provider')}"
+                        ),
+                        "backtest_status": row.get("backtest_status"),
+                        "forward_paper_status": row.get("forward_paper_status"),
+                        "saved_readiness": row.get("saved_readiness_status"),
+                        "rth_soak_eligibility": row.get("rth_soak_eligibility"),
+                        "benchmark_label": row.get("benchmark_label"),
+                        "blocker_reason_codes": "; ".join(
+                            row.get("blocker_reason_codes") or []
+                        ),
+                    }
+                    for row in matrix_rows
+                ]
+            st.dataframe(displayed, width="stretch", hide_index=True)
+        else:
+            st.caption("No profile rows were written to the latest offline artifact.")
+
+    st.markdown("**Notification / Voice Dry-Run Preview**")
+    if not notification.get("available"):
+        st.info(
+            "No dry-run preview yet. Generate one offline with "
+            "`python -m scripts.review_notification_dry_run --fixture sample`."
+        )
+        return
+    backend = notification.get("backend_state") or {}
+    cols = st.columns(5)
+    cols[0].metric("Events", notification.get("event_count", 0))
+    cols[1].metric("Suppressed", notification.get("suppressed_event_count", 0))
+    cols[2].metric("Pushover", "Enabled" if backend.get("pushover_enabled") else "Disabled")
+    cols[3].metric("Voice", "Enabled" if backend.get("voice_enabled") else "Disabled")
+    cols[4].metric("Sent / spoken", notification.get("dry_run_sent_count", 0))
+    preview_rows = notification.get("rows") or []
+    if simple_mode:
+        display_rows = [
+            {
+                "Severity": str(row.get("severity") or "").title(),
+                "Source": str(row.get("source") or "").replace("_", " ").title(),
+                "Push preview": (
+                    f"{row.get('push_preview_title')}: {row.get('push_preview_message')}"
+                ),
+                "Voice preview": row.get("voice_preview"),
+                "Status": "Suppressed by cooldown" if row.get("suppressed") else "Preview only",
+            }
+            for row in preview_rows
+        ]
+    else:
+        display_rows = preview_rows
+    if display_rows:
+        st.dataframe(display_rows, width="stretch", hide_index=True)
+    else:
+        st.caption("No alert events were available for preview.")
+    st.caption(notification.get("failure_handling") or "No backend was invoked.")
+
+
 def render_portfolio() -> None:
     st.subheader("💼 Zσ Paper Portfolio")
     st.markdown(ui.pill("LOCAL PAPER ONLY — NO BROKER ORDER SENT", "green"),
@@ -2068,6 +2201,8 @@ def render_portfolio() -> None:
         "exits across profiles). No broker orders, no order preview, no live execution."
     )
     render_alert_center()
+    st.divider()
+    render_offline_command_layer()
     st.divider()
     render_rth_review()
     st.divider()
