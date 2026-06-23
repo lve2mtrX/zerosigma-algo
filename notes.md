@@ -3653,3 +3653,34 @@ to strategy, selector, risk, or quote-validation math/thresholds; no broker
 execution, broker paper orders, or order preview; no automatic promotion or
 lockbox automation; Hermes/ML never gets selection, profile-write, or execution
 authority; Dashboard/API/worker repositories remain read-only.
+
+---
+
+## 2026-06-22 — Phase 11H-A implementation: offline command foundation
+
+Branch: `codex/phase-11h-offline-command-layer`.
+
+- Added `scripts.review_profile_readiness` and pure local-file helpers for an
+  operator roadmap plus a 14-profile readiness matrix. Outputs are written as
+  Markdown/JSON/CSV to timestamped review runs and `outputs/reviews/latest/`.
+- The matrix reads saved profile metadata and existing offline artifacts only.
+  It records symbol, DTE, side/selector, TP/SL, provider mode, historical
+  comparison status, local-paper status, saved readiness status, explicit
+  blockers, and benchmark labels.
+- The saved 147-session comparison supports primary/secondary benchmark labels
+  for the two morning call controls. Both remain pending a real RTH readiness
+  pass; positive controls remain comparison-only and are not promoted.
+- Added `scripts.review_notification_dry_run`. Its deterministic fixture renders
+  three events into four reason-code preview rows, including one cooldown-
+  suppressed duplicate. Pushover and voice are disabled in the fixture and the
+  sent/spoken count is zero.
+- Dry-run output shows push wording, spoken wording, severity, source, reason,
+  cooldown/suppression, backend state, and failure-isolation notes. It does not
+  import notification backends or invoke network, queue, playback, lifecycle,
+  selector, strategy, broker, preview, promotion, or execution behavior.
+- Added display-only Paper Portfolio sections for Operator Status / Roadmap,
+  Profile Readiness Matrix, and Notification / Voice Dry-Run Preview. The new
+  surface has no start, stop, send, or promotion button.
+- Focused tests cover pure helpers, both CLI smokes, deterministic previews,
+  artifact copies, evidence labels, cockpit source, and forbidden paths. Final
+  repository validation runs only after this implementation note is recorded.
